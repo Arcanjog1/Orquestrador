@@ -14,3 +14,6 @@ config.json
 # OS noise
 Thumbs.db
 .DS_Store
+
+# Spike report is generated per-machine
+spike/spike-report.txt
