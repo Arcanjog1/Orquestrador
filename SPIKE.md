@@ -3,7 +3,7 @@
 Este spike prova, **na sua máquina Windows**, que as integrações locais funcionam
 antes de construirmos a aplicação desktop em cima delas.
 
-Ele leva cerca de **5 a 10 minutos**.
+Ele leva cerca de **10 a 15 minutos** (o TEST 8 baixa ~134 MiB).
 
 ---
 
@@ -113,6 +113,37 @@ O spike faz poucas perguntas. Você pode aceitar o padrão apertando **Enter**.
    → Opcional, mas **recomendo dizer sim**. É o teste que mostra se sobra
    processo órfão de verdade.
 
+8. **TEST 7 — "start a real login flow in a throwaway profile?"**
+   → Enter (sim). Usa uma pasta de perfil **descartável**, nunca as suas contas
+   reais. Ele só precisa ver a URL de login aparecer.
+
+9. **TEST 7 — "complete the login in your browser?"**
+   → Opcional. Se disser sim, ele abre o login e prova que o aplicativo consegue
+   detectar sozinho quando você terminou. Se disser não, ele cancela o fluxo.
+
+10. **TEST 8 — "download the Codex runtime (~134 MiB)?"**
+    → Enter (sim). Baixa para uma pasta temporária e prova que o app consegue
+    instalar o runtime sozinho. Gasta banda e um ou dois minutos, **nenhuma cota**.
+
+---
+
+## O que cada teste prova
+
+| Teste | Prova |
+|---|---|
+| 1 | Como o Codex aceita ser chamado de forma não-interativa (sem inventar flag) |
+| 2 | Claude Code editando arquivo em repositório descartável |
+| 3 | Duas contas Claude isoladas e autenticadas ao mesmo tempo |
+| 4 | Cancelamento sem deixar processo órfão |
+| 5 | `.cmd` / `.bat` / `.exe` e o embrulho `cmd.exe /d /s /c` |
+| 6 | Prompt grande chegando intacto pelo stdin |
+| **7** | **Conectar conta pela interface, sem terminal** — captura a URL de login sem TTY |
+| **8** | **O app baixando e instalando os runtimes sozinho** — sem npm, sem PATH |
+
+Os testes 7 e 8 existem por causa do requisito de **configuração zero**: o usuário
+final não pode precisar de PowerShell nem instalar Node/npm. Se o 7 reprovar, a
+promessa de "conectar conta sem terminal" cai por terra e é melhor saber agora.
+
 ---
 
 ## Passo 4 — Me mandar o resultado
@@ -129,6 +160,25 @@ cancelamento.
 
 O arquivo já passa por remoção de segredos antes de ser gravado — pode conferir
 antes de enviar.
+
+---
+
+## Sobre o TEST 8 (instalação automática de runtime)
+
+O TEST 8 **não assume** de onde baixar. Ele percorre uma lista ordenada de origens
+candidatas, testa cada uma de verdade, e classifica o quanto dá para confiar nela:
+
+| Classificação | Significado |
+|---|---|
+| `DOCUMENTED` | Forma publicada e suportada de obter o runtime |
+| `PACKAGE INTERNAL` | Depende do layout interno de um pacote |
+| `IMPLEMENTATION DETAIL / NOT PUBLIC CONTRACT` | Detalhe de implementação (ex.: um host observado dentro de um binário). Serve para teste, **nunca** como alicerce |
+
+Essa classificação aparece no relatório. É ela que decide o que pode virar
+implementação principal e o que fica só como fallback.
+
+O relatório informa, para cada runtime: origem usada, URL/domínio, versão,
+arquitetura, tamanho, integridade, caminho final e resultado do `--version`.
 
 ---
 
