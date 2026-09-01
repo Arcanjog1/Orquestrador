@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-tests/
+*.tsbuildinfo
+
+# Runtime data produced by the orchestrator
+.sessions/
+logs/
+profiles/
+
+# Local configuration may contain machine-specific paths
+config.json
+
+# OS noise
+Thumbs.db
+.DS_Store

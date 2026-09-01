@@ -1,0 +1,35 @@
+{
+  "name": "local-agent-orchestrator",
+  "version": "0.1.0",
+  "description": "Orquestrador local de agentes de programacao: Codex CLI supervisiona, Claude Code CLI executa.",
+  "type": "module",
+  "bin": {
+    "orchestrator": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:tests": "tsc -p tsconfig.test.json",
+    "clean": "node -e \"const f=require('fs');for(const d of ['dist','dist-tests'])f.rmSync(d,{recursive:true,force:true})\"",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "pretest": "npm run build && npm run build:tests",
+    "test": "node --test \"dist-tests/tests/**/*.test.js\"",
+    "orchestrator": "node dist/index.js"
+  },
+  "keywords": [
+    "orchestrator",
+    "codex",
+    "claude-code",
+    "cli"
+  ],
+  "license": "MIT",
+  "private": true,
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
