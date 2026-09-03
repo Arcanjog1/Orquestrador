@@ -17,3 +17,19 @@ Thumbs.db
 
 # Spike report is generated per-machine
 spike/spike-report.txt
+
+# Local agent/CLI state must never be committed: these files carry account
+# identifiers, machine fingerprints and, in other layouts, credentials.
+.claude.json
+.claude.json.backup*
+.claude/
+.credentials.json
+.codex/
+relative/
+profiles/**/.claude.json
+
+# Electron / desktop build output
+apps/desktop/dist/
+apps/desktop/dist-renderer/
+apps/desktop/release/
+out/
