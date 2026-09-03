@@ -1,15 +1,17 @@
 {
   "name": "ai-orchestrator-desktop",
+  "productName": "AI Orchestrator",
   "version": "0.1.0",
   "description": "AI Orchestrator desktop shell: Electron main, preload and renderer.",
   "private": true,
-  "main": "dist/electron/main.js",
+  "type": "module",
+  "main": "dist/electron/main.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build:main": "node scripts/build-main.mjs",
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer",
-    "self-test": "npm run build && electron dist/electron/main.js --self-test",
+    "self-test": "npm run build && electron dist/electron/main.cjs --self-test",
     "package:dir": "npm run build && electron-builder --dir",
     "package:win": "npm run build && electron-builder --win nsis --publish never",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -22,10 +24,9 @@
     "electron": "44.1.1",
     "electron-builder": "26.15.3",
     "esbuild": "0.28.2",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "vite": "8.2.2"
   },
-  "dependencies": {
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
-  }
+  "author": "AI Orchestrator"
 }

@@ -80,11 +80,20 @@ export function buildFakeArchive(
 }
 
 /** A `fetch` that serves prepared responses by URL. */
-export function makeFetch(routes: Record<string, { status?: number; body?: unknown; bytes?: Buffer }>): typeof fetch {
+export interface FakeRoute {
+  status?: number;
+  body?: unknown;
+  bytes?: Buffer;
+  /** Runs before the response is built, e.g. to cancel mid-download. */
+  onRequest?: () => void;
+}
+
+export function makeFetch(routes: Record<string, FakeRoute>): typeof fetch {
   return (async (input: string | URL | Request) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const route = routes[url];
     if (!route) return new Response('not found', { status: 404 });
+    route.onRequest?.();
     if (route.bytes) {
       return new Response(route.bytes, {
         status: route.status ?? 200,

@@ -11,10 +11,19 @@ import { defaultClaudeSources } from '../src/runtime/sources/claude-sources.js';
 import { MinGitReleaseSource } from '../src/runtime/sources/git-sources.js';
 import { makeFetch } from './helpers/fake-runtime-source.js';
 
-function withTempHome<T>(fn: (paths: ReturnType<typeof appPaths>) => T): T {
+/**
+ * Runs `fn` against a throwaway app home and removes it afterwards.
+ *
+ * Async on purpose: a synchronous version deletes the directory the moment
+ * the callback hands back its promise, so the body of an async test would run
+ * against a home that no longer exists.
+ */
+async function withTempHome<T>(
+  fn: (paths: ReturnType<typeof appPaths>) => T | Promise<T>,
+): Promise<T> {
   const home = mkdtempSync(join(tmpdir(), 'lao-mgr-'));
   try {
-    return fn(ensureAppPaths(appPaths({ AI_ORCHESTRATOR_HOME: home } as NodeJS.ProcessEnv)));
+    return await fn(ensureAppPaths(appPaths({ AI_ORCHESTRATOR_HOME: home } as NodeJS.ProcessEnv)));
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -107,12 +116,26 @@ test('MinGit falls back to the busybox build when only that is published', async
 
 test('prepareAll collects failures instead of stopping at the first one', async () => {
   await withTempHome(async (paths) => {
-    // Every network call fails, so nothing can be installed.
-    const manager = new RuntimeManager({ paths, fetchImpl: makeFetch({}) });
-    const result = await manager.prepareAll();
+    // Nothing installed and nothing installable: an empty PATH hides whatever
+    // the developer's own machine happens to have, so the assertion below is
+    // about the behaviour and not about this host, and every network call
+    // fails so nothing can be acquired either.
+    const realPath = process.env.PATH;
+    process.env.PATH = '';
+    let result;
+    try {
+      const manager = new RuntimeManager({ paths, fetchImpl: makeFetch({}) });
+      result = await manager.prepareAll();
+    } finally {
+      process.env.PATH = realPath;
+    }
 
     assert.equal(result.ready, false);
-    assert.ok(result.failures.length >= 2, 'each unmet runtime should be reported');
+    assert.equal(
+      result.failures.length,
+      3,
+      'one failure per runtime: the first one must not end the run',
+    );
     for (const failure of result.failures) {
       assert.ok(failure.message.length > 0);
       assert.ok(failure.remedy.length > 0);
@@ -121,8 +144,8 @@ test('prepareAll collects failures instead of stopping at the first one', async 
   });
 });
 
-test('asking for an unknown runtime is a programming error, not a silent null', () => {
-  withTempHome((paths) => {
+test('asking for an unknown runtime is a programming error, not a silent null', async () => {
+  await withTempHome((paths) => {
     const manager = new RuntimeManager({ paths, fetchImpl: makeFetch({}) });
     assert.throws(() => manager.get('nope' as 'codex'), /No runtime registered/);
   });

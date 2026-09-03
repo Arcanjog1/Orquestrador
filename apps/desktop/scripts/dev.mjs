@@ -30,7 +30,7 @@ await new Promise((resolve) => setTimeout(resolve, 1200));
 
 const electron = spawn(
   join(root, 'node_modules', '.bin', 'electron'),
-  [join(root, 'dist', 'electron', 'main.js')],
+  [join(root, 'dist', 'electron', 'main.cjs')],
   {
     cwd: root,
     stdio: 'inherit',

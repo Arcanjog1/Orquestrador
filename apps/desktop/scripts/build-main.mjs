@@ -34,8 +34,8 @@ const common = {
 };
 
 const targets = [
-  { entry: join(root, 'src/electron/main.ts'), out: join(root, 'dist/electron/main.js') },
-  { entry: join(root, 'src/electron/preload.ts'), out: join(root, 'dist/electron/preload.js') },
+  { entry: join(root, 'src/electron/main.ts'), out: join(root, 'dist/electron/main.cjs') },
+  { entry: join(root, 'src/electron/preload.ts'), out: join(root, 'dist/electron/preload.cjs') },
 ];
 
 for (const target of targets) {

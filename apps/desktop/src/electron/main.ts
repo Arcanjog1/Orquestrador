@@ -97,7 +97,7 @@ function createWindow(): BrowserWindow {
     backgroundColor: '#0f1115',
     title: 'AI Orchestrator',
     webPreferences: {
-      preload: join(__dirname, 'preload.js'),
+      preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       nodeIntegrationInWorker: false,

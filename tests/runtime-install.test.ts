@@ -11,10 +11,17 @@ import { verifyIntegrity } from '../src/runtime/downloader.js';
 import { findExecutable, planPromotion } from '../src/runtime/archive.js';
 import { buildFakeArchive, makeFetch, StubSource } from './helpers/fake-runtime-source.js';
 
-function withTempHome<T>(fn: (home: string) => T): T {
+/**
+ * Runs `fn` against a throwaway app home and removes it afterwards.
+ *
+ * Async on purpose: a synchronous version deletes the directory the moment
+ * the callback hands back its promise, so the body of an async test would run
+ * against a home that no longer exists.
+ */
+async function withTempHome<T>(fn: (home: string) => T | Promise<T>): Promise<T> {
   const home = mkdtempSync(join(tmpdir(), 'lao-runtime-'));
   try {
-    return fn(home);
+    return await fn(home);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -261,8 +268,8 @@ test('verifyIntegrity distinguishes match, mismatch and nothing to check', () =>
   assert.equal(verifyIntegrity(bytes, undefined), null);
 });
 
-test('findExecutable matches the target platform name, case-insensitively', () => {
-  withTempHome((home) => {
+test('findExecutable matches the target platform name, case-insensitively', async () => {
+  await withTempHome((home) => {
     const tree = join(home, 'tree', 'package', 'bin');
     mkdirSync(tree, { recursive: true });
     writeFileSync(join(tree, 'Codex.EXE'), '');

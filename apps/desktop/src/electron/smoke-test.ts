@@ -13,6 +13,7 @@
  * Nothing here runs unless `--smoke-test` was passed on the command line.
  */
 
+import { writeFileSync } from 'node:fs';
 import type { BrowserWindow } from 'electron';
 
 export interface SmokeStep {
@@ -102,6 +103,20 @@ export async function runSmokeTest(
     steps.push(...probed);
   } catch (err) {
     steps.push({ name: 'probe', ok: false, detail: (err as Error).message });
+  }
+
+  // A screenshot on request, so a reviewer can see the screen the assertions
+  // above only describe. Written only when a path is named, under a flag that
+  // already exits the application.
+  const shot = process.env.ORCHESTRATOR_SMOKE_SCREENSHOT;
+  if (shot) {
+    try {
+      const image = await window.webContents.capturePage();
+      writeFileSync(shot, image.toPNG());
+      steps.push({ name: 'captura de tela', ok: true, detail: shot });
+    } catch (err) {
+      steps.push({ name: 'captura de tela', ok: false, detail: (err as Error).message });
+    }
   }
 
   return { ok: steps.length > 0 && steps.every((s) => s.ok), packaged: options.packaged, steps };
