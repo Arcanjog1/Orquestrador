@@ -17,3 +17,7 @@ Thumbs.db
 
 # Spike report is generated per-machine
 spike/spike-report.txt
+
+# Desktop build output
+apps/desktop/dist/
+apps/desktop/release/

@@ -75,6 +75,7 @@ export class Database {
   // -- Repositories --------------------------------------------------------
 
   readonly runtimeInstallations = new RuntimeInstallationRepository(() => this.driver);
+  readonly accounts = new AccountRepository(() => this.driver);
   readonly settings = new SettingsRepository(() => this.driver);
 }
 
@@ -185,6 +186,85 @@ export class RuntimeInstallationRepository extends Repository {
     return this.db.all<RuntimeInstallationRecord>(
       "SELECT * FROM runtime_installations WHERE trust_level = 'UNVERIFIED_BINARY_SOURCE' AND update_status = 'current'",
     );
+  }
+}
+
+/**
+ * A provider account as the database stores it.
+ *
+ * `profile_directory` is a path the application owns; it is never a
+ * credential, and nothing here is ever shown to the user except
+ * `display_name`.
+ */
+export interface AccountRecord extends SqlRow {
+  id: string;
+  provider_id: string;
+  display_name: string;
+  profile_directory: string;
+  auth_state: string;
+  auth_method: string | null;
+  last_checked_at: string | null;
+  last_connected_at: string | null;
+  created_at: string;
+}
+
+export class AccountRepository extends Repository {
+  /** Providers are a lookup table; accounts reference them by foreign key. */
+  ensureProvider(id: string, displayName: string): void {
+    this.db.run(
+      'INSERT INTO providers (id, display_name, enabled, created_at) VALUES (?,?,1,?) ON CONFLICT(id) DO NOTHING',
+      [id, displayName, new Date().toISOString()],
+    );
+  }
+
+  create(record: {
+    id: string;
+    providerId: string;
+    displayName: string;
+    profileDirectory: string;
+  }): AccountRecord {
+    return this.db.transaction(() => {
+      this.db.run(
+        'INSERT INTO accounts (id, provider_id, display_name, profile_directory, auth_state, created_at) VALUES (?,?,?,?,?,?)',
+        [
+          record.id,
+          record.providerId,
+          record.displayName,
+          record.profileDirectory,
+          'disconnected',
+          new Date().toISOString(),
+        ],
+      );
+      const created = this.find(record.id);
+      if (!created) throw new Error(`account ${record.id} vanished right after insert`);
+      return created;
+    });
+  }
+
+  find(id: string): AccountRecord | undefined {
+    return this.db.get<AccountRecord>('SELECT * FROM accounts WHERE id = ?', [id]);
+  }
+
+  list(providerId?: string): AccountRecord[] {
+    return providerId
+      ? this.db.all<AccountRecord>(
+          'SELECT * FROM accounts WHERE provider_id = ? ORDER BY created_at',
+          [providerId],
+        )
+      : this.db.all<AccountRecord>('SELECT * FROM accounts ORDER BY created_at');
+  }
+
+  /** Records what an authentication check observed. */
+  recordStatus(id: string, state: string, authMethod?: string | null): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      'UPDATE accounts SET auth_state = ?, auth_method = ?, last_checked_at = ?, last_connected_at = CASE WHEN ? = \'connected\' THEN ? ELSE last_connected_at END WHERE id = ?',
+      [state, authMethod ?? null, now, state, now, id],
+    );
+  }
+
+  remove(id: string): boolean {
+    return this.db.run('DELETE FROM accounts WHERE id = ?', [id]).changes > 0;
   }
 }
 

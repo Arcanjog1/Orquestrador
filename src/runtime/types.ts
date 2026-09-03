@@ -201,3 +201,29 @@ export class RuntimeNotReadyError extends RuntimeError {
     this.name = 'RuntimeNotReadyError';
   }
 }
+
+/**
+ * Options every long-running runtime operation accepts.
+ *
+ * Cancellation exists because the interface offers it: a first-run screen that
+ * starts a download has to let the user back out. It is honoured only up to
+ * the moment the staged build is promoted - after that the pipeline finishes,
+ * health-checks and rolls back on its own, because a half-promoted runtime is
+ * worse than one extra install.
+ */
+export interface RuntimeOperationOptions {
+  signal?: AbortSignal;
+}
+
+/** Raised when the user backed out of an install before it was promoted. */
+export class RuntimeCancelledError extends RuntimeError {
+  constructor(runtimeId: RuntimeId, displayName: string) {
+    super(
+      runtimeId,
+      `A preparação de ${displayName} foi cancelada.`,
+      'Tentar novamente',
+      'cancelled before the staged build was promoted',
+    );
+    this.name = 'RuntimeCancelledError';
+  }
+}

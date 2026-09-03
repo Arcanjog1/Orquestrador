@@ -22,6 +22,7 @@ import {
   type ProgressReporter,
   type RuntimeDetection,
   type RuntimeId,
+  type RuntimeOperationOptions,
 } from './types.js';
 
 /** One row of the first-run diagnostic. */
@@ -118,16 +119,28 @@ export class RuntimeManager {
     };
   }
 
-  async install(runtimeId: RuntimeId, onProgress?: ProgressReporter): Promise<InstallResult> {
-    return this.get(runtimeId).install(onProgress);
+  async install(
+    runtimeId: RuntimeId,
+    onProgress?: ProgressReporter,
+    options: RuntimeOperationOptions = {},
+  ): Promise<InstallResult> {
+    return this.get(runtimeId).install(onProgress, options);
   }
 
-  async repair(runtimeId: RuntimeId, onProgress?: ProgressReporter): Promise<InstallResult> {
-    return this.get(runtimeId).repair(onProgress);
+  async repair(
+    runtimeId: RuntimeId,
+    onProgress?: ProgressReporter,
+    options: RuntimeOperationOptions = {},
+  ): Promise<InstallResult> {
+    return this.get(runtimeId).repair(onProgress, options);
   }
 
-  async update(runtimeId: RuntimeId, onProgress?: ProgressReporter): Promise<InstallResult | null> {
-    return this.get(runtimeId).update(onProgress);
+  async update(
+    runtimeId: RuntimeId,
+    onProgress?: ProgressReporter,
+    options: RuntimeOperationOptions = {},
+  ): Promise<InstallResult | null> {
+    return this.get(runtimeId).update(onProgress, options);
   }
 
   /**

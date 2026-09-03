@@ -7,10 +7,15 @@
  * replaced - see `driver.ts` for the seam.
  */
 
-import { createRequire } from 'node:module';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { DatabaseUnavailableError, type SqlDriver, type SqlRow, type SqlValue } from './driver.js';
+import {
+  DatabaseUnavailableError,
+  loadNodeSqlite,
+  type SqlDriver,
+  type SqlRow,
+  type SqlValue,
+} from './driver.js';
 
 interface NodeSqliteStatement {
   run(...params: SqlValue[]): { changes: number | bigint; lastInsertRowid: number | bigint };
@@ -31,7 +36,7 @@ export class NodeSqliteDriver implements SqlDriver {
   constructor(filePath: string) {
     let DatabaseSync: new (path: string) => NodeSqliteDatabase;
     try {
-      const sqlite = createRequire(import.meta.url)('node:sqlite') as {
+      const sqlite = loadNodeSqlite() as {
         DatabaseSync: new (path: string) => NodeSqliteDatabase;
       };
       DatabaseSync = sqlite.DatabaseSync;

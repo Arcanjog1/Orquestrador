@@ -48,6 +48,8 @@ export interface DownloadOptions {
   expectedBytes?: number | undefined;
   onProgress?: ((receivedBytes: number, totalBytes: number | null) => void) | undefined;
   timeoutMs?: number;
+  /** Aborts the transfer when the user backs out of an install. */
+  signal?: AbortSignal | undefined;
   /** Injected in tests. Defaults to the global fetch. */
   fetchImpl?: typeof fetch;
 }
@@ -63,9 +65,12 @@ export async function downloadAndVerify(options: DownloadOptions): Promise<Downl
 
   let response: Response;
   try {
+    const timeout = AbortSignal.timeout(options.timeoutMs ?? 300_000);
     response = await fetchImpl(options.url, {
       redirect: 'follow',
-      signal: AbortSignal.timeout(options.timeoutMs ?? 300_000),
+      // The transfer stops on whichever comes first: the deadline, or the
+      // user pressing cancel in the interface.
+      signal: options.signal ? AbortSignal.any([timeout, options.signal]) : timeout,
     });
   } catch (err) {
     throw new DownloadError(options.url, describeNetworkError(err));

@@ -1,0 +1,58 @@
+# Packaging.
+#
+# The deliverable is AI-Orchestrator-Setup.exe: a per-user NSIS installer that
+# writes into %LOCALAPPDATA%, so it never asks for administrator rights - the
+# same folder the application already manages its runtimes in.
+#
+# Nothing third-party is redistributed here. Codex, Claude Code and Git are
+# fetched by RuntimeManager at first run, which is both a licensing
+# requirement (Claude Code is not ours to ship) and the reason the installer
+# stays small.
+
+appId: com.aiorchestrator.desktop
+productName: AI Orchestrator
+copyright: Copyright (c) 2026
+
+directories:
+  output: release
+  buildResources: resources
+
+# Only what the application actually runs. The TypeScript sources, the
+# renderer's source maps and the whole toolchain stay out of the archive.
+files:
+  - dist/**/*
+  - package.json
+  - "!**/*.ts"
+  - "!**/*.tsx"
+  - "!**/*.map"
+
+asar: true
+
+# node:sqlite is a builtin of the Node that Electron embeds, so there is no
+# native module to unpack, rebuild or ship per architecture. If this ever
+# changes, the driver behind SqlDriver is the only thing that moves.
+npmRebuild: false
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: AI-Orchestrator-Setup-${version}.${ext}
+  # No code signing certificate yet: Windows SmartScreen will warn on first
+  # run. Recorded as a release blocker rather than worked around.
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AI Orchestrator
+
+linux:
+  target:
+    - dir
+  category: Development
+
+publish: null

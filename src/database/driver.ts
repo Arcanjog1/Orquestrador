@@ -36,6 +36,33 @@ export class DatabaseUnavailableError extends Error {
   }
 }
 
+/** The slice of `node:sqlite` this project uses. */
+export interface NodeSqliteModule {
+  DatabaseSync: new (path: string) => unknown;
+}
+
+/**
+ * Loads `node:sqlite` without caring how this file was packaged.
+ *
+ * `process.getBuiltinModule` is used first and deliberately:
+ * `createRequire(import.meta.url)` works under plain Node but breaks the
+ * moment the main process is bundled to CommonJS, where a bundler replaces
+ * `import.meta` with an empty object and the require is handed `undefined`.
+ * That failure looked exactly like "Electron has no node:sqlite", which it
+ * was not. `getBuiltinModule` is a plain function on `process`, so it is
+ * identical in ESM, in CommonJS and inside an asar archive.
+ */
+export function loadNodeSqlite(): NodeSqliteModule {
+  const fromProcess = (
+    process as NodeJS.Process & { getBuiltinModule?: (id: string) => unknown }
+  ).getBuiltinModule?.('node:sqlite') as NodeSqliteModule | undefined;
+  if (fromProcess?.DatabaseSync) return fromProcess;
+
+  // Hosts older than the one this project targets. Kept as a fallback rather
+  // than as the primary path, for the reason above.
+  return createRequire(import.meta.url)('node:sqlite') as NodeSqliteModule;
+}
+
 /**
  * Whether the Node build running this process exposes `node:sqlite`.
  *
@@ -46,8 +73,7 @@ export class DatabaseUnavailableError extends Error {
  */
 export function nodeSqliteAvailable(): boolean {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return typeof createRequire(import.meta.url)('node:sqlite')?.DatabaseSync === 'function';
+    return typeof loadNodeSqlite()?.DatabaseSync === 'function';
   } catch {
     return false;
   }

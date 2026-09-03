@@ -1,0 +1,226 @@
+/* Enough styling to read the onboarding honestly. The real design comes later. */
+
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #171a21;
+  --line: #262b36;
+  --text: #e7eaf0;
+  --muted: #98a1b3;
+  --ok: #5fd08a;
+  --warn: #e0b155;
+  --error: #e07a7a;
+  --accent: #6f8ff5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.shell {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 40px 24px 64px;
+}
+
+.hero h1 {
+  margin: 0 0 4px;
+  font-size: 26px;
+  font-weight: 600;
+}
+
+.hero p {
+  margin: 0 0 28px;
+  color: var(--muted);
+}
+
+.checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.checklist__item {
+  display: flex;
+  gap: 10px;
+  padding: 7px 0;
+  color: var(--muted);
+}
+
+.checklist__item--done {
+  color: var(--ok);
+}
+
+.checklist__item--running {
+  color: var(--text);
+}
+
+.checklist__item--failed {
+  color: var(--warn);
+}
+
+.checklist__mark {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+.panel {
+  margin-top: 28px;
+}
+
+.panel h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.panel__hint,
+.panel__empty {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.card--ok {
+  border-color: rgba(95, 208, 138, 0.35);
+}
+
+.card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.card__head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.card__state {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.card--ok .card__state {
+  color: var(--ok);
+}
+
+.card__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.card__actions:empty {
+  display: none;
+}
+
+.card__note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+button {
+  background: var(--accent);
+  color: #0b0e14;
+  border: 0;
+  border-radius: 7px;
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.button--quiet {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+input[type="text"] {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 9px 12px;
+  color: var(--text);
+  font: inherit;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.progress {
+  margin-top: 12px;
+}
+
+.progress__label {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.progress__track {
+  height: 5px;
+  background: var(--line);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress__bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms ease-out;
+}
+
+.progress__message {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.banner {
+  border-radius: 8px;
+  padding: 11px 14px;
+  margin-bottom: 14px;
+}
+
+.banner--error {
+  background: rgba(224, 122, 122, 0.12);
+  border: 1px solid rgba(224, 122, 122, 0.35);
+  color: var(--error);
+}
+
+.footer {
+  margin-top: 36px;
+  color: var(--muted);
+  font-size: 12px;
+}
