@@ -60,14 +60,15 @@ test('installs from a source, verifying integrity and promoting atomically', asy
 
     assert.ok(existsSync(result.executablePath), 'executable should exist after install');
     assert.equal(result.manifest.version, '1.2.3');
-    assert.equal(result.manifest.integrityVerified, true, 'published integrity should be verified');
+    assert.equal(result.manifest.integrity.verified, true, 'published integrity should be verified');
+    assert.equal(result.manifest.trustLevel, 'VERIFIED');
     assert.equal(result.manifest.sourceId, 'test-source');
     assert.equal(result.manifest.contract, 'DOCUMENTED');
     assert.equal(result.manifest.sha256.length, 64);
 
     // The sibling folder the executable needs must survive promotion.
     assert.ok(
-      existsSync(join(runtime.installDir, 'package', 'vendor', 'resources', 'data.txt')),
+      existsSync(join(runtime.currentDir, 'package', 'vendor', 'resources', 'data.txt')),
       'sibling resources should be promoted alongside the executable',
     );
 

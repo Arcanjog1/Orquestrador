@@ -14,6 +14,8 @@
 
 import { existsSync } from 'node:fs';
 import type { ResolvedDownload, RuntimeSource, RuntimeTarget } from '../types.js';
+import type { IntegrityStrategy } from '../integrity.js';
+import type { VersionRequest } from '../compatibility.js';
 
 export function claudeExecutableNames(target: RuntimeTarget): string[] {
   return target.platform === 'win32' ? ['claude.exe', 'claude.cmd'] : ['claude'];
@@ -29,16 +31,22 @@ export class ClaudeOfficialInstallerSource implements RuntimeSource {
   readonly id = 'claude-official-installer';
   readonly label = 'Instalador oficial da Anthropic';
   readonly contract = 'DOCUMENTED' as const;
+  /** A checksum is expected; a signature is also read on Windows when present. */
+  readonly integrityStrategy: IntegrityStrategy = 'SHA256';
 
   constructor(
     private readonly manifestUrl = 'https://claude.ai/install-manifest.json',
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
-  async resolve(target: RuntimeTarget): Promise<ResolvedDownload | null> {
+  async resolve(target: RuntimeTarget, request: VersionRequest): Promise<ResolvedDownload | null> {
+    const url =
+      request.kind === 'tested'
+        ? `${this.manifestUrl}?version=${encodeURIComponent(request.version)}`
+        : this.manifestUrl;
     let manifest: unknown;
     try {
-      const response = await this.fetchImpl(this.manifestUrl, {
+      const response = await this.fetchImpl(url, {
         headers: { accept: 'application/json' },
         signal: AbortSignal.timeout(20_000),
       });
@@ -63,16 +71,18 @@ export class ClaudeReleaseHostSource implements RuntimeSource {
   readonly id = 'claude-release-host';
   readonly label = 'Host de release usado pelo instalador oficial';
   readonly contract = 'NOT_PUBLIC_CONTRACT' as const;
+  readonly integrityStrategy: IntegrityStrategy = 'SHA256';
 
   constructor(
     private readonly baseUrl = 'https://downloads.claude.ai/claude-code-releases',
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
-  async resolve(target: RuntimeTarget): Promise<ResolvedDownload | null> {
+  async resolve(target: RuntimeTarget, request: VersionRequest): Promise<ResolvedDownload | null> {
+    const channel = request.kind === 'tested' ? request.version : 'stable';
     let manifest: unknown;
     try {
-      const response = await this.fetchImpl(`${this.baseUrl}/stable`, {
+      const response = await this.fetchImpl(`${this.baseUrl}/${channel}`, {
         headers: { accept: 'application/json' },
         signal: AbortSignal.timeout(20_000),
       });
@@ -96,6 +106,7 @@ export class ClaudeSelfInstallSource implements RuntimeSource {
   readonly id = 'claude-self-install';
   readonly label = 'Comando `claude install` de uma instalação existente';
   readonly contract = 'DOCUMENTED' as const;
+  readonly integrityStrategy: IntegrityStrategy = 'SIGNED_MANIFEST';
 
   constructor(private readonly systemExecutable: string | null) {}
 

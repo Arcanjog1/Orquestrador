@@ -10,6 +10,8 @@
 
 import { fetchNpmDist, toResolvedDownload } from './npm-registry.js';
 import type { ResolvedDownload, RuntimeSource, RuntimeTarget } from '../types.js';
+import type { IntegrityStrategy } from '../integrity.js';
+import type { VersionRequest } from '../compatibility.js';
 
 const CODEX_PACKAGE = '@openai/codex';
 
@@ -28,19 +30,26 @@ export class CodexOfficialReleaseSource implements RuntimeSource {
   readonly id = 'codex-official-release';
   readonly label = 'Canal oficial de release do Codex';
   readonly contract = 'DOCUMENTED' as const;
+  /**
+   * The channel publishes a checksum per asset. When a build turns out to be
+   * Authenticode-signed as well, that is picked up automatically on Windows and
+   * recorded as the stronger of the two.
+   */
+  readonly integrityStrategy: IntegrityStrategy = 'SHA256';
 
   constructor(
     private readonly baseUrl = 'https://releases.openai.com/codex',
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
-  async resolve(target: RuntimeTarget): Promise<ResolvedDownload | null> {
-    // The channel publishes a manifest describing the current build. If it is
-    // unreachable or shaped differently than expected, this source simply
-    // declines and the next one is tried - it never guesses at a URL.
+  async resolve(target: RuntimeTarget, request: VersionRequest): Promise<ResolvedDownload | null> {
+    // The channel publishes a manifest describing a build. If it is unreachable
+    // or shaped differently than expected, this source simply declines and the
+    // next one is tried - it never guesses at a URL.
+    const channel = request.kind === 'tested' ? request.version : 'latest';
     let manifest: unknown;
     try {
-      const response = await this.fetchImpl(`${this.baseUrl}/latest`, {
+      const response = await this.fetchImpl(`${this.baseUrl}/${channel}`, {
         headers: { accept: 'application/json' },
         signal: AbortSignal.timeout(20_000),
       });
@@ -74,11 +83,16 @@ export class CodexNpmRegistrySource implements RuntimeSource {
   readonly id = 'codex-npm-registry';
   readonly label = 'Pacote de plataforma no registry npm';
   readonly contract = 'PACKAGE_INTERNAL' as const;
+  /** The registry publishes a Subresource Integrity string per artifact. */
+  readonly integrityStrategy: IntegrityStrategy = 'NPM_INTEGRITY';
 
   constructor(private readonly fetchImpl: typeof fetch = fetch) {}
 
-  async resolve(target: RuntimeTarget): Promise<ResolvedDownload | null> {
-    const base = await fetchNpmDist(CODEX_PACKAGE, 'latest', this.fetchImpl);
+  async resolve(target: RuntimeTarget, request: VersionRequest): Promise<ResolvedDownload | null> {
+    // A first install asks for the version this project has tested; only an
+    // explicit update check asks for whatever is newest.
+    const wanted = request.kind === 'tested' ? request.version : 'latest';
+    const base = await fetchNpmDist(CODEX_PACKAGE, wanted, this.fetchImpl);
     if (!base) return null;
 
     // Platform builds are published as `<version>-<platform>-<arch>`.

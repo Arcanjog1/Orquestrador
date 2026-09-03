@@ -8,6 +8,7 @@ import { RuntimeManager } from '../src/runtime/runtime-manager.js';
 import { CONTRACT_LABELS } from '../src/runtime/types.js';
 import { defaultCodexSources, CodexNpmRegistrySource } from '../src/runtime/sources/codex-sources.js';
 import { defaultClaudeSources } from '../src/runtime/sources/claude-sources.js';
+import { MinGitReleaseSource } from '../src/runtime/sources/git-sources.js';
 import { makeFetch } from './helpers/fake-runtime-source.js';
 
 function withTempHome<T>(fn: (paths: ReturnType<typeof appPaths>) => T): T {
@@ -53,19 +54,55 @@ test('an unconfigured runtime offers automatic setup and never mentions PATH', a
   });
 });
 
-test('Git offers instructions rather than automatic setup until a source exists', async () => {
+test('Git can be prepared automatically, so the user never installs it', async () => {
   await withTempHome(async (paths) => {
     const manager = new RuntimeManager({ paths, fetchImpl: makeFetch({}) });
     const git = manager.get('git');
-    assert.equal(git.sources.length, 0);
-
-    const result = await manager.prepareAll();
-    const gitFailure = result.failures.find((f) => f.runtimeId === 'git');
-    if (gitFailure) {
-      assert.match(gitFailure.message, /precisa ser instalado/);
-      assert.equal(gitFailure.remedy, 'Ver instruções');
-    }
+    assert.ok(git.sources.length > 0, 'MinGit gives Git an automatic path');
+    assert.equal(git.sources[0]!.contract, 'DOCUMENTED');
   });
+});
+
+test('MinGit picks the portable archive and declines off Windows', async () => {
+  const release = {
+    tag_name: 'v2.47.0.windows.1',
+    assets: [
+      { name: 'Git-2.47.0-64-bit.exe', browser_download_url: 'https://x/installer.exe', size: 1 },
+      { name: 'MinGit-2.47.0-busybox-64-bit.zip', browser_download_url: 'https://x/busybox.zip', size: 2 },
+      { name: 'MinGit-2.47.0-64-bit.zip', browser_download_url: 'https://x/mingit.zip', size: 3 },
+    ],
+  };
+  const api = 'https://api.github.com/repos/git-for-windows/git/releases/latest';
+  const source = new MinGitReleaseSource(undefined, makeFetch({ [api]: { body: release } }));
+
+  const windows = await source.resolve({ platform: 'win32', arch: 'x64' }, { kind: 'latest' });
+  // The plain portable build, not the full installer and not busybox.
+  assert.equal(windows?.url, 'https://x/mingit.zip');
+  assert.equal(windows?.version, '2.47.0');
+  assert.equal(windows?.archiveKind, 'zip');
+  assert.deepEqual(windows?.executableNames, ['git.exe']);
+
+  // MinGit is Windows-only; elsewhere the source declines rather than guessing.
+  assert.equal(await source.resolve({ platform: 'linux', arch: 'x64' }, { kind: 'latest' }), null);
+});
+
+test('MinGit falls back to the busybox build when only that is published', async () => {
+  const api = 'https://api.github.com/repos/git-for-windows/git/releases/latest';
+  const source = new MinGitReleaseSource(
+    undefined,
+    makeFetch({
+      [api]: {
+        body: {
+          tag_name: 'v2.47.0.windows.1',
+          assets: [
+            { name: 'MinGit-2.47.0-busybox-64-bit.zip', browser_download_url: 'https://x/bb.zip' },
+          ],
+        },
+      },
+    }),
+  );
+  const resolved = await source.resolve({ platform: 'win32', arch: 'x64' }, { kind: 'latest' });
+  assert.equal(resolved?.url, 'https://x/bb.zip');
 });
 
 test('prepareAll collects failures instead of stopping at the first one', async () => {
@@ -134,7 +171,7 @@ test('a source that cannot serve the target declines instead of guessing a URL',
     },
   });
   const source = new CodexOfficialReleaseSource(undefined, fetchImpl);
-  const resolved = await source.resolve({ platform: 'win32', arch: 'x64' });
+  const resolved = await source.resolve({ platform: 'win32', arch: 'x64' }, { kind: 'latest' });
   assert.equal(resolved, null, 'no Windows asset means decline, not a wrong URL');
 });
 
@@ -152,7 +189,7 @@ test('the release channel resolves a matching Windows asset', async () => {
     },
   });
   const source = new CodexOfficialReleaseSource(undefined, fetchImpl);
-  const resolved = await source.resolve({ platform: 'win32', arch: 'x64' });
+  const resolved = await source.resolve({ platform: 'win32', arch: 'x64' }, { kind: 'latest' });
   assert.equal(resolved?.url, 'https://x/win.zip');
   assert.equal(resolved?.version, '2.5.0');
   assert.equal(resolved?.archiveKind, 'zip');
@@ -161,6 +198,6 @@ test('the release channel resolves a matching Windows asset', async () => {
 
 test('an unreachable source declines rather than throwing the install away', async () => {
   const source = new CodexNpmRegistrySource(makeFetch({}));
-  const resolved = await source.resolve({ platform: 'win32', arch: 'x64' });
+  const resolved = await source.resolve({ platform: 'win32', arch: 'x64' }, { kind: 'latest' });
   assert.equal(resolved, null);
 });

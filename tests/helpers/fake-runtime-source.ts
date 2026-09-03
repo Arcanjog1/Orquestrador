@@ -11,19 +11,27 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ResolvedDownload, RuntimeSource, RuntimeTarget } from '../../src/runtime/types.js';
+import type { IntegrityStrategy } from '../../src/runtime/integrity.js';
+import type { VersionRequest } from '../../src/runtime/compatibility.js';
 
 /** A source that returns whatever it is told, or throws on demand. */
 export class StubSource implements RuntimeSource {
   calls = 0;
+  /** The version requests it was asked for, so tests can assert the policy. */
+  readonly requests: VersionRequest[] = [];
+
   constructor(
     readonly id: string,
     readonly label: string,
     readonly contract: RuntimeSource['contract'],
     private readonly behaviour: ResolvedDownload | null | Error,
+    readonly integrityStrategy: IntegrityStrategy = 'NPM_INTEGRITY',
+    readonly expectedPublisher?: string,
   ) {}
 
-  async resolve(_target: RuntimeTarget): Promise<ResolvedDownload | null> {
+  async resolve(_target: RuntimeTarget, request: VersionRequest): Promise<ResolvedDownload | null> {
     this.calls += 1;
+    this.requests.push(request);
     if (this.behaviour instanceof Error) throw this.behaviour;
     return this.behaviour;
   }

@@ -7,6 +7,9 @@
  * executable path rather than hoping the global PATH has one.
  */
 
+import type { IntegrityStrategy, IntegrityVerdict, TrustLevel } from './integrity.js';
+import type { VersionRequest } from './compatibility.js';
+
 export type RuntimeId = 'codex' | 'claude-code' | 'git';
 
 /**
@@ -44,8 +47,9 @@ export interface ResolvedDownload {
   version: string;
   archiveKind: ArchiveKind;
   /**
-   * Integrity string published by the source, in npm's `sha512-<base64>` form.
-   * When present it is verified and a mismatch aborts the install.
+   * Integrity value published by the source: an npm-style `sha512-<base64>`
+   * string, or a bare SHA-256 hex digest, depending on the source's declared
+   * strategy. When present it is verified and a mismatch aborts the install.
    */
   integrity?: string;
   /** Executable names to look for inside the extracted tree, in priority order. */
@@ -65,11 +69,19 @@ export interface RuntimeSource {
   readonly id: string;
   readonly label: string;
   readonly contract: ContractLevel;
+  /** How this source proves what it served. */
+  readonly integrityStrategy: IntegrityStrategy;
+  /**
+   * Publisher expected on a signed binary, when one has been confirmed on a
+   * real machine. Left unset rather than guessed: an unset expectation records
+   * the observed publisher instead of enforcing an invented one.
+   */
+  readonly expectedPublisher?: string;
   /**
    * Returns a concrete download, or `null` when this source cannot serve the
-   * requested target. Network failures throw.
+   * request. Network failures throw.
    */
-  resolve(target: RuntimeTarget): Promise<ResolvedDownload | null>;
+  resolve(target: RuntimeTarget, request: VersionRequest): Promise<ResolvedDownload | null>;
 }
 
 /** Where a usable runtime was found, if anywhere. */
@@ -105,10 +117,16 @@ export interface RuntimeManifest {
   arch: string;
   bytes: number;
   sha256: string;
-  integrityVerified: boolean | null;
-  /** Executable path relative to the runtime's install directory. */
+  /** What was actually proved about these bytes, and how. */
+  integrity: IntegrityVerdict;
+  trustLevel: TrustLevel;
+  /** Executable path relative to the runtime's `current` directory. */
   executableRelativePath: string;
   installedAt: string;
+  /** The version this install replaced, when it replaced one. */
+  previousVersion?: string;
+  /** Licence notices shipped with the runtime, relative to `current`. */
+  licenseFiles?: string[];
 }
 
 export interface HealthStatus {
@@ -127,8 +145,10 @@ export type InstallPhase =
   | 'downloading'
   | 'verifying'
   | 'extracting'
+  | 'staging-health-check'
   | 'installing'
   | 'health-check'
+  | 'rolled-back'
   | 'done';
 
 export interface InstallProgress {
@@ -147,6 +167,8 @@ export interface InstallResult {
   executablePath: string;
   manifest: RuntimeManifest;
   health: HealthStatus;
+  /** True when a failed update was undone and the previous build restored. */
+  rolledBack?: boolean;
 }
 
 /**
