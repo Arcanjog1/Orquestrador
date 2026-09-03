@@ -4,47 +4,35 @@ Este documento existe para que uma **nova sessão** continue o projeto sem depen
 da conversa anterior. Ele descreve o estado real do repositório, o que já está
 pronto, o que não pode ser renegociado e exatamente o que fazer a seguir.
 
-Escrito em 2026-09-03.
+Escrito em 2026-09-03; revisado no fim da fase **fundação Electron**, contra o
+código que está no repositório.
 
 ---
 
 ## 1. Estado atual
 
+> Atualizado ao fim da fase **fundação Electron**. O conteúdo anterior descrevia
+> o estado antes dessa fase e foi substituído; o histórico está no git.
+
 | | |
 |---|---|
 | Repositório | `Arcanjog1/Orquestrador` |
-| Branch | `claude/new-session-3am7mo` |
-| HEAD | `f09259085727e642b12e56342fe7dff1f7a53de9` (`f092590`) |
-| Mensagem do HEAD | *Database layer: swappable driver, schema and runtime_installations* |
-| Working tree | **Limpo.** Nenhum arquivo não commitado |
-| Sincronia | `HEAD == origin/claude/new-session-3am7mo` (tudo enviado) |
-| Testes | **156 passando, 0 falhando, 0 pulados** |
-| Typecheck | `tsc -p tsconfig.test.json --noEmit` → limpo |
-| Build | `tsc -p tsconfig.json` → limpo |
+| Branch | `claude/ai-orchestrator-continuation-sbzrfg` |
+| Working tree | **Limpo** |
+| Testes | **188 passando, 0 falhando, 0 pulados** |
+| Typecheck (núcleo) | `tsc -p tsconfig.test.json --noEmit` → limpo |
+| Typecheck (desktop) | `tsc -p apps/desktop/tsconfig.json --noEmit` → limpo |
+| Electron | **44.1.1** (fixado, sem `^`) |
+| Node embutido | **24.19.0** |
+| Chromium embutido | **152.0.7977.65** |
+| SQLite embutido | **3.53.3** |
 | Node usado no desenvolvimento | v22.22.2 / npm 10.9.7 |
-| Dependências de runtime | **nenhuma** |
-| devDependencies | `typescript ^5.7.0`, `@types/node ^22.10.0` |
+| Dependências de runtime | **nenhuma**, nem no núcleo nem no desktop |
 
-Histórico (mais recente primeiro):
-
-```
-f092590  Database layer: swappable driver, schema and runtime_installations
-42545f6  Runtime version policy, trust policy, rollback and MinGit
-7bf0934  Claude accounts managed by the app, with CLAUDE_CONFIG_DIR hidden
-d04808f  RuntimeManager: the application installs its own runtimes
-e5793df  Spike: add TEST 7 (terminal-free auth) and TEST 8 (runtime acquisition)
-35f1d25  Add the Windows integration spike
-772d878  Preserve in-progress agent abstraction and decision parser
-e4f3c2d  Phase 3: git evidence, safety screen, verifier, DONE gate, sessions, report
-c7e971b  Phase 2: ProcessManager and preflight checks
-c252d29  Phase 1: scaffold, core types, state machine, config, logger, redactor
-```
-
-**Ambiente de desenvolvimento:** container Linux. Não há Windows nem `codex`
-instalado. O `claude` CLI existe (v2.1.252). A rede é restrita: só
-`registry.npmjs.org` é alcançável; `releases.openai.com`, `claude.ai`,
-`downloads.claude.ai` e `github.com` respondem 403. Isso limita o que pode ser
-verificado aqui e está refletido na seção 6.
+**Ambiente de desenvolvimento:** container Linux. Não há Windows. O `claude` CLI
+existe (v2.1.252) e o `git` também. A rede é restrita: `registry.npmjs.org` é
+alcançável (o que permitiu instalar o Codex de verdade pela interface),
+`releases.openai.com` e os hosts da Anthropic não são.
 
 ---
 
@@ -123,15 +111,54 @@ depois de promovido → reverte sozinho. `rollBack()` restaura sob demanda.
 
 ### SqlDriver / node:sqlite / schema (`src/database/`)
 `SqlDriver` é a costura: repositórios, orchestrator-core, agents, workspaces e UI
-não veem SQL nem binding. `node:sqlite` é embutido no Node 22 — **sem módulo
-nativo, sem `electron-rebuild`, sem prebuild por arquitetura**. Verificado aqui
-com prepared statements e WAL.
+não veem SQL nem binding. `node:sqlite` é embutido no Node que o Electron traz —
+**sem módulo nativo, sem `electron-rebuild`, sem prebuild por arquitetura**.
+Provado dentro do Main real e dentro do aplicativo **empacotado** (seção 6a).
+
+> **Detalhe que virou código:** o módulo era carregado com
+> `createRequire(import.meta.url)`. Isso funciona no Node puro e quebra assim que
+> o Main é empacotado em CommonJS, porque o bundler troca `import.meta` por um
+> objeto vazio. O sintoma era “node:sqlite não existe no Electron”, o que era
+> falso. Hoje o carregamento passa por `process.getBuiltinModule`, idêntico em
+> ESM, em CommonJS e dentro do asar. Ver `loadNodeSqlite()` em `driver.ts`.
 
 15 tabelas, migrations ordenadas e idempotentes. Só metadados nas tabelas; diffs
-e stdout ficam em disco com linha apontando.
+e stdout ficam em disco com linha apontando. Repositórios existentes:
+`runtimeInstallations`, `accounts`, `settings`.
+
+### Aplicativo desktop (`apps/desktop/`)
+Electron **44.1.1** fixado. Main + preload empacotados com esbuild em dois
+arquivos `.cjs`; renderer React com Vite. O desktop não tem lógica de
+orquestração: a tela de primeira execução renderiza o que
+`RuntimeManager.diagnose()` devolve.
+
+- **IPC tipado** (`shared/ipc-contract.ts`): uma tabela de operações nomeadas.
+  Não existe `exec`, `shell` nem `runCommand`, e há teste garantindo que não
+  passe a existir.
+- **Validação em runtime** (`shared/validation.ts`): todo payload é reconferido
+  no Main. Ids de conta seguem um conjunto fechado de caracteres, porque nomeiam
+  um diretório em `profiles/`.
+- **Roteador** (`main/ipc/router.ts`): sem Electron, portanto testável. Nada
+  lançado por um serviço atravessa a ponte: vira `IpcFailure` com frase para o
+  usuário e código estável.
+- **Serviços** (`main/services/`): traduzem fases de instalação em passos
+  amigáveis, guardam os handles de cancelamento, derivam ids de conta e mantêm
+  a URL de login fora de tudo que o renderer recebe.
+- **Duas provas embutidas no próprio aplicativo**, para que o executável
+  empacotado seja verificado pelo mesmo código do build de desenvolvimento:
+  `--self-test` (banco) e `--smoke-test` (ponte, isolamento, onboarding).
+  `--smoke-test` aceita, por variável de ambiente,
+  `ORCHESTRATOR_SMOKE_INSTALL=<runtimeId>` e `ORCHESTRATOR_SMOKE_LOGIN=1` para
+  exercitar de verdade a instalação e o login, e
+  `ORCHESTRATOR_SMOKE_SCREENSHOT=<caminho>` para gravar a tela.
 
 ### Testes relevantes
 ```
+ipc-contract.test.ts      canais x handlers, nomes, fases traduzidas, opções da janela
+ipc-validation.test.ts    todo payload hostil que a ponte poderia receber
+ipc-router.test.ts        despacho, recusa, e nenhuma exceção atravessando
+desktop-services.test.ts  progresso, cancelamento, contas, URL de login contida
+runtime-cancel.test.ts    AbortSignal no pipeline, sem promoção pela metade
 runtime-install.test.ts   instalação atômica, download corrompido, fallback entre origens
 runtime-policy.test.ts    versões, compatibilidade, integridade, ordenação, rollback, licenças
 runtime-manager.test.ts   diagnose, prepareAll, MinGit, mensagens sem "PATH"
@@ -182,35 +209,53 @@ Não renegociar nenhuma destas sem instrução explícita do usuário.
 ## 4. Estrutura atual do repositório
 
 ```
-src/
+src/                    NÚCLEO. Sem dependências, sem Electron.
   runtime/            RuntimeManager e tudo que instala runtimes
-    types.ts            RuntimeId, RuntimeSource, RuntimeManifest, erros
+    types.ts            RuntimeId, RuntimeSource, RuntimeManifest, erros,
+                        RuntimeOperationOptions, RuntimeCancelledError
     paths.ts            layout de %LOCALAPPDATA%\AI-Orchestrator\
-    managed-runtime.ts  pipeline de instalação, rollback, detecção
+    managed-runtime.ts  pipeline de instalação, rollback, detecção, cancelamento
     runtime-manager.ts  fachada + diagnose() + prepareAll()
     runtimes.ts         CodexRuntime, ClaudeCodeRuntime, GitRuntime
     compatibility.ts    política de versões (RUNTIME_COMPATIBILITY)
     version.ts          comparação de versões
     integrity.ts        estratégias, trust level, Authenticode
-    downloader.ts       download com progresso + verificação
+    downloader.ts       download com progresso, verificação e AbortSignal
     archive.ts          extração (tar do SO), busca de executável
     sources/            codex-sources, claude-sources, git-sources, npm-registry
   accounts/           account-types, claude-account-manager
-  database/           driver, node-sqlite-driver, schema, database
+  database/           driver (+ loadNodeSqlite), node-sqlite-driver, schema,
+                      database (runtimeInstallations, accounts, settings)
   process/            process-manager      (crítico para Windows)
   git/                git-safety, git-evidence-collector
   orchestrator/       decision-parser, done-gate, verifier, acceptance-criteria
   sessions/           session-manager, state-manager, final-report
   security/           secret-redactor
-  logger/  core/  preflight/  agents/  config/
-tests/                14 arquivos, 156 testes
-  helpers/            git-fixture, fake-runtime-source
-spike/                windows-spike.mjs   (ferramenta INTERNA de desenvolvimento)
-docs/                 este arquivo
-SPIKE.md              instruções do spike (NÃO é a experiência do produto)
-THIRD-PARTY-NOTICES.md
+  logger/  core/  preflight/  agents/
+
+apps/desktop/           APLICATIVO. A única parte que conhece Electron.
+  src/shared/           contrato de IPC e validação (main + preload + renderer)
+  src/main/             SEM Electron: serviços, roteador, bootstrap, self-test
+    app-services.ts       monta Database, RuntimeManager, ProcessManager, contas
+    ipc/router.ts         tabela de operações + dispatch
+    services/             runtime-service, account-service
+    self-test.ts          prova de node:sqlite via o Database real
+  src/electron/         COM Electron: main.ts, preload.ts, smoke-test.ts
+  src/renderer/         React mínimo: onboarding, cards de runtime, contas
+  scripts/              build-main.mjs (esbuild), dev.mjs
+  electron-builder.yml  NSIS por usuário, sem UAC
+  vite.config.mts  tsconfig.json  index.html
+
+tests/                  19 arquivos, 188 testes
+  helpers/              git-fixture, fake-runtime-source
+spike/                  windows-spike.mjs   (ferramenta INTERNA de desenvolvimento)
+docs/                   este arquivo + images/
+.github/workflows/      desktop.yml (testes + instalador Windows em runner real)
+SPIKE.md  THIRD-PARTY-NOTICES.md
 tsconfig.json  tsconfig.base.json  tsconfig.test.json  package.json
 ```
+
+O repositório é um workspace npm: `npm install` na raiz cobre núcleo e desktop.
 
 ---
 
@@ -247,6 +292,14 @@ class RuntimeNotReadyError extends RuntimeError {
   userMessage: string;   // "Codex ainda não está configurado."
   remedy: string;        // "Configurar automaticamente"
 }
+
+/**
+ * Cancelamento. Honrado apenas ATÉ a promoção: depois dela o pipeline termina,
+ * faz health check e reverte sozinho, porque meio runtime promovido é pior do
+ * que uma instalação a mais.
+ */
+interface RuntimeOperationOptions { signal?: AbortSignal }
+class RuntimeCancelledError extends RuntimeError {}
 ```
 
 ```ts
@@ -266,9 +319,9 @@ abstract class ManagedRuntime {
   getExecutablePath(): Promise<string>;          // lança RuntimeNotReadyError
   healthCheck(): Promise<HealthStatus>;
   capabilityCheck(exe: string): Promise<{ ok: boolean; detail: string }>;
-  install(onProgress?: ProgressReporter): Promise<InstallResult>;
-  update(onProgress?: ProgressReporter): Promise<InstallResult | null>;
-  repair(onProgress?: ProgressReporter): Promise<InstallResult>;
+  install(onProgress?: ProgressReporter, options?: RuntimeOperationOptions): Promise<InstallResult>;
+  update(onProgress?: ProgressReporter, options?: RuntimeOperationOptions): Promise<InstallResult | null>;
+  repair(onProgress?: ProgressReporter, options?: RuntimeOperationOptions): Promise<InstallResult>;
   rollBack(): Promise<InstallResult | null>;
   findAvailableVersion(): Promise<{ version: string; sourceId: string } | null>;
   orderedSources(): RuntimeSource[];
@@ -299,9 +352,9 @@ class RuntimeManager {
   detect(runtimeId): Promise<RuntimeDetection>;
   healthCheck(runtimeId): Promise<HealthStatus>;
   diagnose(): Promise<DiagnosticReport>;              // ← a tela de onboarding
-  install(runtimeId, onProgress?): Promise<InstallResult>;
-  repair(runtimeId, onProgress?): Promise<InstallResult>;
-  update(runtimeId, onProgress?): Promise<InstallResult | null>;
+  install(runtimeId, onProgress?, options?: RuntimeOperationOptions): Promise<InstallResult>;
+  repair(runtimeId, onProgress?, options?: RuntimeOperationOptions): Promise<InstallResult>;
+  update(runtimeId, onProgress?, options?: RuntimeOperationOptions): Promise<InstallResult | null>;
   prepareAll(onProgress?): Promise<{ ready; installed; failures }>;
 }
 
@@ -331,6 +384,65 @@ class ClaudeAccountManager {
     openUrl?: (url: string) => void | Promise<void>; // o app abre o navegador
     signal?: AbortSignal;
   }): Promise<AccountStatus>;
+}
+```
+
+```ts
+// apps/desktop/src/shared/ipc-contract.ts
+export const BRIDGE_KEY = 'orchestrator';         // window.orchestrator
+
+type InvokeChannel =
+  | 'app:getInfo' | 'app:getBootstrapState'
+  | 'runtime:diagnose' | 'runtime:install' | 'runtime:repair'
+  | 'runtime:cancelInstall'
+  | 'accounts:list' | 'accounts:create' | 'accounts:remove'
+  | 'accounts:status' | 'accounts:connect' | 'accounts:cancelConnect';
+
+type EventChannel = 'runtime:progress' | 'accounts:loginProgress';
+
+type IpcResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; userMessage: string; remedy?: string;
+      code: 'INVALID_REQUEST' | 'RUNTIME_ERROR' | 'ACCOUNT_ERROR'
+          | 'DATABASE_ERROR' | 'INTERNAL' };
+
+interface InstallProgressEvent {          // InstallProgress, já traduzido
+  runtimeId; step: 'Baixando' | 'Verificando' | 'Instalando' | 'Testando'
+                 | 'Concluído' | 'Restaurado';
+  message: string; percent?: number;
+  diagnostic?: InstallProgress;           // só em developer mode
+}
+
+interface LoginProgressEvent {            // LoginProgress SEM a url
+  accountId; phase: LoginPhase; message: string; browserOpened: boolean;
+}
+```
+
+```ts
+// apps/desktop/src/main/ipc/router.ts     — sem Electron, portanto testável
+const HANDLERS: Record<InvokeChannel, Handler>;
+function missingHandlers(): InvokeChannel[];
+function dispatch<T>(services, channel: string, payload: unknown): Promise<IpcResult<T>>;
+```
+
+```ts
+// apps/desktop/src/main/app-services.ts
+class AppServices {
+  constructor(options: {
+    appName; appVersion;
+    emit; emitLogin;                       // Electron injeta webContents.send
+    openExternal;                          // Electron injeta shell.openExternal
+    log?; paths?; developerMode?;
+  });
+  readonly database: Database;
+  readonly runtimeManager: RuntimeManager;
+  readonly processManager: ProcessManager;
+  readonly claudeAccounts: ClaudeAccountManager;
+  readonly runtime: RuntimeService;
+  readonly accounts: AccountService;
+  appInfo(): AppInfo;
+  bootstrapState(): BootstrapState;
+  dispose(): Promise<void>;
 }
 ```
 
@@ -390,131 +502,190 @@ class AcceptanceCriteriaLedger { add/mark/pending/satisfied }
 
 ---
 
-## 6. Limitações e blockers abertos
+## 6. O que ficou provado nesta fase
 
-1. **Origens reais no Windows — não verificadas.** Os resolvers de
-   `releases.openai.com`, do instalador da Anthropic e do feed do Git for Windows
-   estão testados contra respostas simuladas. Nunca foram exercitados contra os
-   serviços reais, porque este ambiente os bloqueia. **A primeira execução do app
-   no Windows é o que valida isso.** Um resolver que não entende a resposta
-   *recusa* em vez de chutar URL, então a falha será clara.
-2. **Authenticode publishers — desconhecidos.** A leitura está implementada, mas
+Executado de verdade, não deduzido.
+
+### 6a. `node:sqlite` — resolvido
+`--self-test` dirige o **`Database` real** do produto: `node:sqlite` disponível,
+abrir, migrations até o schema esperado, WAL, prepared statement, INSERT, SELECT,
+transação com commit e com rollback, fechar, reabrir e ler.
+
+| | |
+|---|---|
+| Electron Main (não empacotado) | ✅ passou |
+| Electron Main **empacotado (asar)** | ✅ passou, `packaged: true` |
+
+Nenhuma dependência SQLite nativa foi introduzida. `SqlDriver` não mudou.
+
+### 6b. Ponte, isolamento e onboarding
+`--smoke-test`, dentro do aplicativo **empacotado**: preload expõe
+`window.orchestrator`; `require`, `process` e `module` são `undefined` na página;
+nenhum canal genérico; `app.getInfo`, `app.getBootstrapState`,
+`runtime.diagnose` e `accounts.list` respondem; um `runtimeId` inválido e um
+`accountId` com traversal são recusados com `INVALID_REQUEST`; o onboarding
+renderiza o diagnóstico; nenhum termo de terminal aparece na tela.
+
+### 6c. Instalação de runtime pela interface — provada de ponta a ponta
+Com `ORCHESTRATOR_SMOKE_INSTALL=codex`, num container Linux com acesso ao
+registry npm: Renderer → IPC → `RuntimeManager.install()` → download real →
+verificação de integridade → extração → health check em staging → promoção →
+health check → eventos de progresso de volta no Renderer.
+
+Passos que o Renderer recebeu: `Baixando > Verificando > Instalando > Testando >
+Concluído`. Nenhuma mensagem trouxe PATH, spawn, stderr, tarball ou exit code.
+`diagnose()` seguinte já reportava `codex` saudável.
+
+### 6d. Login Claude pela interface — iniciado de verdade, não concluído
+Com `ORCHESTRATOR_SMOKE_LOGIN=1`: conta criada pela interface, `connect`
+iniciado, CLI dirigido pelo Main, URL capturada, navegador aberto pelo Main,
+fases `starting > awaiting-browser > waiting-for-completion` recebidas no
+Renderer, cancelamento reconhecido, conta removida pela interface. **A URL nunca
+apareceu em nada que o Renderer recebeu.**
+
+Não foi possível concluir o login: exige uma pessoa e um navegador. O estado
+devolvido foi `ambient-credential`, que é exatamente o comportamento projetado —
+o container tem credencial de ambiente e o app **recusa** chamar isso de
+`connected`.
+
+### 6e. Empacotamento
+| | |
+|---|---|
+| Payload Linux (`electron-builder --dir`) | ✅ `release/linux-unpacked/`, `app.asar` 326 KB |
+| Payload Windows (`--win nsis`) | ✅ `release/win-unpacked/AI Orchestrator.exe` + `app.asar` |
+| Instalador `AI-Orchestrator-Setup.exe` | ❌ **não gerado aqui** — ver 7.1 |
+
+`app.asar` tem 326 KB porque não há uma única dependência de produção: o React
+é embutido pelo Vite e o Main pelo esbuild.
+
+---
+
+## 7. Limitações e blockers abertos
+
+Numerados por prioridade de release.
+
+1. **O instalador Windows não foi gerado neste ambiente.** `electron-builder`
+   monta o payload Windows inteiro e falha só no último passo, que executa o
+   stub NSIS sob wine de 32 bits. O `wine` de 64 bits instalou; o de 32 bits
+   não, porque a política de egress do container bloqueia a origem das
+   dependências i386. **Não é um defeito do projeto**: é um ambiente Linux sem
+   wine completo. Fechado por `.github/workflows/desktop.yml`, que constrói o
+   instalador num runner **Windows real** e roda `--self-test` e `--smoke-test`
+   contra o executável empacotado. **Esse workflow ainda não rodou.**
+2. **SmartScreen.** Sem certificado de code signing, o Windows exibirá “O Windows
+   protegeu o seu PC”. Decisão consciente; a pipeline nasce pronta para assinar.
+3. **Origens reais no Windows — parcialmente verificadas.** O resolver do npm
+   registry foi exercitado de verdade (6c). `releases.openai.com`, o instalador
+   da Anthropic e o feed do Git for Windows continuam testados só contra
+   respostas simuladas, porque este ambiente os bloqueia. Um resolver que não
+   entende a resposta *recusa* em vez de chutar URL, então a falha será clara.
+4. **Authenticode publishers — desconhecidos.** A leitura está implementada, mas
    nenhum `expectedPublisher` está configurado, de propósito. Descobrir os
-   valores reais exige rodar no Windows. Até lá o app registra o subject
-   observado e não recusa por publisher.
-3. **`testedVersion` do Git é um palpite fundamentado** (`2.47.0`). Ajustar para
-   o que o MinGit realmente entregar assim que houver uma execução real.
-4. **Duas contas Claude reais — não comprovado.** O mecanismo
-   (`CLAUDE_CONFIG_DIR`) está verificado contra o binário v2.1.252, e a detecção
-   de credencial ambiente está testada. Faltou o cenário real: dois logins
-   simultâneos permanecendo isolados. É o cenário C do MVP.
-5. **Cancelamento sem órfãos — provado só em Linux.** O teste de heartbeat passa
-   aqui. O caminho Windows (`taskkill /T /F`) está coberto por testes de argv,
-   não de execução. Precisa de verificação real.
-6. **`node:sqlite` dentro do Electron empacotado — a verificar.** Funciona no
-   Node 22 puro. Depende de qual Node o Electron embute e de a API experimental
-   estar exposta. **Isto é a primeira coisa a testar na próxima fase.** Se
-   falhar, trocar apenas `node-sqlite-driver.ts` — a interface `SqlDriver`
-   existe exatamente para isso.
-7. **SmartScreen.** Sem certificado de code signing, o Windows exibirá “O Windows
-   protegeu o seu PC”. Decisão consciente do usuário; a pipeline nasce pronta
-   para assinar depois.
-8. **Ponta solta:** `package.json` declara `bin: { orchestrator: "dist/index.js" }`
-   e um script `orchestrator`, mas **`src/index.ts` não existe**. Sobrou do plano
-   CLI-only. Remover ou apontar para um entry point de debug.
-9. **`src/config/config.ts` está obsoleto.** O modelo `config.json` foi
-   substituído pelas entidades SQLite. Ainda está no repositório com testes
-   verdes; remover quando a UI cobrir provedores/contas/agentes/workspaces.
+   valores reais exige rodar no Windows.
+5. **Login Claude completo — não comprovado.** Ver 6d: o fluxo inicia, captura a
+   URL e abre o navegador; falta uma pessoa concluindo.
+6. **Duas contas Claude reais — não comprovado.** O mecanismo está verificado e
+   a detecção de credencial de ambiente está provada em execução real (6d), mas
+   falta o cenário de dois logins simultâneos permanecendo isolados.
+7. **Cancelamento sem órfãos — provado só em Linux.** O caminho Windows
+   (`taskkill /T /F`) está coberto por testes de argv, não de execução.
+8. **`testedVersion` do Git é um palpite fundamentado** (`2.47.0`).
+9. **Ícone do aplicativo.** `electron-builder` avisa “default Electron icon is
+   used”. Cosmético, mas visível no instalador e na barra de tarefas.
 10. **`src/agents/agent-runner.ts` e `decision-parser.ts`** foram escritos para o
     plano CLI-only. O parser precisa ganhar as ações `ask_user` e `route`, mais
-    `targetAgentId` e `requestedVerificationIds`.
+    `targetAgentId` e `requestedVerificationIds`. Nada os importa hoje.
+11. **Dado pessoal no histórico do git.** `relative/path/.claude.json` foi
+    removido do HEAD, mas continua alcançável no commit `35f1d25`. Contém
+    e-mail de conta, UUIDs de conta e organização e um machine id. Removê-lo de
+    verdade exige reescrever o histórico (`git filter-repo`) e um force-push —
+    **decisão do dono do repositório**, não feita aqui.
 
 ---
 
-## 7. Próxima fase — escopo exato
-
-Implementar **somente** a fundação Electron:
-
-- versão do Electron **fixada** (pinned, sem `^`);
-- Electron Main;
-- Preload;
-- Renderer React mínimo;
-- IPC **tipado**, contrato compartilhado entre main e renderer;
-- `contextIsolation: true`;
-- `nodeIntegration: false`;
-- **`node:sqlite` testado dentro do Main empacotado** ← fazer primeiro;
-- `RuntimeManager.diagnose()` exposto via IPC;
-- onboarding inicial mostrando o checklist de runtimes;
-- instalação de runtime pela GUI, com progresso vindo de `InstallProgress`;
-- protótipo real de login Claude pela GUI (`ClaudeAccountManager.connect`, com
-  `openUrl` ligado ao `shell.openExternal` do Electron);
-- primeiro empacotamento Windows.
-
-**Não iniciar ainda:** chat completo, Agents completo, Workspaces completo, Runs
-completo, Gemini, frontend final.
-
-Ordem sugerida: (1) provar `node:sqlite` no Electron antes de escrever UI;
-(2) shell + IPC; (3) onboarding lendo `diagnose()`; (4) instalação pela GUI;
-(5) login Claude; (6) empacotamento.
-
----
-
-## 8. Critério de aceitação da próxima fase
+## 8. Critério de aceitação desta fase — atendido
 
 ```
-AI-Orchestrator.exe
-→ abre
-→ Renderer React carrega
-→ IPC funciona
-→ Main acessa SQLite
-→ RuntimeManager.diagnose() funciona
-→ onboarding mostra runtimes
-→ runtime pode ser configurado pela interface
-→ login Claude pode ser iniciado pela interface
-→ nenhum terminal faz parte da experiência normal
+aplicativo empacotado
+→ abre                                    ✅ 6b
+→ Renderer React carrega                  ✅ 6b
+→ Preload seguro funciona                 ✅ 6b (require/process undefined)
+→ IPC tipado funciona                     ✅ 6b
+→ Main acessa SQLite                      ✅ 6a (empacotado)
+→ RuntimeManager.diagnose() funciona      ✅ 6b
+→ onboarding recebe o diagnóstico         ✅ 6b
+→ runtime configurado pela UI             ✅ 6c (instalação real)
+→ login Claude começa pela UI             ✅ 6d (não concluído: 7.5)
+→ nenhum terminal na experiência normal   ✅ 6b, 6c
 ```
 
-Reprova se em qualquer ponto do fluxo normal o usuário precisar abrir um
-terminal, instalar Node/npm, editar JSON ou definir variável de ambiente.
-
-Além disso: **os 156 testes existentes devem continuar verdes.**
+Ressalva honesta: o executável verificado é o **empacotado para Linux**. O
+payload Windows é montado, mas o `.exe` de instalação e a execução em Windows
+dependem do workflow em 7.1.
 
 ---
 
 ## 9. Comandos de verificação
 
-Estado atual (funcionam hoje):
+Núcleo (raiz do repositório):
 
 ```bash
-npm install                 # apenas typescript + @types/node
+npm install                 # workspace: cobre núcleo e apps/desktop
 npm run typecheck           # tsc -p tsconfig.test.json --noEmit
-npm run build               # tsc -p tsconfig.json        → dist/
-npm run build:tests         # tsc -p tsconfig.test.json   → dist-tests/
-npm test                    # build + node --test "dist-tests/tests/**/*.test.js"
-npm run clean               # remove dist/ e dist-tests/
+npm test                    # 188 testes
+npm run build               # tsc -p tsconfig.json → dist/
+npm run clean
 ```
+
+Desktop (`apps/desktop/`):
+
+```bash
+npm run typecheck           # inclui o núcleo, com DOM e JSX
+npm run build               # esbuild (main + preload .cjs) + vite (renderer)
+npm run dev                 # Vite + esbuild em watch + Electron
+npm run package:dir         # electron-builder --dir
+npm run package:win         # electron-builder --win nsis   (precisa de Windows
+                            # ou de wine 32 bits — ver 7.1)
+```
+
+As duas provas, contra o build de desenvolvimento ou contra o empacotado:
+
+```bash
+# banco
+electron dist/electron/main.cjs --self-test
+./release/linux-unpacked/ai-orchestrator-desktop --self-test
+
+# ponte, isolamento e onboarding
+electron dist/electron/main.cjs --smoke-test
+
+# extras, porque baixam ou executam CLI
+ORCHESTRATOR_SMOKE_INSTALL=codex   ...  --smoke-test
+ORCHESTRATOR_SMOKE_LOGIN=1         ...  --smoke-test
+ORCHESTRATOR_SMOKE_SCREENSHOT=/tmp/tela.png ... --smoke-test
+```
+
+Num container sem display, prefixe com `xvfb-run -a` e passe `--no-sandbox`.
 
 Ferramenta interna de desenvolvimento (**não** é a experiência do produto):
 
 ```bash
-node spike/windows-spike.mjs                 # interativo
 node spike/windows-spike.mjs --help
-node spike/windows-spike.mjs --non-interactive --live
 ```
 
-A criar na próxima fase (nomes sugeridos, ainda não existem):
+---
 
-```bash
-npm run dev                 # Vite renderer + Electron main em watch
-npm run build:main          # compila o processo main
-npm run build:renderer      # compila o renderer
-npm run package             # electron-builder → NSIS per-user
-npm run package:dir         # build sem instalador, para testar rápido
-```
+## 9a. Próxima fase sugerida
 
-Empacotamento pretendido: `electron-builder`, alvo **NSIS per-user**
-(instala em `%LOCALAPPDATA%`, sem UAC), auto-update por **GitHub Releases**
-via `electron-updater`. Sem assinatura por ora.
+Nesta ordem, e ainda **não** o frontend completo:
+
+1. Rodar `.github/workflows/desktop.yml` e obter um `AI-Orchestrator-Setup.exe`
+   de verdade; instalar numa máquina Windows e repetir 6a-6d lá. É o que fecha
+   7.1, 7.3, 7.4, 7.6 e 7.7 de uma vez.
+2. Concluir um login Claude real e depois um segundo, provando isolamento.
+3. Developer Mode: a tela onde PATH, origem, checksum, publisher e exit code
+   podem aparecer. Hoje esses dados existem e são deliberadamente retidos.
+4. Só então: OrchestratorCore, AgentRouter, adapters, chat, agents, workspaces,
+   runs.
 
 ---
 
@@ -523,14 +694,32 @@ via `electron-updater`. Sem assinatura por ora.
 1. Ler este arquivo inteiro antes de escrever código.
 2. Conferir o estado: `git log -1`, `git status`, `npm test`.
 3. Não reescrever `ProcessManager`, `RuntimeManager`, `ClaudeAccountManager`,
-   `done-gate` ou `git-safety` — estão prontos, testados e resolvem requisitos
-   específicos do produto. Consumir, não recriar.
-4. Respeitar as decisões da seção 3 sem exceção.
-5. Implementar **apenas** a seção 7.
-6. Manter os 156 testes verdes; adicionar testes para o que for novo.
-7. Commitar por etapa na branch `claude/new-session-3am7mo` e fazer push.
+   `done-gate`, `git-safety` nem a camada de IPC — estão prontos, testados e
+   resolvem requisitos específicos do produto. Consumir, não recriar.
+4. Respeitar as decisões da seção 3 sem exceção. Em particular: **nunca**
+   adicionar um canal de IPC que receba um comando, um caminho livre ou um
+   trecho de SQL vindo do renderer. Há testes impedindo, e eles existem para
+   ser um obstáculo.
+5. Implementar a seção 9a, na ordem, e não avançar para o frontend completo
+   antes de o item 1 dela estar fechado.
+6. Manter os 188 testes verdes; adicionar testes para o que for novo.
+7. Commitar por etapa e fazer push na branch de trabalho atual.
 8. Ao terminar, reportar: FILES CREATED, FILES MODIFIED, TESTS, KNOWN
    LIMITATIONS, NEXT PHASE.
 
 Se algo neste documento contradisser o código, **o código é a verdade** —
 atualize o documento.
+
+---
+
+## 11. Aparência atual
+
+Aplicativo empacotado, primeira execução com o Codex ainda faltando e depois de
+o usuário tocar em **Configurar automaticamente**:
+
+![Onboarding com um componente pendente](images/onboarding-packaged.png)
+
+![Onboarding com tudo pronto](images/onboarding-ready.png)
+
+As duas capturas saíram de `--smoke-test` no executável empacotado, não de um
+mockup.

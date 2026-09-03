@@ -1,0 +1,73 @@
+# Builds the thing we actually ship.
+#
+# The Windows installer cannot be produced on Linux without 32-bit wine, and a
+# packaging problem found at release time is exactly what this phase set out to
+# avoid. So the installer is built on a real Windows runner, and the two proofs
+# that matter - node:sqlite inside the packaged application, and the bridge
+# working end to end - are run against the installed executable rather than
+# against `npm run dev`.
+
+name: desktop
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: Core tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  windows-package:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+
+      - name: Typecheck the desktop package
+        working-directory: apps/desktop
+        run: npm run typecheck
+
+      - name: Build main, preload and renderer
+        working-directory: apps/desktop
+        run: npm run build
+
+      # The proof that matters most: node:sqlite inside the packaged
+      # application, where the asar archive and the bundled Node are real.
+      - name: Prove SQLite in the packaged application
+        working-directory: apps/desktop
+        run: |
+          npx electron-builder --win nsis --publish never
+          & ".\release\win-unpacked\AI Orchestrator.exe" --self-test | Tee-Object -Variable output
+          if ($LASTEXITCODE -ne 0) { throw "the packaged self-test failed" }
+          if ($output -notmatch 'AI_ORCHESTRATOR_SELF_TEST') { throw "no self-test report was printed" }
+        shell: pwsh
+
+      - name: Prove the bridge in the packaged application
+        working-directory: apps/desktop
+        run: |
+          & ".\release\win-unpacked\AI Orchestrator.exe" --smoke-test | Tee-Object -Variable output
+          if ($LASTEXITCODE -ne 0) { throw "the packaged smoke test failed" }
+          if ($output -notmatch 'AI_ORCHESTRATOR_SMOKE_TEST') { throw "no smoke report was printed" }
+        shell: pwsh
+
+      - name: Keep the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Orchestrator-Setup
+          path: apps/desktop/release/*.exe
+          if-no-files-found: error
