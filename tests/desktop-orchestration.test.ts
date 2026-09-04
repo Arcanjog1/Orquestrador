@@ -449,3 +449,187 @@ test('a run refuses to start when a runtime or account is not ready, instead of 
     repo.cleanup();
   }
 });
+
+/* ------------------------------------------------------------------------ *
+ * The autonomous loop.
+ *
+ * The test above proves the worker is sent back a second time, but its
+ * orchestrator answers from a fixed script: the corrective instruction was
+ * written by the test, not derived by the orchestrator. This one closes that
+ * gap. Its orchestrator has no script for the second turn - it reads the
+ * feedback the loop handed it and composes the next instruction from what the
+ * verification actually reported.
+ *
+ * That is the claim being tested: a second prompt reaches the worker, carrying
+ * information that existed nowhere until the first attempt failed, with no
+ * second message from the user.
+ * ------------------------------------------------------------------------ */
+
+/** The wrong content the first attempt writes. Nothing else in the run knows it. */
+const WRONG = 'Ola AI Orchestrator (sem acento)';
+
+test('the loop composes the second worker prompt from its own review of the first', async () => {
+  const orchestratorPrompts: string[] = [];
+
+  const prepared = await prepare({
+    // No fixed second instruction: each answer is computed from what arrived.
+    orchestratorScript: [
+      (input: AgentInput) => {
+        orchestratorPrompts.push(input.prompt);
+        assert.doesNotMatch(
+          input.prompt,
+          /RESULT OF THE PREVIOUS ITERATION/,
+          'the first turn has no previous result to review',
+        );
+        return delegate('Crie hello.txt com o conteúdo combinado');
+      },
+      (input: AgentInput) => {
+        orchestratorPrompts.push(input.prompt);
+        // The loop must have handed over the failure before this runs.
+        assert.match(input.prompt, /RESULT OF THE PREVIOUS ITERATION/);
+        assert.match(input.prompt, /VERIFICATION RESULTS/);
+        assert.match(input.prompt, /FAIL \(exit 1\)/);
+
+        // Read what the verification actually observed, and correct *that*.
+        // The value is only knowable from the first attempt's failure.
+        const observed = /hello\.txt is "([^"]*)"/.exec(input.prompt)?.[1];
+        assert.equal(observed, WRONG, 'the real observed value reached the orchestrator');
+
+        return delegate(
+          `A tentativa anterior gravou ${JSON.stringify(observed)}. ` +
+            `Corrija hello.txt para conter exatamente ${JSON.stringify(EXPECTED)}.`,
+        );
+      },
+      (input: AgentInput) => {
+        orchestratorPrompts.push(input.prompt);
+        assert.match(input.prompt, /PASS: node check\.mjs/, 'the passing run was reported back');
+        return done();
+      },
+    ],
+    workerScript: [
+      // The worker obeys its instruction rather than a counter: the first says
+      // nothing about content, the second carries the exact string to write.
+      (input: AgentInput) => {
+        const wanted = /exatamente "([^"]*)"/.exec(input.prompt)?.[1];
+        writeFileSync(
+          join(input.workingDirectory, 'hello.txt'),
+          `${wanted ?? WRONG}\n`,
+          'utf8',
+        );
+        return wanted ? 'corrigido' : 'criado';
+      },
+    ],
+  });
+
+  try {
+    // One message from the user. Nothing else is sent for the rest of the run.
+    const sent = value<{ run: { id: string } }>(
+      await prepared.fixture.router.handle('chat.sendMessage', {
+        sessionId: prepared.sessionId,
+        text: 'Crie hello.txt com o texto combinado',
+      }),
+    );
+    const run = await prepared.fixture.services.orchestration.waitFor(sent.run.id);
+
+    // -- the worker really was invoked twice, as the database recorded it ----
+    const invocations = prepared.fixture.services.database.runs.invocations(sent.run.id) as Array<{
+      role: string;
+      iteration: number;
+      outcome: string;
+    }>;
+    const workerInvocations = invocations.filter((i) => i.role === 'CODING_WORKER');
+    assert.equal(workerInvocations.length, 2, 'the worker ran twice');
+    assert.deepEqual(
+      workerInvocations.map((i) => i.iteration),
+      [1, 2],
+      'the second turn is a real second iteration, not a retry of the first',
+    );
+
+    // -- and the second prompt was composed, not scripted --------------------
+    const worker = prepared.worker as ScriptedAgent;
+    assert.equal(worker.calls.length, 2);
+    const firstWorkerPrompt = worker.calls[0]!.prompt;
+    const secondWorkerPrompt = worker.calls[1]!.prompt;
+
+    assert.notEqual(secondWorkerPrompt, firstWorkerPrompt);
+    assert.doesNotMatch(firstWorkerPrompt, /tentativa anterior/);
+    // The wrong value existed nowhere before the first attempt ran, so its
+    // presence here is the proof that the chain closed by itself:
+    // worker result -> evidence -> verification -> orchestrator -> worker.
+    assert.match(secondWorkerPrompt, /A tentativa anterior gravou/);
+    assert.ok(
+      secondWorkerPrompt.includes(WRONG),
+      'the second instruction carries what the verification observed',
+    );
+    assert.ok(
+      secondWorkerPrompt.includes(EXPECTED),
+      'the second instruction says what to write instead',
+    );
+
+    // -- the user sent one message; the loop produced the rest ---------------
+    const messages = prepared.fixture.services.database.chat.listMessages(prepared.sessionId) as Array<{
+      author: string;
+    }>;
+    assert.equal(
+      messages.filter((m) => m.author === 'user').length,
+      1,
+      'no second message from the user',
+    );
+
+    // -- and only then did the gate let it finish ----------------------------
+    assert.equal(orchestratorPrompts.length, 3, 'three orchestrator turns: delegate, review, done');
+    assert.equal(run.status, 'DONE');
+    assert.equal(readFileSync(join(prepared.repo.dir, 'hello.txt'), 'utf8').trim(), EXPECTED);
+  } finally {
+    await prepared.cleanup();
+  }
+});
+
+/**
+ * The human gate.
+ *
+ * A run that stops for a person is not a failure, and the difference has to
+ * survive the trip to the interface: the status the loop sets is the status
+ * `run.get` reports, so the timeline can draw the review card instead of an
+ * error. Ordinary failures - a failing test, a wrong implementation - must not
+ * come here; those go round the loop again, which the test above covers.
+ */
+test('a run that stops for a person reports BLOCKED, distinct from a failure', async () => {
+  const prepared = await prepare({
+    orchestratorScript: [
+      JSON.stringify({
+        action: 'blocked',
+        acceptanceCriteria: [],
+        verificationCommands: [],
+        summary: 'Preciso de uma decisão sua.',
+        reason: 'O requisito permite duas interpretações incompatíveis.',
+      }),
+    ],
+  });
+
+  try {
+    const sent = value<{ run: { id: string } }>(
+      await prepared.fixture.router.handle('chat.sendMessage', {
+        sessionId: prepared.sessionId,
+        text: 'Faça a coisa ambígua',
+      }),
+    );
+    await prepared.fixture.services.orchestration.waitFor(sent.run.id);
+
+    // Read it back the way the renderer does, not out of the database.
+    const view = value<{ status: string; summary: string | null }>(
+      await prepared.fixture.router.handle('run.get', { runId: sent.run.id }),
+    );
+    assert.equal(view.status, 'BLOCKED');
+    assert.notEqual(view.status, 'FAILED', 'a human gate is not a failure');
+    assert.match(view.summary ?? '', /duas interpretações/);
+
+    // And the worker was never asked to guess.
+    const invocations = prepared.fixture.services.database.runs.invocations(sent.run.id) as Array<{
+      role: string;
+    }>;
+    assert.equal(invocations.filter((i) => i.role === 'CODING_WORKER').length, 0);
+  } finally {
+    await prepared.cleanup();
+  }
+});
