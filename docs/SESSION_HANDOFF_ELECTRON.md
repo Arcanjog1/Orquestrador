@@ -295,7 +295,47 @@ Antes ele mantinha a própria lista de fontes e só as *sondava*, então reporta
 Codex sem problema. Um spike que contradiz o código que ele deveria informar é
 pior do que spike nenhum.
 
-### 5.2 Capacidades reais do Codex 0.153.0
+### 5.2 Fonte do Claude Code: o que o instalador oficial faz
+
+`claude.ai/install.sh` e `install.ps1` redirecionam para um bootstrap em
+`https://downloads.claude.ai/claude-code-releases`. O passo de descoberta no CI
+leu esse script; o contrato é:
+
+```
+<base>/stable                      -> versão em texto puro, ex. 2.1.236
+<base>/<versão>/manifest.json      -> platforms["<chave>"] = { checksum, size }
+<base>/<versão>/<chave>/claude[.exe]  -> o executável, recusado se o SHA-256 não bater
+```
+
+O resolver antigo apontava para `claude.ai/install-manifest.json`, que **não
+existe** (403) — foi inventado, e por isso o Claude Code nunca instalou. Agora
+segue exatamente esses passos, com o mesmo digest.
+
+A chave de plataforma é a única coisa que o script POSIX não revela (ele monta
+`linux-x64-musl` e afins; a grafia do Windows está no ramo PowerShell). Em vez
+de adivinhar, o resolver oferece todas as chaves plausíveis e **o manifesto
+decide** — uma chave que ele não declara simplesmente não é usada.
+
+**Provado no Windows CI:** `Prove the Claude runtime installs for real` →
+**PASS**, incluindo `claude --version` e `claude auth status --json`. Não é
+preciso autenticar para provar isso.
+
+### 5.3 Contas do Codex
+
+Lido do binário real, não presumido:
+
+| | |
+|---|---|
+| Isolamento | `CODEX_HOME` (paralelo exato do `CLAUDE_CONFIG_DIR`) |
+| Estado | `codex login status` → "Not logged in" |
+| Login GUI | `codex login --device-auth` (URL + código, ideal sem terminal) |
+| Outros | `--with-api-key`, `--with-access-token` (ambos por stdin) |
+| Credencial da conta | `auth.json` dentro do `CODEX_HOME` |
+
+`CODEX_ACCESS_TOKEN` entrou na lista de variáveis sensíveis: herdada do
+ambiente, satisfaria todas as contas ao mesmo tempo.
+
+### 5.4 Capacidades reais do Codex 0.153.0
 
 Lidas do binário, não presumidas:
 
@@ -309,33 +349,57 @@ Isso revelou um **bug no adapter**: ele procurava `--skip-git-repo-check` em
 `codex --help`, onde o flag não existe — os flags de um subcomando não aparecem
 na página do pai. Agora lê `codex exec --help`.
 
-Adotado: `--skip-git-repo-check` e `--sandbox read-only` (o orquestrador
-supervisiona e nunca edita; agora isso é regra do sandbox, não linha de prompt).
+Adotado: `--skip-git-repo-check`, `--sandbox read-only` (o orquestrador
+supervisiona e nunca edita) e, agora, a saída estruturada:
 
-**Não** adotado, de propósito:
+- `--output-schema` recebe o JSON Schema da decisão (em
+  `src/orchestrator/decision-schema.ts`, ao lado do parser que a valida — um
+  teste garante que a lista de ações continua sendo exatamente
+  `ALLOWED_ACTIONS`);
+- `-o/--output-last-message` grava a resposta final em um arquivo, e é esse
+  arquivo que o loop analisa.
 
-- `--json` imprime *eventos* em JSONL, não uma resposta. O parser de decisão
-  leria o primeiro evento como a decisão.
-- `--output-schema` e `-o/--output-last-message` são o mecanismo certo a médio
-  prazo, mas mudam o que o loop analisa e não dá para validar sem uma execução
-  autenticada de modelo.
+`--json` continua **não** adotado: imprime *eventos* em JSONL, e o parser leria
+o primeiro evento como a decisão.
+
+Tudo defensivo: cada flag só entra se o build a declarar; se o arquivo de
+resposta faltar ou vier vazio, o loop volta a analisar o stdout. Há teste com
+um `{"action":"blocked"}` de isca no transcript para provar que o arquivo vence.
+
+### 5.5 O que acontece sem credencial
+
+Medido: sem autenticação o Codex **não falha rápido**. Ele imprime
+`Reading prompt from stdin...` (o que, de quebra, prova que o prompt chega por
+stdin como projetado) e espera até o timeout.
+
+Por isso um run agora **verifica antes de começar**: os runtimes dos dois
+agentes estão instalados? toda conta vinculada está conectada? Se não, o run
+falha em cerca de um segundo com uma frase acionável e nenhum agente é
+invocado. Sem isso, a interface mostraria "Codex preparando a tarefa..." por
+quinze minutos.
+
+> Para quem for escrever testes: passar `createRunners` significa passar os
+> próprios agentes, o que **desliga** a verificação de prontidão.
 
 ---
 
 ## 6. Blockers abertos
 
-1. **`AI-Orchestrator-Setup.exe` foi construído mas ninguém o instalou.** O CI
-   o produz, o smoke empacotado passa, e agora ele é publicado como
-   **pre-release** na tag `desktop-dev` (o repositório é privado, então só quem
-   já tem acesso enxerga). Falta baixar, instalar e usar.
-2. **Claude Code nunca foi instalado de ponta a ponta.** A fonte responde
-   (`claude.ai/install.ps1` → 200), mas nenhum runner completou a instalação. O
-   CI agora tenta, como passo informativo.
-3. **O `ClaudeCodeAdapter` nunca rodou contra o CLI real.** As capacidades do
-   Codex já foram lidas do binário (seção 5.2); as do Claude não.
-4. **Nenhuma execução autenticada de modelo.** Os adapters sabem invocar os
-   CLIs, mas nenhum runner tem credencial, então o loop de orquestração nunca
-   rodou com agentes reais de ponta a ponta.
+1. **Nenhuma execução autenticada de modelo — este é o blocker número 1.**
+   Os dois CLIs instalam, os dois adapters os invocam de verdade (argv, stdin,
+   ambiente), mas nenhum runner de CI tem credencial. Então o loop de
+   orquestração **nunca rodou com agentes reais de ponta a ponta**. Só uma
+   máquina com contas conectadas responde isso, e é exatamente o que o
+   instalador existe para permitir.
+2. **`AI-Orchestrator-Setup.exe` foi construído mas ninguém o instalou.** O CI
+   o produz, o smoke empacotado passa, e ele é publicado como **pre-release** na
+   tag `desktop-dev` (o repositório é privado, então só quem já tem acesso
+   enxerga). Falta baixar, instalar e usar.
+3. **Login pela GUI nunca foi completado por uma pessoa.** O fluxo existe para
+   os dois provedores e é dirigido pelo Main (captura de URL, abertura do
+   navegador, polling), mas concluir um login exige um humano num navegador.
+4. **`testedVersion` do Git continua um palpite** — nenhuma instalação
+   gerenciada de MinGit foi observada ainda.
 4. **Authenticode publishers — desconhecidos.** Nenhum `expectedPublisher`
    configurado, de propósito. O CI registra o subject observado.
 5. **Duas contas Claude reais simultâneas — não comprovado.** O isolamento de
