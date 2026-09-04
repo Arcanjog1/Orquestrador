@@ -53,6 +53,7 @@ export { screenCommand } from '../../../../src/git/git-safety.js';
 export { AcceptanceCriteriaLedger } from '../../../../src/orchestrator/acceptance-criteria.js';
 export { parseDecision, buildRepairPrompt } from '../../../../src/orchestrator/decision-parser.js';
 export { evaluateDone, formatDoneRejection } from '../../../../src/orchestrator/done-gate.js';
+export { DECISION_JSON_SCHEMA } from '../../../../src/orchestrator/decision-schema.js';
 export { Verifier, commandPassed } from '../../../../src/orchestrator/verifier.js';
 
 export type {

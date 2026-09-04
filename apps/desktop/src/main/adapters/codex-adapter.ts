@@ -10,6 +10,9 @@
  *  - the non-interactive mode is *detected*, not assumed.
  */
 
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessManager } from './adapter-types.js';
 import { makeAgentResult } from '../core.js';
 import { readCapabilities, type CliCapabilities } from './cli-capabilities.js';
@@ -19,6 +22,14 @@ export interface CodexAdapterOptions {
   /** Resolves the managed executable; called lazily so a missing runtime is a
    *  clear error at use time rather than at construction time. */
   resolveExecutable: () => Promise<string>;
+  /**
+   * JSON Schema constraining the model's final message.
+   *
+   * Supplied by the caller rather than baked in, so the adapter stays free of
+   * orchestration semantics. Used only when the installed build offers
+   * `--output-schema`.
+   */
+  outputSchema?: unknown;
 }
 
 export class CodexAdapter implements AgentRunner {
@@ -35,32 +46,44 @@ export class CodexAdapter implements AgentRunner {
   async run(input: AgentInput): Promise<AgentResult> {
     const startedAt = new Date().toISOString();
     const executable = await this.options.resolveExecutable();
-    const args = await this.buildArgs(executable, input.workingDirectory);
 
+    // Scratch directory for the structured-output files. Removed in `finally`,
+    // so a cancelled or crashed run leaves nothing behind.
+    const scratch = mkdtempSync(join(tmpdir(), 'codex-run-'));
     const controller = new AbortController();
     this.controllers.add(controller);
+
     try {
+      const plan = await this.buildArgs(executable, input.workingDirectory, scratch);
       const result = await this.options.processManager.run({
         command: executable,
-        args,
+        args: plan.args,
         cwd: input.workingDirectory,
         stdin: input.prompt,
         timeoutMs: input.timeoutMs,
         signal: controller.signal,
         ...(input.env ? { env: input.env } : {}),
       });
+
+      // The final message, when Codex was asked to write one, is the answer.
+      // Its stdout is a transcript: readable, but not a contract. Falling back
+      // to stdout keeps a build without the flag working exactly as before.
+      const lastMessage = plan.lastMessagePath ? readIfPresent(plan.lastMessagePath) : null;
+      const stdout = lastMessage && lastMessage.trim().length > 0 ? lastMessage : result.stdout;
+
       return makeAgentResult({
         startedAt,
         outcome: result.outcome,
         exitCode: result.exitCode,
         signal: result.signal,
-        stdout: result.stdout,
+        stdout,
         stderr: result.stderr,
         truncated: result.truncated,
         ...(result.error ? { error: result.error } : {}),
       });
     } finally {
       this.controllers.delete(controller);
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
 
@@ -103,17 +126,12 @@ export class CodexAdapter implements AgentRunner {
    * against codex-cli 0.153.0, where `--skip-git-repo-check` and `--sandbox`
    * live on `exec` alone.
    *
-   * Two flags this build offers are deliberately not used yet:
-   *
-   *  - `--json` prints *events* as JSONL, not a single answer. Feeding an event
-   *    stream to the decision parser would have it read the first event as the
-   *    decision.
-   *  - `--output-schema` and `-o/--output-last-message` are the right long-term
-   *    mechanism for getting a clean decision, but adopting them changes what
-   *    the loop parses, and that cannot be validated without an authenticated
-   *    model run. Left for when there is one.
+   * `--json` is still not used: it prints *events* as JSONL, and the decision
+   * parser would read the first event as the decision. The structured path is
+   * `--output-schema` plus `-o/--output-last-message`, which is what this
+   * builds when the installed build offers them.
    */
-  private async buildArgs(executable: string, cwd: string): Promise<string[]> {
+  private async buildArgs(executable: string, cwd: string, scratch: string): Promise<CodexPlan> {
     this.capabilities ??= await readCapabilities(this.options.processManager, executable, cwd);
     if (!this.capabilities.subcommands.has('exec')) {
       throw new CodexCapabilityError(
@@ -137,7 +155,39 @@ export class CodexAdapter implements AgentRunner {
     if (this.execCapabilities.flags.has('--sandbox')) {
       args.push('--sandbox', 'read-only');
     }
-    return args;
+
+    // Structured output, when this build supports it: tell Codex the shape the
+    // answer must take, and ask for that answer in a file of its own. Both are
+    // additive - without them the loop still parses stdout, which is why the
+    // fallback in `run` matters.
+    if (this.options.outputSchema !== undefined && this.execCapabilities.flags.has('--output-schema')) {
+      const schemaPath = join(scratch, 'decision.schema.json');
+      writeFileSync(schemaPath, `${JSON.stringify(this.options.outputSchema, null, 2)}\n`, 'utf8');
+      args.push('--output-schema', schemaPath);
+    }
+
+    let lastMessagePath: string | null = null;
+    if (this.execCapabilities.flags.has('--output-last-message')) {
+      lastMessagePath = join(scratch, 'last-message.txt');
+      args.push('--output-last-message', lastMessagePath);
+    }
+
+    return { args, lastMessagePath };
+  }
+}
+
+interface CodexPlan {
+  readonly args: string[];
+  /** Where Codex was asked to write its final message, when it can. */
+  readonly lastMessagePath: string | null;
+}
+
+/** Reads a file the CLI may or may not have written. Absence is not an error. */
+function readIfPresent(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
   }
 }
 

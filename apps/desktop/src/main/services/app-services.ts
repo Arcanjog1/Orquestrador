@@ -24,6 +24,7 @@ import {
 import { RuntimeService } from './runtime-service.js';
 import { WorkspaceService } from './workspace-service.js';
 import { CodexAdapter } from '../adapters/codex-adapter.js';
+import { DECISION_JSON_SCHEMA } from '../core.js';
 import { ClaudeCodeAdapter } from '../adapters/claude-adapter.js';
 
 export interface AppServicesOptions {
@@ -101,6 +102,9 @@ export class AppServices {
     const orchestrator = new CodexAdapter({
       processManager: this.processManager,
       resolveExecutable: () => this.runtimeManager.getExecutablePath('codex'),
+      // The decision shape is the orchestrator's contract, not the adapter's,
+      // so it is handed in rather than baked in.
+      outputSchema: DECISION_JSON_SCHEMA,
     });
     const worker = new ClaudeCodeAdapter({
       processManager: this.processManager,

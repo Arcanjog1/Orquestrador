@@ -9,13 +9,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { parseHelp } from '../apps/desktop/src/main/adapters/cli-capabilities.js';
 import { CodexAdapter } from '../apps/desktop/src/main/adapters/codex-adapter.js';
 import { ClaudeCodeAdapter } from '../apps/desktop/src/main/adapters/claude-adapter.js';
 import type { ProcessManager, RunProcessOptions, ProcessResult } from '../src/process/process-manager.js';
 
 /** Records every spawn the adapter asks for, and answers from a script. */
-function fakeProcessManager(responses: Record<string, string>): {
+function fakeProcessManager(
+  responses: Record<string, string>,
+  onRun?: (options: RunProcessOptions) => void,
+): {
   manager: ProcessManager;
   calls: RunProcessOptions[];
 } {
@@ -23,12 +27,16 @@ function fakeProcessManager(responses: Record<string, string>): {
   const manager = {
     async run(options: RunProcessOptions): Promise<ProcessResult> {
       calls.push(options);
+      onRun?.(options);
       const key = (options.args ?? []).join(' ');
+      // Structured runs are keyed by the subcommand alone: the scratch paths
+      // differ every time.
+      const stdout = responses[key] ?? responses[(options.args ?? [])[0] ?? ''] ?? '';
       return {
         outcome: 'completed',
         exitCode: 0,
         signal: null,
-        stdout: responses[key] ?? '',
+        stdout,
         stderr: '',
         durationMs: 1,
         truncated: false,
@@ -134,12 +142,15 @@ test('Codex runs headless via `exec`, with the prompt on stdin and never in argv
   assert.equal(invocation.command, '/managed/codex.exe', 'the managed path, not "codex"');
   // Read-only because the orchestrator supervises and never edits; the flags
   // come from `exec --help`, which is where this build actually declares them.
-  assert.deepEqual(invocation.args, [
+  assert.deepEqual((invocation.args ?? []).slice(0, 4), [
     'exec',
     '--skip-git-repo-check',
     '--sandbox',
     'read-only',
   ]);
+  // The answer file is asked for even without a schema: a clean final message
+  // beats scraping a transcript either way.
+  assert.ok((invocation.args ?? []).includes('--output-last-message'));
   assert.equal(invocation.stdin, 'segredo do prompt');
   assert.ok(
     !(invocation.args ?? []).some((arg) => arg.includes('segredo')),
@@ -296,4 +307,165 @@ test('an unconfigured runtime surfaces as a message, not as ENOENT', async () =>
   assert.equal(health.healthy, false);
   assert.match(health.problem ?? '', /não está configurado/i);
   assert.ok(!/ENOENT/.test(JSON.stringify(health)), 'no raw error text reaches the interface');
+});
+
+/* ------------------------------------------------- structured output ----- */
+
+test('the decision schema still describes exactly the actions the parser allows', async () => {
+  const { DECISION_JSON_SCHEMA } = await import('../src/orchestrator/decision-schema.js');
+  const { ALLOWED_ACTIONS } = await import('../src/orchestrator/decision-parser.js');
+  assert.deepEqual([...DECISION_JSON_SCHEMA.properties.action.enum], [...ALLOWED_ACTIONS]);
+  assert.equal(DECISION_JSON_SCHEMA.additionalProperties, false);
+  assert.deepEqual([...DECISION_JSON_SCHEMA.required], ['action']);
+});
+
+test('Codex is told the answer shape and asked to write it to a file', async () => {
+  // Read while the run is in flight: the scratch directory is removed when it
+  // ends, which is itself asserted below.
+  let schemaOnDisk: Record<string, unknown> | null = null;
+  const { manager, calls } = fakeProcessManager(
+    { '--help': CODEX_HELP, 'exec --help': CODEX_EXEC_HELP },
+    (options) => {
+      const args = options.args ?? [];
+      const index = args.indexOf('--output-schema');
+      if (index >= 0) schemaOnDisk = JSON.parse(readFileSync(args[index + 1]!, 'utf8'));
+    },
+  );
+  const { DECISION_JSON_SCHEMA } = await import('../src/orchestrator/decision-schema.js');
+
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+    outputSchema: DECISION_JSON_SCHEMA,
+  });
+
+  await adapter.run({
+    prompt: 'decida',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'r',
+    iteration: 1,
+  });
+
+  const args = calls.at(-1)!.args ?? [];
+  const schemaIndex = args.indexOf('--output-schema');
+  const lastIndex = args.indexOf('--output-last-message');
+  assert.ok(schemaIndex >= 0, '--output-schema must be passed when the build offers it');
+  assert.ok(lastIndex >= 0, '--output-last-message must be passed when the build offers it');
+
+  // The schema is handed over as a real file, whose contents are the schema.
+  assert.ok(schemaOnDisk !== null, 'a schema file must have been written');
+  const properties = (schemaOnDisk as unknown as { properties: { action: { enum: string[] } } })
+    .properties;
+  assert.deepEqual(properties.action.enum, [...DECISION_JSON_SCHEMA.properties.action.enum]);
+
+  // And it does not outlive the run.
+  assert.equal(existsSync(args[schemaIndex + 1]!), false, 'scratch files are cleaned up');
+
+  // Events are still not the decision.
+  assert.ok(!args.includes('--json'));
+});
+
+test('the final message wins over the transcript on stdout', async () => {
+  const decision = JSON.stringify({ action: 'done', acceptanceCriteria: [], verificationCommands: [] });
+  let lastMessagePath: string | null = null;
+
+  const { manager } = fakeProcessManager(
+    {
+      '--help': CODEX_HELP,
+      'exec --help': CODEX_EXEC_HELP,
+      // The transcript contains prose and a decoy object, as a real run would.
+      exec: 'thinking...\n{"action":"blocked","reason":"this is an event, not the answer"}\n',
+    },
+    (options) => {
+      const args = options.args ?? [];
+      const index = args.indexOf('--output-last-message');
+      if (index >= 0) {
+        lastMessagePath = args[index + 1]!;
+        writeFileSync(lastMessagePath, decision, 'utf8');
+      }
+    },
+  );
+
+  const { DECISION_JSON_SCHEMA } = await import('../src/orchestrator/decision-schema.js');
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+    outputSchema: DECISION_JSON_SCHEMA,
+  });
+
+  const result = await adapter.run({
+    prompt: 'decida',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'r',
+    iteration: 1,
+  });
+
+  assert.equal(result.stdout, decision, 'the answer file is the answer');
+  assert.ok(!result.stdout.includes('this is an event'));
+  // And the scratch directory does not outlive the run.
+  assert.ok(lastMessagePath !== null);
+  assert.equal(existsSync(lastMessagePath!), false, 'scratch files are cleaned up');
+});
+
+test('an empty or missing answer file falls back to stdout rather than losing the run', async () => {
+  const { manager } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': CODEX_EXEC_HELP,
+    // Nothing writes the answer file: Codex produced only a transcript.
+    exec: '{"action":"done","acceptanceCriteria":[],"verificationCommands":[]}',
+  });
+
+  const { DECISION_JSON_SCHEMA } = await import('../src/orchestrator/decision-schema.js');
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+    outputSchema: DECISION_JSON_SCHEMA,
+  });
+
+  const result = await adapter.run({
+    prompt: 'decida',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'r',
+    iteration: 1,
+  });
+
+  assert.match(result.stdout, /"action":"done"/);
+});
+
+test('a build without the structured flags still runs, with neither flag invented', async () => {
+  const plainExecHelp = `Run Codex non-interactively
+
+Usage: codex exec [OPTIONS] [PROMPT]
+
+Options:
+      --skip-git-repo-check
+          Allow running Codex outside a Git repository
+`;
+  const { manager, calls } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': plainExecHelp,
+    exec: '{"action":"done","acceptanceCriteria":[],"verificationCommands":[]}',
+  });
+
+  const { DECISION_JSON_SCHEMA } = await import('../src/orchestrator/decision-schema.js');
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+    outputSchema: DECISION_JSON_SCHEMA,
+  });
+
+  const result = await adapter.run({
+    prompt: 'decida',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'r',
+    iteration: 1,
+  });
+
+  const args = calls.at(-1)!.args ?? [];
+  assert.deepEqual(args, ['exec', '--skip-git-repo-check']);
+  assert.match(result.stdout, /"action":"done"/, 'stdout is still parsed when there is no file');
 });
