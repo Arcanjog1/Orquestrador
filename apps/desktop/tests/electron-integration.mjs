@@ -229,13 +229,33 @@ test('an invalid payload is refused at the boundary, as an error the UI can show
 
 test('the onboarding screen renders the runtime checklist from diagnose()', async () => {
   const window = await openWindow();
+
+  // The approved design opens on the welcome step; the checklist is step one,
+  // behind "Começar". Driving the real button keeps this a test of the screen
+  // the user actually sees rather than of a component in isolation.
+  await waitForText(window, /Bem-vindo/, 15_000);
+  await window.webContents.executeJavaScript(`
+    [...document.querySelectorAll('button')]
+      .find((b) => b.textContent.trim().startsWith('Começar'))
+      .click()
+  `);
+
   const text = await waitForText(window, /Codex/, 15_000);
   assert.match(text, /Codex/);
   assert.match(text, /Claude Code/);
   assert.match(text, /Git/);
   assert.match(text, /AI Orchestrator/);
-  // The footer proves the renderer got real numbers from the main process.
-  assert.match(text, new RegExp(`Electron ${process.versions.electron.replace(/\./g, '\\.')}`));
+});
+
+test('the interface reports the real Electron and Chromium it is running on', async () => {
+  const window = await openWindow();
+  // The old renderer printed these in a footer; the approved design shows them
+  // under Settings -> Developer Mode. Either way the point is the same: the
+  // numbers come from the main process, not from anything the page made up.
+  const info = await window.webContents.executeJavaScript('window.api.app.info()');
+  assert.equal(info.electronVersion, process.versions.electron);
+  assert.equal(info.chromeVersion, process.versions.chrome);
+  assert.equal(info.nodeVersion, process.versions.node);
 });
 
 test('a workspace added over IPC is persisted and listed back', async () => {
