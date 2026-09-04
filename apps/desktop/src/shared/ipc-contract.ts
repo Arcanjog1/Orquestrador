@@ -196,7 +196,13 @@ export interface RunView {
   readonly id: string;
   readonly sessionId: string;
   readonly workspaceId: string;
-  /** `PENDING` | `RUNNING` | `DONE` | `FAILED` | `CANCELLED`. */
+  /**
+   * `PENDING` | `RUNNING` | `DONE` | `FAILED` | `CANCELLED` | `BLOCKED`.
+   *
+   * `BLOCKED` is the human gate: the orchestrator stopped and asked for a
+   * person. It is a real terminal state the loop already sets, and it is
+   * listed here so the interface can tell it apart from a failure.
+   */
   readonly status: string;
   readonly iterations: number;
   readonly summary: string | null;

@@ -99,6 +99,10 @@ export function runStateOf(run: RunView | null, liveStage: string | null): RunSt
       return 'FAILED';
     case 'CANCELLED':
       return 'CANCELLED';
+    // The human gate. Without this it fell through to IDLE and the run looked
+    // like it was simply waiting, rather than waiting for a person.
+    case 'BLOCKED':
+      return 'NEEDS_HUMAN';
     case 'PENDING':
       return 'PLANNING';
     case 'RUNNING':
@@ -301,20 +305,22 @@ function terminalEntry(
     };
   }
 
+  // The loop asking for a person. The design draws this as the human-review
+  // card rather than as a failure, because it is not one: the run stopped on
+  // purpose, with a reason, and a person decides what happens next.
+  if (run.status === 'BLOCKED' || (run.status === 'FAILED' && liveStage === 'blocked')) {
+    return {
+      kind: 'humanReview',
+      id: `${run.id}-human`,
+      reason: run.summary ?? 'Uma decisão humana é necessária para continuar.',
+      reasonKind: 'Decisão necessária',
+      progress: run.iterations > 0 ? [`${run.iterations} iteração(ões) concluída(s)`] : [],
+      recommendation: run.summary ?? 'Revise o que foi registrado e decida como seguir.',
+      options: ['Escrever instrução'],
+    };
+  }
+
   if (run.status === 'FAILED') {
-    // `blocked` is the loop asking for a person, which the design draws as the
-    // human-review card rather than as a failure.
-    if (liveStage === 'blocked') {
-      return {
-        kind: 'humanReview',
-        id: `${run.id}-human`,
-        reason: run.summary ?? 'Uma decisão humana é necessária para continuar.',
-        reasonKind: 'Decisão necessária',
-        progress: run.iterations > 0 ? [`${run.iterations} iteração(ões) concluída(s)`] : [],
-        recommendation: run.summary ?? 'Revise o que foi registrado e decida como seguir.',
-        options: ['Escrever instrução'],
-      };
-    }
     return {
       kind: 'noProgress',
       id: `${run.id}-failed`,
