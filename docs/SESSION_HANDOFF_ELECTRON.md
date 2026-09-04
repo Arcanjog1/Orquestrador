@@ -198,52 +198,121 @@ confirma o arquivo no caminho esperado antes de tentar enviar.
 
 **Achados que mudam o plano:**
 
-1. **Codex não tem fonte de instalação funcionando.** Medido, não suposto:
+1. **Codex não tinha fonte de instalação funcionando — corrigido.** Medido:
    - `https://releases.openai.com/codex/latest` → **HTTP 404**
    - `https://releases.openai.com/codex` → **HTTP 404**
    - tarball npm `@openai/codex-win32-x64` → nenhum tarball para esta
      plataforma
    - `https://api.github.com/repos/openai/codex/releases/latest` → **HTTP 200**
-     (alcançável, mas o `CodexRuntime` ainda não usa essa fonte)
 
-   Conclusão do spike: *"No Codex source produced a working binary."* O
-   requisito de configuração zero **não é atendido para o Codex hoje**. É o
-   blocker número 1.
+   O endpoint `releases.openai.com/codex` foi **removido** da lista: um
+   endpoint que comprovadamente 404 não tem por que gastar a primeira execução
+   do usuário. No lugar entrou `CodexGitHubReleaseSource` — ver seção 5.1.
 
 2. **Claude tem fonte funcionando:** `https://claude.ai/install.ps1` → HTTP 200,
    apontando para `https://downloads.claude.ai/claude-code-releases/bootstrap.ps1`.
 
-3. **Cancelamento no Windows:** `taskkill /T` → **0 órfãos, nenhum sobrevivente,
-   live count 0, outcome `cancelled`** em 3138ms. O spike ainda marca FAIL
-   porque o seu próprio check de heartbeat do neto não confirmou a parada
-   (`Grandchild heartbeat stopped: false`). Ou seja: **sem órfãos, mas ainda
-   não totalmente provado**.
+3. **Cancelamento no Windows: era bug do probe, não do produto.** `taskkill /T`
+   → **0 órfãos, nenhum sobrevivente, live count 0, outcome `cancelled`** em
+   3138ms. O check de heartbeat lia o arquivo *antes* de cancelar e exigia que
+   ele não mudasse depois — mas o neto continua batendo durante todo o período
+   de graça, então o valor sempre diferia e um processo comprovadamente morto
+   era reportado como vivo. Agora as duas leituras são feitas **depois** que o
+   cancelamento assenta e comparadas entre si. TEST 4 passa com um veredito
+   único e coerente.
 
 4. **argv e stdin no Windows:** `.exe`, `.cmd` e `.bat` passam o round trip de
    argumentos; stdin através de `.cmd` passa; um prompt de **80757 bytes**
    chega byte a byte, direto e através do launcher `.cmd`.
 
-5. **`testedVersion` do Git está desatualizado:** o Windows real traz
-   **2.55.0**, e a política testa `2.47.0`.
+5. **`testedVersion` do Git: não mexer ainda.** O Windows real reporta
+   **2.55.0**, mas esse é o Git for Windows que o runner já tinha em
+   `C:\Program Files\Git`, **não** o MinGit que o aplicativo gerencia. O
+   relatório do spike agora imprime o caminho resolvido e a procedência, para
+   que os dois nunca sejam confundidos. A versão testada continua `2.47.0` até
+   uma instalação gerenciada de MinGit reportar a sua.
 
 6. Codex e Claude **não estavam instalados** no runner, então TEST 1, 2, 3 e 7
    do spike não puderam rodar. Os adapters continuam **não exercitados contra
    os CLIs reais**.
 
+### 5.1 Fonte do Codex: GitHub Releases
+
+`src/runtime/sources/github-releases.ts` + `CodexGitHubReleaseSource`.
+
+Os nomes dos assets **não são adivinhados**: vêm do próprio workflow de release
+do `openai/codex`, que os nomeia por *target triple* de Rust e publica um
+manifesto `codex-package_SHA256SUMS`.
+
+| | |
+|---|---|
+| Repositório | `openai/codex` |
+| Tag | `rust-v<versão>` |
+| Asset preferido (Windows x64) | `codex-package-x86_64-pc-windows-msvc.tar.gz` |
+| Alternativa | `codex-x86_64-pc-windows-msvc.exe.zip` |
+| ARM64 | `aarch64-pc-windows-msvc` resolvido, fora de escopo por ora |
+| Integridade | SHA-256 do manifesto da própria release |
+| Contrato | `DOCUMENTED` |
+
+Regras que viraram teste:
+
+- **Correspondência por triple exato.** Há um teste com o asset ARM64 listado
+  *antes* do x64: um matcher que pega "o primeiro que contém windows" entrega o
+  binário errado.
+- **Sem digest publicado, sem instalação.** Um binário de agente executa código
+  arbitrário na máquina do usuário; "não deu para conferir, então seguimos" não
+  é uma troca que este produto faz.
+- **A política de versão continua no comando.** A versão testada é pedida pela
+  própria tag; se essa release sumiu, a fonte recusa em vez de pegar `latest`.
+
+**Prova real:** `node scripts/probe-real-runtimes.mjs --runtime codex` roda o
+pipeline de verdade contra os feeds de verdade. Nesta máquina trouxe
+`codex-cli 0.153.0`, conferiu o digest, extraiu, promoveu e passou no health
+check em 7,6s — pela fonte npm, porque este container bloqueia a API do GitHub,
+o que é o fallback funcionando como projetado. O CI roda esse mesmo probe como
+passo **obrigatório** nas duas plataformas.
+
+### 5.2 Capacidades reais do Codex 0.153.0
+
+Lidas do binário, não presumidas:
+
+| Onde | O que |
+|---|---|
+| `codex --help` | subcomando `exec` |
+| `codex exec --help` | `--skip-git-repo-check`, `-s/--sandbox`, `--json`, `--output-schema`, `-o/--output-last-message`, `--cd`, `--model` |
+| `codex exec [PROMPT]` | *"If not provided as an argument (or if `-` is used), instructions are read from stdin"* — confirma o prompt por stdin |
+
+Isso revelou um **bug no adapter**: ele procurava `--skip-git-repo-check` em
+`codex --help`, onde o flag não existe — os flags de um subcomando não aparecem
+na página do pai. Agora lê `codex exec --help`.
+
+Adotado: `--skip-git-repo-check` e `--sandbox read-only` (o orquestrador
+supervisiona e nunca edita; agora isso é regra do sandbox, não linha de prompt).
+
+**Não** adotado, de propósito:
+
+- `--json` imprime *eventos* em JSONL, não uma resposta. O parser de decisão
+  leria o primeiro evento como a decisão.
+- `--output-schema` e `-o/--output-last-message` são o mecanismo certo a médio
+  prazo, mas mudam o que o loop analisa e não dá para validar sem uma execução
+  autenticada de modelo.
+
 ---
 
 ## 6. Blockers abertos
 
-1. **Codex não pode ser instalado pelo aplicativo.** Ver seção 5, item 1. Sem
-   isso, a primeira execução não consegue preparar o orquestrador sozinha. O
-   caminho óbvio é acrescentar uma fonte baseada nas releases do GitHub, que
-   respondeu 200 — mas isso exige escolher o nome do asset e a estratégia de
-   integridade, e validar no Windows.
-2. **`AI-Orchestrator-Setup.exe` foi construído mas ninguém o instalou.** O CI
-   o produz e o smoke empacotado passa; falta baixar, instalar e usar. O upload
-   depende da cota de artifacts da conta, hoje esgotada.
-3. **Adapters nunca rodaram contra os CLIs reais.** Nenhum runner tinha Codex ou
-   Claude instalado.
+1. **`AI-Orchestrator-Setup.exe` foi construído mas ninguém o instalou.** O CI
+   o produz, o smoke empacotado passa, e agora ele é publicado como
+   **pre-release** na tag `desktop-dev` (o repositório é privado, então só quem
+   já tem acesso enxerga). Falta baixar, instalar e usar.
+2. **Claude Code nunca foi instalado de ponta a ponta.** A fonte responde
+   (`claude.ai/install.ps1` → 200), mas nenhum runner completou a instalação. O
+   CI agora tenta, como passo informativo.
+3. **O `ClaudeCodeAdapter` nunca rodou contra o CLI real.** As capacidades do
+   Codex já foram lidas do binário (seção 5.2); as do Claude não.
+4. **Nenhuma execução autenticada de modelo.** Os adapters sabem invocar os
+   CLIs, mas nenhum runner tem credencial, então o loop de orquestração nunca
+   rodou com agentes reais de ponta a ponta.
 4. **Authenticode publishers — desconhecidos.** Nenhum `expectedPublisher`
    configurado, de propósito. O CI registra o subject observado.
 5. **Duas contas Claude reais simultâneas — não comprovado.** O isolamento de
