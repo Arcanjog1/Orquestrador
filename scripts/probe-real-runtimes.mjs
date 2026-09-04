@@ -33,6 +33,27 @@ for (let i = 0; i < argv.length; i += 1) {
   if (argv[i] === '--runtime' && argv[i + 1]) requested.push(argv[i + 1]);
 }
 const runtimes = requested.length > 0 ? requested : ['codex', 'claude-code'];
+/** Also drive the product's adapter against the binary it just installed. */
+const withAdapters = argv.includes('--adapters');
+
+/**
+ * The adapters, loaded from the desktop build.
+ *
+ * Only needed for `--adapters`, and only meaningful once `npm run
+ * desktop:build` has run, so the import is lazy and its absence is reported
+ * rather than thrown.
+ */
+async function loadAdapters() {
+  const base = new URL('../apps/desktop/dist/apps/desktop/src/main/adapters/', import.meta.url);
+  try {
+    const claude = await import(new URL('claude-adapter.js', base).href);
+    const codex = await import(new URL('codex-adapter.js', base).href);
+    return { ClaudeCodeAdapter: claude.ClaudeCodeAdapter, CodexAdapter: codex.CodexAdapter };
+  } catch (error) {
+    console.log(`# adapters unavailable (build the desktop app first): ${error?.message ?? error}`);
+    return null;
+  }
+}
 
 const home = mkdtempSync(join(tmpdir(), 'lao-probe-'));
 const paths = ensureAppPaths(appPaths({ ...process.env, AI_ORCHESTRATOR_HOME: home }));
@@ -191,6 +212,52 @@ for (const runtimeId of runtimes) {
       say(`${check.label} shape`, shape);
       say(`${check.label} first line`, text.split(/\r?\n/)[0]?.slice(0, 200) ?? '');
       if (!invoked) throw new Error(`${check.label} could not be invoked`);
+    }
+
+    // Drive the product's own adapter against the binary just installed. The
+    // point is the plumbing - argv, stdin, environment, and what the adapter
+    // makes of an answer - not whether a model replied. Nothing here is
+    // authenticated, and an unauthenticated answer is a correct answer.
+    if (withAdapters) {
+      const adapters = await loadAdapters();
+      const Adapter =
+        runtimeId === 'claude-code' ? adapters?.ClaudeCodeAdapter : adapters?.CodexAdapter;
+      if (Adapter) {
+        const adapter = new Adapter({
+          processManager,
+          resolveExecutable: async () => install.executablePath,
+          buildEnvironment: () => ({}),
+          ...(runtimeId === 'codex' ? { outputSchema: { type: 'object' } } : {}),
+        });
+
+        const started = Date.now();
+        // Short on purpose. Without credentials these CLIs do not fail fast -
+        // Codex sits on "Reading prompt from stdin..." until something stops
+        // it - and the question here is whether the adapter can drive them,
+        // which is answered in the first seconds.
+        const agentResult = await adapter.run({
+          prompt: 'Responda apenas: ok',
+          workingDirectory: home,
+          timeoutMs: 30_000,
+          runId: 'probe',
+          iteration: 1,
+        });
+
+        // `completed` means the adapter built a real invocation and the CLI
+        // answered it. A non-zero exit because nobody is signed in is exactly
+        // the state the interface has to recognise.
+        say('adapter outcome', `${agentResult.outcome}, exit ${agentResult.exitCode}`);
+        say('adapter elapsed ms', String(Date.now() - started));
+        const firstLine = `${agentResult.stdout}${agentResult.stderr}`
+          .trim()
+          .split(/\r?\n/)[0]
+          ?.slice(0, 200);
+        say('adapter first line', firstLine ?? '(no output)');
+        if (agentResult.outcome === 'spawn-error') {
+          throw new Error(`the adapter could not launch ${runtimeId}`);
+        }
+        say('adapter invocation', 'PASS');
+      }
     }
 
     result.ok = true;

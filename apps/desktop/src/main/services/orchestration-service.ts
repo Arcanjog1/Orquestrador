@@ -62,6 +62,17 @@ export interface OrchestrationOptions {
 
 export type RunnerFactory = (workspace: WorkspaceWithAgents) => Promise<RunnerPair>;
 
+/**
+ * Checks a workspace can actually run before a run is started.
+ *
+ * Returns a sentence to show the user, or null when everything is ready.
+ * Measured need: an unauthenticated Codex does not fail fast - it prints
+ * "Reading prompt from stdin..." and waits - so without this a run would sit
+ * there until the agent timeout, showing "Codex preparando a tarefa..." for
+ * fifteen minutes. Failing in a second with a reason is better than that.
+ */
+export type ReadinessCheck = (workspace: WorkspaceWithAgents) => Promise<string | null>;
+
 const DEFAULTS = {
   maxIterations: 8,
   agentTimeoutMs: 15 * 60_000,
@@ -79,6 +90,7 @@ export class OrchestrationService {
     private readonly events: EventBus,
     private readonly createRunners: RunnerFactory,
     private readonly options: OrchestrationOptions = {},
+    private readonly checkReadiness: ReadinessCheck = async () => null,
   ) {}
 
   /** True while a run is still cancellable. */
@@ -172,6 +184,16 @@ export class OrchestrationService {
 
     this.database.runs.setStatus(runId, 'RUNNING');
     this.progress(runId, sessionId, 'analysing', 'Analisando...', 'RUNNING');
+
+    // Ask before spending fifteen minutes finding out.
+    const problem = await this.checkReadiness(workspace);
+    if (problem) {
+      this.database.runs.setStatus(runId, 'FAILED', problem);
+      this.say(sessionId, runId, 'system', problem);
+      this.step(runId, 0, 'readiness', 'blocked', problem);
+      this.progress(runId, sessionId, 'failed', problem, 'FAILED');
+      return;
+    }
 
     const runners = await this.createRunners(workspace);
     this.runners.set(runId, runners);

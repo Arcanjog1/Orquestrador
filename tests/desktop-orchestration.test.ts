@@ -388,3 +388,64 @@ test('an unparsable answer is asked to fix its format once, then the run fails c
     await prepared.cleanup();
   }
 });
+
+test('a run refuses to start when a runtime or account is not ready, instead of hanging', async () => {
+  // Measured, not imagined: an unauthenticated Codex prints "Reading prompt
+  // from stdin..." and waits. Without this check the interface would show
+  // "Codex preparando a tarefa..." until the agent timeout.
+  //
+  // No `createRunners` override here on purpose: supplying one means supplying
+  // your own agents, which switches the readiness check off. This exercises the
+  // real one, against a throwaway app root where no runtime is installed.
+  const repo = scratchRepository();
+  const fixture = createDesktopFixture();
+
+  try {
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.create', { name: 'Scratch', localPath: repo.dir }),
+    );
+    value(
+      await fixture.router.handle('accounts.create', { name: 'Claude', provider: 'anthropic' }),
+    );
+    const agents = value<Array<{ id: string; role: string }>>(
+      await fixture.router.handle('agents.list', null),
+    );
+    value(
+      await fixture.router.handle('workspace.setAgents', {
+        workspaceId: workspace.id,
+        orchestratorAgentId: agents.find((a) => a.role === 'ORCHESTRATOR')!.id,
+        workerAgentId: agents.find((a) => a.role === 'CODING_WORKER')!.id,
+      }),
+    );
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', {
+        workspaceId: workspace.id,
+        title: 'Conversa',
+      }),
+    );
+
+    const started = Date.now();
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'faça algo' }),
+    );
+    const run = await fixture.services.orchestration.waitFor(sent.run.id, 20_000);
+
+    assert.equal(run.status, 'FAILED');
+    assert.ok(Date.now() - started < 15_000, 'it must give up quickly, not wait for a timeout');
+
+    const messages = value<Array<{ author: string; text: string }>>(
+      await fixture.router.handle('chat.listMessages', { sessionId: session.id }),
+    );
+    const explanation = messages.find((m) => m.author === 'system');
+    assert.ok(explanation, 'the chat must say why nothing happened');
+    assert.match(explanation!.text, /não está configurado|Conecte a conta/i);
+
+    // And nothing was ever asked of an agent.
+    assert.equal(fixture.services.database.runs.invocations(sent.run.id).length, 0);
+    const steps = fixture.services.database.runs.steps(sent.run.id);
+    assert.equal(steps.at(-1)?.phase, 'readiness');
+  } finally {
+    await fixture.cleanup();
+    repo.cleanup();
+  }
+});

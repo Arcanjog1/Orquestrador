@@ -78,7 +78,7 @@ jobs:
       # source produced a working binary", so it is required, not advisory.
       - name: Prove the Codex runtime installs for real
         timeout-minutes: 20
-        run: node scripts/probe-real-runtimes.mjs --runtime codex
+        run: node scripts/probe-real-runtimes.mjs --runtime codex --adapters
 
       # Read Anthropic's real installer before trying to use it, so the
       # resolver is written against what it does rather than a guess. Purely
@@ -94,7 +94,7 @@ jobs:
       # unauthenticated answer is a correct answer; a failure to invoke is not.
       - name: Prove the Claude runtime installs for real
         timeout-minutes: 20
-        run: node scripts/probe-real-runtimes.mjs --runtime claude-code
+        run: node scripts/probe-real-runtimes.mjs --runtime claude-code --adapters
 
       # Git stays informational until a managed MinGit install has been seen
       # once; its tested version is still a guess and should not gate a build.

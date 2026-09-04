@@ -16,6 +16,7 @@ import {
   ProcessManager,
   RuntimeManager,
   appPaths,
+  isUsable,
 } from '../core.js';
 import type { AppPaths, WorkspaceWithAgents } from '../core.js';
 import { EventBus } from '../events.js';
@@ -95,11 +96,59 @@ export class AppServices {
       this.events,
       options.createRunners ?? ((workspace) => this.buildRunners(workspace)),
       options.orchestration ?? {},
+      // Tests supplying their own runners are supplying their own agents too,
+      // so there is nothing to check.
+      options.createRunners ? async () => null : (workspace) => this.checkAgentsReady(workspace),
     );
     this.chat = new ChatService(this.database, this.orchestration);
 
     this.database.providers.ensureSeeded();
     this.agents.sync();
+  }
+
+  /**
+   * Whether this workspace's agents can actually work.
+   *
+   * Neither CLI fails fast when it is not signed in, so a run would otherwise
+   * hang until its timeout with no explanation. One sentence now beats fifteen
+   * silent minutes.
+   */
+  private async checkAgentsReady(workspace: WorkspaceWithAgents): Promise<string | null> {
+    for (const [agentId, what] of [
+      [workspace.orchestrator_agent_id, 'que supervisiona'],
+      [workspace.worker_agent_id, 'que executa'],
+    ] as const) {
+      if (!agentId) return `Escolha o agente ${what} neste projeto.`;
+      const agent = this.database.agents.find(agentId);
+      if (!agent) return `O agente ${what} neste projeto não existe mais.`;
+
+      const runtimeId = agent.adapter_id === 'codex-cli' ? 'codex' : 'claude-code';
+      try {
+        await this.runtimeManager.getExecutablePath(runtimeId);
+      } catch {
+        return `${agent.display_name} ainda não está configurado. Configure os runtimes primeiro.`;
+      }
+
+      // An agent with no account runs on whatever the machine already has,
+      // which is a choice the user made; only a bound account is checked.
+      if (!agent.account_id) continue;
+      const record = this.database.accounts.find(agent.account_id);
+      if (!record) continue;
+      const managers = { anthropic: this.accountManager, openai: this.codexAccountManager };
+      const manager = managers[record.provider_id as 'anthropic' | 'openai'];
+      if (!manager) continue;
+
+      const status = await manager.getStatus({
+        id: record.id,
+        providerId: record.provider_id as 'anthropic' | 'openai',
+        displayName: record.display_name,
+        createdAt: record.created_at,
+      });
+      if (!isUsable(status.state)) {
+        return `Conecte a conta "${record.display_name}" antes de enviar uma tarefa.`;
+      }
+    }
+    return null;
   }
 
   /**
