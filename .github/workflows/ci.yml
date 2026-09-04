@@ -16,7 +16,9 @@ jobs:
   windows:
     name: Windows
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -69,6 +71,22 @@ jobs:
       - name: Packaged smoke test
         timeout-minutes: 15
         run: npm run -w apps/desktop test:packaged
+
+      # The proof that the application can prepare Codex on a user's machine:
+      # a real resolve, a real download, a real SHA-256 check, a real extract
+      # and a real `codex --version`. This is the step that answers "No Codex
+      # source produced a working binary", so it is required, not advisory.
+      - name: Prove the Codex runtime installs for real
+        timeout-minutes: 20
+        run: node scripts/probe-real-runtimes.mjs --runtime codex
+
+      # Claude and Git are probed for information: their sources are known to
+      # answer, but neither has been installed end to end on Windows yet, and a
+      # failure here should tell us that rather than block the build.
+      - name: Probe the Claude and Git runtimes
+        continue-on-error: true
+        timeout-minutes: 20
+        run: node scripts/probe-real-runtimes.mjs --runtime claude-code --runtime git
 
       # Everything below is informational: it records what the real Windows
       # world actually answers, which is how the open questions about runtime
@@ -127,6 +145,31 @@ jobs:
             spike/spike-report.txt
           if-no-files-found: ignore
 
+      # Actions artifacts depend on a storage quota that a green build has no
+      # control over. A pre-release does not, so the installer is always
+      # downloadable from one place. The repository is private, so this is
+      # visible only to people who already have access; it is marked
+      # pre-release and uses a rolling tag, so it is never mistaken for a
+      # stable release.
+      - name: Publish the installer as a pre-release
+        if: github.ref_name == 'claude/ai-orchestrator-continuation-grblen'
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: desktop-dev
+          name: AI Orchestrator - build de teste
+          prerelease: true
+          draft: false
+          fail_on_unmatched_files: true
+          files: apps/desktop/release/AI-Orchestrator-Setup.exe
+          body: |
+            Build de teste automático do branch de desenvolvimento.
+
+            Não é uma versão estável. Sem assinatura de código, então o Windows
+            vai mostrar o aviso do SmartScreen.
+
+            Commit: ${{ github.sha }}
+
   # Linux is not a target platform. It runs because it is fast, and because a
   # break here is usually a break everywhere.
   linux:
@@ -173,6 +216,10 @@ jobs:
       - name: Electron integration tests
         timeout-minutes: 15
         run: npm run -w apps/desktop test:electron
+
+      - name: Prove the Codex runtime installs for real
+        timeout-minutes: 20
+        run: node scripts/probe-real-runtimes.mjs --runtime codex
 
       - name: Package (unpacked) and smoke-test it
         timeout-minutes: 20

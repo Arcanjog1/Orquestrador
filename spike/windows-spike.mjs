@@ -955,6 +955,7 @@ async function test4Cancellation(env) {
     `Cancellation method: ${IS_WINDOWS ? 'taskkill /pid <pid> /T then /T /F' : 'SIGTERM then SIGKILL to the process group'}`,
   );
 
+  // Only used to prove the grandchild was alive at all before we cancelled.
   const beatBefore = existsSync(beatFile) ? readFileSync(beatFile, 'utf8') : '';
 
   step('Cancelling through ProcessManager.cancelAll()...');
@@ -976,15 +977,25 @@ async function test4Cancellation(env) {
 
   // A heartbeat that stopped advancing proves the grandchild is not running,
   // even if the OS still lists a zombie entry.
+  //
+  // Both readings are taken *after* cancellation has settled, and compared with
+  // each other. Comparing against a reading from before the cancel was the
+  // wrong test: the grandchild keeps beating throughout the grace period, so
+  // the value always differs and the check reported "not stopped" for a process
+  // that was demonstrably gone - which is exactly the contradiction the Windows
+  // run produced, zero survivors alongside an inconclusive heartbeat.
+  const beatSettled = existsSync(beatFile) ? readFileSync(beatFile, 'utf8') : '';
   await sleep(600);
   const beatAfter = existsSync(beatFile) ? readFileSync(beatFile, 'utf8') : '';
-  const heartbeatStopped = beatBefore !== '' && beatAfter === beatBefore;
+  const wasBeating = beatBefore !== '';
+  const heartbeatStopped = wasBeating && beatSettled !== '' && beatAfter === beatSettled;
 
   step(`Surviving processes: ${survivors.length === 0 ? 'none' : survivors.join(', ')}`);
   step(`Grandchild heartbeat stopped: ${heartbeatStopped}`);
 
   lines.push(`Orphan processes: ${survivors.length}`);
   lines.push(`Survivors: ${survivors.join(', ') || '(none)'}`);
+  lines.push(`Grandchild was beating before cancel: ${wasBeating}`);
   lines.push(`Grandchild heartbeat stopped after cancel: ${heartbeatStopped}`);
   lines.push(`ProcessManager live count after cancel: ${pm.liveCount}`);
 
@@ -1964,12 +1975,21 @@ function environmentSummary(env) {
     ? runSync('cmd.exe', ['/d', '/s', '/c', 'ver']).stdout.trim().replace(/\r?\n/g, ' ')
     : `${process.platform} ${runSync('uname', ['-r']).stdout.trim()}`;
   const gitVersion = runSync('git', ['--version']).stdout.trim();
+  // Which git this is matters as much as its version. The one on PATH is
+  // whatever the machine already had - on a CI runner, a full Git for Windows
+  // install. It is NOT the MinGit the application manages and ships against, so
+  // its version must never be mistaken for the tested one.
+  const gitPath = IS_WINDOWS
+    ? runSync('where.exe', ['git']).stdout.trim().split(/\r?\n/)[0]
+    : runSync('which', ['git']).stdout.trim();
   return {
     osVersion: osVersion || process.platform,
     node: process.version,
     codex: env.codex?.found ? `${env.codex.exe} (${env.codex.versionText ?? '?'})` : 'NOT FOUND',
     claude: env.claude?.found ? `${env.claude.exe} (${env.claude.versionText ?? '?'})` : 'NOT FOUND',
     git: gitVersion || 'NOT FOUND',
+    gitPath: gitPath || '(not on PATH)',
+    gitProvenance: 'pre-existing on this machine, NOT the MinGit the app manages',
   };
 }
 
@@ -2086,7 +2106,9 @@ function buildReport(env) {
   out.push(`  Node: ${envSummary.node}`);
   out.push(`  Codex: ${envSummary.codex}`);
   out.push(`  Claude: ${envSummary.claude}`);
-  out.push(`  Git: ${envSummary.git}`);
+  out.push(`  Git (on PATH): ${envSummary.git}`);
+  out.push(`  Git path: ${envSummary.gitPath}`);
+  out.push(`  Git provenance: ${envSummary.gitProvenance}`);
   out.push(`  Run at: ${new Date().toISOString()}`);
   out.push('');
 
