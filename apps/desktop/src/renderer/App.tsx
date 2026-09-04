@@ -1,55 +1,162 @@
-import type { ReactElement } from 'react';
-import { useEffect, useState } from 'react';
-import { api } from './api.js';
-import { Onboarding } from './Onboarding.js';
-import { Workbench } from './Workbench.js';
-import type { AppInfo } from '../shared/ipc-contract.js';
+import { useCallback, useEffect, useState } from "react";
+import { Toaster } from "@/components/ui/sonner";
+import { RouterProvider, useRouter } from "@/router";
+import { WorkspacePage } from "@/pages/Workspace";
+import { OnboardingPage } from "@/pages/Onboarding";
+import { SettingsPage } from "@/pages/Settings";
+import { HistoryPage } from "@/pages/History";
+import { api, messageOf } from "@/lib/api";
+import type {
+  AccountView,
+  AgentView,
+  AppInfo,
+  DiagnosticView,
+  WorkspaceView,
+} from "@shared/ipc-contract";
 
 /**
- * Onboarding until the runtimes are ready, then the workbench.
+ * The app shell.
  *
- * The decision is the diagnostic's, not the renderer's: the first screen is
- * skipped only when `diagnose()` says everything is ready.
+ * Holds the state every page needs - app info, diagnostics, accounts, agents,
+ * workspaces - and reloads it on demand, so no page keeps its own copy of a
+ * fact the main process owns.
  */
-export function App(): ReactElement {
-  const [screen, setScreen] = useState<'loading' | 'onboarding' | 'workbench'>('loading');
-  const [info, setInfo] = useState<AppInfo | null>(null);
+export function App() {
+  return (
+    <RouterProvider>
+      <Shell />
+      <Toaster />
+    </RouterProvider>
+  );
+}
 
-  useEffect(() => {
+interface AppState {
+  appInfo: AppInfo | null;
+  diagnostics: DiagnosticView | null;
+  accounts: readonly AccountView[];
+  agents: readonly AgentView[];
+  workspaces: readonly WorkspaceView[];
+}
+
+const EMPTY: AppState = {
+  appInfo: null,
+  diagnostics: null,
+  accounts: [],
+  agents: [],
+  workspaces: [],
+};
+
+function Shell() {
+  const router = useRouter();
+  const [state, setState] = useState<AppState>(EMPTY);
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [redirected, setRedirected] = useState(false);
+
+  const reload = useCallback(() => {
     void (async () => {
-      const [appInfo, report] = await Promise.all([api.app.info(), api.runtime.diagnose()]);
-      setInfo(appInfo);
-      setScreen(report.ready ? 'workbench' : 'onboarding');
+      try {
+        const [appInfo, diagnostics, accounts, agents, workspaces] = await Promise.all([
+          api.app.info(),
+          api.runtime.diagnose(),
+          api.accounts.list(),
+          api.agents.list(),
+          api.workspace.list(),
+        ]);
+        setState({ appInfo, diagnostics, accounts, agents, workspaces });
+        setWorkspaceId((current) =>
+          current && workspaces.some((w) => w.id === current) ? current : workspaces[0]?.id ?? null,
+        );
+        setError(null);
+      } catch (e) {
+        setError(messageOf(e));
+      } finally {
+        setLoading(false);
+      }
     })();
   }, []);
 
-  if (screen === 'loading') {
+  useEffect(reload, [reload]);
+
+  // First run goes to onboarding rather than an empty workspace, once only.
+  useEffect(() => {
+    if (loading || redirected) return;
+    setRedirected(true);
+    const ready =
+      (state.diagnostics?.ready ?? false) &&
+      state.accounts.some((a) => a.state === "connected") &&
+      state.workspaces.length > 0;
+    if (!ready && router.path === "/") router.navigate("/onboarding");
+  }, [loading, redirected, state, router]);
+
+  if (typeof window === "undefined" || !window.api) {
     return (
-      <div style={{ display: 'grid', placeItems: 'center', height: '100%' }}>
-        <span className="muted">Preparando aplicativo...</span>
+      <Fatal
+        title="A ponte com o aplicativo não carregou"
+        detail="Feche e abra o AI Orchestrator novamente."
+      />
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="grid h-screen place-items-center bg-background">
+        <span className="text-sm text-muted-foreground">Carregando…</span>
       </div>
     );
   }
 
+  if (error) return <Fatal title="Não foi possível iniciar" detail={error} />;
+
+  const workspace = state.workspaces.find((w) => w.id === workspaceId) ?? null;
+
+  switch (router.path) {
+    case "/onboarding":
+      return (
+        <OnboardingPage
+          diagnostics={state.diagnostics}
+          accounts={state.accounts}
+          agents={state.agents}
+          workspaces={state.workspaces}
+          workspace={workspace}
+          reload={reload}
+          onSelectWorkspace={setWorkspaceId}
+        />
+      );
+    case "/configuracoes":
+      return (
+        <SettingsPage
+          accounts={state.accounts}
+          workspace={workspace}
+          diagnostics={state.diagnostics}
+          appInfo={state.appInfo}
+          reload={reload}
+        />
+      );
+    case "/historico":
+      return <HistoryPage workspace={workspace} />;
+    default:
+      return (
+        <WorkspacePage
+          workspaces={state.workspaces}
+          workspace={workspace}
+          accounts={state.accounts}
+          agents={state.agents}
+          reload={reload}
+          onSelectWorkspace={setWorkspaceId}
+        />
+      );
+  }
+}
+
+function Fatal({ title, detail }: { title: string; detail: string }) {
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ flex: 1, minHeight: 0 }}>
-        {screen === 'onboarding' ? (
-          <Onboarding onReady={() => setScreen('workbench')} />
-        ) : (
-          <Workbench onBack={() => setScreen('onboarding')} />
-        )}
+    <div className="flex min-h-screen items-center justify-center bg-background px-4">
+      <div className="max-w-md text-center">
+        <h1 className="text-xl font-semibold tracking-tight text-foreground">{title}</h1>
+        <p className="mt-2 text-sm text-muted-foreground">{detail}</p>
       </div>
-      {info ? (
-        <footer
-          className="muted"
-          style={{ padding: '4px 12px', borderTop: '1px solid var(--line)', fontSize: 11 }}
-          data-testid="app-info"
-        >
-          Electron {info.electronVersion} · Node {info.nodeVersion} · Chromium {info.chromeVersion} ·
-          SQLite {info.sqliteAvailable ? 'ok' : 'indisponível'}
-        </footer>
-      ) : null}
     </div>
   );
 }
