@@ -103,14 +103,18 @@ export async function runSmokeChecks(
   });
 
   await check('onboarding-rendered', async () => {
-    const deadline = Date.now() + 20_000;
-    let text = '';
-    while (Date.now() < deadline) {
-      text = (await window.webContents.executeJavaScript('document.body.innerText')) as string;
-      if (/Codex/.test(text) && /Git/.test(text)) return 'runtime checklist rendered';
-      await new Promise((resolve) => setTimeout(resolve, 200));
+    // The approved design opens on a welcome step and puts the runtime
+    // checklist behind "Começar", so the walk starts by pressing it.
+    await waitForBody(window, /Bem-vindo/, 20_000);
+    await window.webContents.executeJavaScript(
+      'document.querySelector(\'[data-testid="start"]\')?.click()',
+    );
+    await waitForBody(window, /Codex/, 20_000);
+    const text = await waitForBody(window, /Git/, 20_000);
+    if (!/Claude Code/.test(text)) {
+      throw new Error(`checklist incomplete; body was: ${text.slice(0, 400)}`);
     }
-    throw new Error(`checklist never rendered; body was: ${text.slice(0, 400)}`);
+    return 'runtime checklist rendered';
   });
 
   const screenshot = screenshotTarget();
@@ -120,22 +124,33 @@ export async function runSmokeChecks(
     // Then walk to the working screen, so the pair shows both halves of the
     // experience rather than only the first-run one.
     await check('screenshot-workbench', async () => {
+      // "Pular onboarding" is how the design reaches the working screen from
+      // here; the sidebar's Projetos heading is the proof it arrived.
       await window.webContents.executeJavaScript(
-        'document.querySelector(\'[data-testid="continue"]\')?.click()',
+        'document.querySelector(\'[data-testid="skip-onboarding"]\')?.click()',
       );
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        const text = (await window.webContents.executeJavaScript(
-          'document.body.innerText',
-        )) as string;
-        if (/Projetos/.test(text)) break;
-        await new Promise((resolve) => setTimeout(resolve, 200));
-      }
+      await waitForBody(window, /Projetos|Escolha um projeto/, 10_000).catch(() => '');
       return save(window, screenshot.replace(/\.png$/, '-workbench.png'));
     });
   }
 
   return checks;
+}
+
+/** Polls the rendered text until it matches, or gives up with what it saw. */
+async function waitForBody(
+  window: BrowserWindow,
+  pattern: RegExp,
+  timeoutMs: number,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let text = '';
+  while (Date.now() < deadline) {
+    text = (await window.webContents.executeJavaScript('document.body.innerText')) as string;
+    if (pattern.test(text)) return text;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`timed out waiting for ${pattern}; body was: ${text.slice(0, 400)}`);
 }
 
 async function save(window: BrowserWindow, target: string): Promise<string> {

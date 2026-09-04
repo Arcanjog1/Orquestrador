@@ -143,6 +143,7 @@ export function OnboardingPage({
           <span className="text-sm font-semibold">AI Orchestrator</span>
           <Link
             to="/"
+            data-testid="skip-onboarding"
             className="ml-auto text-xs text-muted-foreground hover:text-foreground"
           >
             Pular onboarding
@@ -170,7 +171,7 @@ export function OnboardingPage({
                 o objetivo uma vez; o Orchestrator planeja, delega, verifica e corrige até
                 provar que terminou.
               </p>
-              <Button className="mt-6" onClick={() => setStep(1)}>
+              <Button className="mt-6" data-testid="start" onClick={() => setStep(1)}>
                 Começar <ChevronRight className="size-4" />
               </Button>
             </>
@@ -240,7 +241,7 @@ export function OnboardingPage({
                 )}
               </div>
               {error && <p className="mt-3 text-xs text-danger">{error}</p>}
-              <Button className="mt-6" onClick={() => setStep(2)}>
+              <Button className="mt-6" data-testid="continue" onClick={() => setStep(2)}>
                 Continuar
               </Button>
             </>
