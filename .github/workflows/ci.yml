@@ -25,10 +25,25 @@ jobs:
           node-version: '22'
           cache: npm
 
+      # The Electron binary is ~160 MB and its postinstall has no timeout: when
+      # the download stalls, `npm ci` hangs for the whole job. Fetching it in a
+      # step of its own keeps install fast and deterministic, and lets the cache
+      # skip the download entirely on later runs.
       - name: Install
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
         run: npm ci
 
+      - name: Cache the Electron download
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: electron-windows-${{ hashFiles('apps/desktop/package.json') }}
+
       - name: Ensure the Electron binary is present
+        timeout-minutes: 10
         run: node node_modules/electron/install.js
 
       - name: Typecheck
@@ -108,9 +123,20 @@ jobs:
           cache: npm
 
       - name: Install
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
         run: npm ci
 
+      - name: Cache the Electron download
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-linux-${{ hashFiles('apps/desktop/package.json') }}
+
       - name: Ensure the Electron binary is present
+        timeout-minutes: 10
         run: node node_modules/electron/install.js
 
       - name: Install xvfb
