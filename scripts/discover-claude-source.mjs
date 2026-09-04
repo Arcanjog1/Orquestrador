@@ -54,21 +54,32 @@ for (const entry of ENTRY_POINTS) {
   }
 }
 
-// Then the paths the installer's own host is known to serve, so we learn which
-// of them answer and in what shape.
-const CANDIDATES = [
-  'https://downloads.claude.ai/claude-code-releases/stable',
-  'https://downloads.claude.ai/claude-code-releases/latest',
-  'https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/stable',
-];
+// Then walk the channel exactly as the installer does: version, manifest,
+// platform table. The platform keys are the part that cannot be read from the
+// POSIX script, and they are what the resolver has to match.
+const BASE = 'https://downloads.claude.ai/claude-code-releases';
 
-for (const url of CANDIDATES) {
+for (const channel of ['stable', 'latest']) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
-    const body = await response.text();
-    console.log(`\n${url} -> HTTP ${response.status} (${body.length} bytes)`);
-    console.log(`  first 300 chars: ${body.slice(0, 300).replace(/\n/g, ' ')}`);
+    const response = await fetch(`${BASE}/${channel}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    const version = (await response.text()).trim();
+    console.log(`\n${BASE}/${channel} -> HTTP ${response.status}: ${version}`);
+    if (!response.ok || !/^\d+\.\d+\.\d+/.test(version)) continue;
+
+    const manifestUrl = `${BASE}/${version}/manifest.json`;
+    const manifestResponse = await fetch(manifestUrl, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    console.log(`${manifestUrl} -> HTTP ${manifestResponse.status}`);
+    if (!manifestResponse.ok) continue;
+
+    const manifest = await manifestResponse.json();
+    const platforms = manifest?.platforms ?? {};
+    console.log('  platform keys and digests:');
+    for (const [key, value] of Object.entries(platforms)) {
+      const checksum = typeof value?.checksum === 'string' ? value.checksum : '(none)';
+      const size = typeof value?.size === 'number' ? value.size : '(none)';
+      console.log(`    ${key.padEnd(20)} sha256=${checksum} size=${size}`);
+    }
   } catch (error) {
-    console.log(`\n${url} -> unreachable: ${error?.message ?? String(error)}`);
+    console.log(`\n${BASE}/${channel} -> unreachable: ${error?.message ?? String(error)}`);
   }
 }

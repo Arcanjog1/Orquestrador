@@ -141,16 +141,95 @@ test('Codex prefers the documented release channel over package internals', () =
   assert.ok(sources.indexOf(npmSource) > 0, 'npm must not be the primary contract');
 });
 
-test('Claude puts the documented installer first and the observed host last', () => {
+test('Claude installs from the channel the official installer itself uses', () => {
   const sources = defaultClaudeSources(makeFetch({}));
+  assert.deepEqual(sources.map((s) => s.id), ['claude-official-releases']);
   assert.equal(sources[0]!.contract, 'DOCUMENTED');
-  const last = sources[sources.length - 1]!;
-  assert.equal(last.id, 'claude-release-host');
   assert.equal(
-    last.contract,
-    'NOT_PUBLIC_CONTRACT',
-    'a host observed inside a binary is not a public interface',
+    sources[0]!.integrityStrategy,
+    'SHA256',
+    'the manifest publishes a digest per platform and it is enforced',
   );
+});
+
+test('the Claude manifest decides the platform key; nothing is guessed', async () => {
+  const { ClaudeOfficialReleaseSource, claudePlatformKeys, pickPlatform } = await import(
+    '../src/runtime/sources/claude-sources.js'
+  );
+  const digest = 'e'.repeat(64);
+
+  // Windows spelling is unknown from the POSIX installer, so every plausible
+  // key is offered and only one the manifest declares is used.
+  const keys = claudePlatformKeys({ platform: 'win32', arch: 'x64' });
+  assert.ok(keys.includes('win32-x64') && keys.includes('windows-x64'));
+
+  const manifest = { platforms: { 'windows-x64': { checksum: digest, size: 1234 } } };
+  const entry = pickPlatform(manifest, { platform: 'win32', arch: 'x64' });
+  assert.equal(entry?.key, 'windows-x64');
+  assert.equal(entry?.checksum, digest);
+
+  // A platform the manifest does not declare produces no download at all.
+  assert.equal(pickPlatform({ platforms: {} }, { platform: 'win32', arch: 'x64' }), null);
+  // Nor does one whose checksum is not a real digest.
+  assert.equal(
+    pickPlatform({ platforms: { 'win32-x64': { checksum: 'nope' } } }, { platform: 'win32', arch: 'x64' }),
+    null,
+    'an agent binary is never installed without a usable digest',
+  );
+
+  const base = 'https://downloads.example.invalid/claude-code-releases';
+  const source = new ClaudeOfficialReleaseSource(
+    base,
+    makeFetch({
+      [`${base}/stable`]: { text: '2.1.236\n' },
+      [`${base}/2.1.236/manifest.json`]: { body: manifest },
+    }),
+  );
+
+  const resolved = await source.resolve({ platform: 'win32', arch: 'x64' }, { kind: 'latest' });
+  assert.equal(resolved?.url, `${base}/2.1.236/windows-x64/claude.exe`);
+  assert.equal(resolved?.version, '2.1.236');
+  assert.equal(resolved?.integrity, digest);
+  assert.equal(resolved?.expectedBytes, 1234);
+  assert.equal(resolved?.archiveKind, 'raw', 'the release is a bare executable, not an archive');
+  assert.deepEqual(resolved?.executableNames, ['claude.exe']);
+});
+
+test('a tested Claude version is fetched by version, never through the channel', async () => {
+  const { ClaudeOfficialReleaseSource } = await import('../src/runtime/sources/claude-sources.js');
+  const base = 'https://downloads.example.invalid/claude-code-releases';
+  const digest = 'f'.repeat(64);
+  const asked: string[] = [];
+  const inner = makeFetch({
+    [`${base}/2.1.252/manifest.json`]: {
+      body: { platforms: { 'linux-x64-musl': { checksum: digest } } },
+    },
+  });
+  const fetchImpl = ((input: string, init?: RequestInit) => {
+    asked.push(String(input));
+    return inner(input as never, init as never);
+  }) as typeof fetch;
+
+  const source = new ClaudeOfficialReleaseSource(base, fetchImpl);
+  const resolved = await source.resolve(
+    { platform: 'linux', arch: 'x64' },
+    { kind: 'tested', version: '2.1.252' },
+  );
+
+  assert.equal(resolved?.url, `${base}/2.1.252/linux-x64-musl/claude`);
+  assert.ok(!asked.some((u) => u.endsWith('/stable')), 'the channel is not consulted');
+});
+
+test('a channel that answers something other than a version is refused', async () => {
+  const { ClaudeOfficialReleaseSource } = await import('../src/runtime/sources/claude-sources.js');
+  const base = 'https://downloads.example.invalid/claude-code-releases';
+  // A region block or an error page is not a version.
+  const source = new ClaudeOfficialReleaseSource(
+    base,
+    makeFetch({ [`${base}/stable`]: { text: '<html>not available in your country</html>' } }),
+  );
+  const resolved = await source.resolve({ platform: 'linux', arch: 'x64' }, { kind: 'latest' });
+  assert.equal(resolved, null);
 });
 
 test('the contract labels are the exact strings shown in reports', () => {

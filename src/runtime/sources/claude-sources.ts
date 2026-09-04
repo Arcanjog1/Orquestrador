@@ -1,15 +1,25 @@
 /**
- * Where the Claude Code runtime can come from, in order of preference.
+ * Where the Claude Code runtime comes from.
  *
- * Two constraints shape this list:
+ * The layout below is not invented: it is what Anthropic's own installer does.
+ * `https://claude.ai/install.sh` and `install.ps1` are the documented entry
+ * points; both redirect to a bootstrap script on
+ * `https://downloads.claude.ai/claude-code-releases`, and that script:
  *
- *  - Claude Code's npm licence reads "SEE LICENSE IN README.md", which is not a
- *    permissive open-source licence. The application therefore **never**
- *    redistributes it inside the installer; it only fetches it, on the user's
- *    machine, from a source Anthropic serves.
- *  - A host string observed inside the shipped binary is an implementation
- *    detail, not a supported interface. Such a source is marked
- *    NOT_PUBLIC_CONTRACT and sits last, behind the documented ones.
+ *   1. reads a plain-text version from `<base>/stable` or `<base>/latest`;
+ *   2. fetches `<base>/<version>/manifest.json`, which holds
+ *      `platforms["<platform>"] = { checksum: "<sha256>", size: <bytes> }`;
+ *   3. downloads `<base>/<version>/<platform>/claude` - `claude.exe` on
+ *      Windows - and refuses it unless the SHA-256 matches.
+ *
+ * This source does exactly that, with the same checksum check, so the
+ * application installs the same bytes a user would get by running the official
+ * command - without asking anyone to open a terminal.
+ *
+ * Claude Code's npm licence reads "SEE LICENSE IN README.md", which is not a
+ * permissive open-source licence, so the application **never** redistributes it
+ * inside the installer. It only fetches it, on the user's machine, from
+ * Anthropic's own host.
  */
 
 import { existsSync } from 'node:fs';
@@ -17,81 +27,121 @@ import type { ResolvedDownload, RuntimeSource, RuntimeTarget } from '../types.js
 import type { IntegrityStrategy } from '../integrity.js';
 import type { VersionRequest } from '../compatibility.js';
 
+export const CLAUDE_RELEASES_BASE = 'https://downloads.claude.ai/claude-code-releases';
+
 export function claudeExecutableNames(target: RuntimeTarget): string[] {
-  return target.platform === 'win32' ? ['claude.exe', 'claude.cmd'] : ['claude'];
+  return target.platform === 'win32' ? ['claude.exe'] : ['claude'];
 }
 
 /**
- * The installer Anthropic publishes for end users.
+ * Platform keys to look for in the manifest, best first.
  *
- * This is the documented path and is tried first. The application runs the
- * download itself rather than asking the user to paste a command into a shell.
+ * The installer builds this string itself (`linux-x64-musl`, `darwin-arm64`,
+ * and so on) and the Windows spelling is not visible from the POSIX script, so
+ * rather than guess one, every plausible key is offered and the manifest
+ * decides: a key that is not in `platforms` is not used. That also means a
+ * future rename is a decline, never a wrong download.
  */
-export class ClaudeOfficialInstallerSource implements RuntimeSource {
-  readonly id = 'claude-official-installer';
-  readonly label = 'Instalador oficial da Anthropic';
+export function claudePlatformKeys(target: RuntimeTarget): string[] {
+  const arch = target.arch === 'arm64' ? 'arm64' : 'x64';
+  switch (target.platform) {
+    case 'win32':
+      return [`win32-${arch}`, `windows-${arch}`, `win-${arch}`];
+    case 'darwin':
+      return [`darwin-${arch}`, `macos-${arch}`];
+    case 'linux':
+      // musl first: the static build runs on both, the glibc one does not.
+      return [`linux-${arch}-musl`, `linux-${arch}`];
+    default:
+      return [`${target.platform}-${arch}`];
+  }
+}
+
+interface ManifestEntry {
+  readonly key: string;
+  readonly checksum: string;
+  readonly size: number | undefined;
+}
+
+/**
+ * The release channel the official installer uses.
+ *
+ * DOCUMENTED: this is the contract Anthropic publishes an installer against,
+ * not a host observed inside a binary. The application follows the same steps
+ * the installer takes.
+ */
+export class ClaudeOfficialReleaseSource implements RuntimeSource {
+  readonly id = 'claude-official-releases';
+  readonly label = 'Canal oficial de releases do Claude Code';
   readonly contract = 'DOCUMENTED' as const;
-  /** A checksum is expected; a signature is also read on Windows when present. */
+  /** The manifest publishes a SHA-256 per platform, and it is enforced. */
   readonly integrityStrategy: IntegrityStrategy = 'SHA256';
 
   constructor(
-    private readonly manifestUrl = 'https://claude.ai/install-manifest.json',
+    private readonly baseUrl = CLAUDE_RELEASES_BASE,
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
   async resolve(target: RuntimeTarget, request: VersionRequest): Promise<ResolvedDownload | null> {
-    const url =
-      request.kind === 'tested'
-        ? `${this.manifestUrl}?version=${encodeURIComponent(request.version)}`
-        : this.manifestUrl;
-    let manifest: unknown;
+    const version = await this.resolveVersion(request);
+    if (!version) return null;
+
+    const manifest = await this.fetchJson(`${this.baseUrl}/${version}/manifest.json`);
+    if (!manifest) return null;
+
+    const entry = pickPlatform(manifest, target);
+    if (!entry) return null;
+
+    const fileName = target.platform === 'win32' ? 'claude.exe' : 'claude';
+    return {
+      url: `${this.baseUrl}/${version}/${entry.key}/${fileName}`,
+      version,
+      // A bare executable, not an archive: the installer downloads exactly this
+      // file and runs it.
+      archiveKind: 'raw',
+      executableNames: claudeExecutableNames(target),
+      integrity: entry.checksum,
+      ...(entry.size !== undefined ? { expectedBytes: entry.size } : {}),
+    };
+  }
+
+  /**
+   * Turns the version policy into a concrete version.
+   *
+   * A tested version is used as-is; only an explicit update check asks the
+   * channel what is newest. `stable` is the channel the installer defaults to.
+   */
+  private async resolveVersion(request: VersionRequest): Promise<string | null> {
+    if (request.kind === 'tested') return request.version;
+
+    const text = await this.fetchText(`${this.baseUrl}/stable`);
+    const version = text?.trim();
+    // The channel answers with a bare version. Anything else - an error page, a
+    // redirect notice, a region block - is not a version, and is refused.
+    return version && /^\d+\.\d+\.\d+/.test(version) ? version : null;
+  }
+
+  private async fetchText(url: string): Promise<string | null> {
+    try {
+      const response = await this.fetchImpl(url, { signal: AbortSignal.timeout(20_000) });
+      if (!response.ok) return null;
+      return await response.text();
+    } catch {
+      return null;
+    }
+  }
+
+  private async fetchJson(url: string): Promise<unknown> {
     try {
       const response = await this.fetchImpl(url, {
         headers: { accept: 'application/json' },
         signal: AbortSignal.timeout(20_000),
       });
       if (!response.ok) return null;
-      manifest = await response.json();
+      return await response.json();
     } catch {
       return null;
     }
-    return readClaudeManifest(manifest, target, claudeExecutableNames(target));
-  }
-}
-
-/**
- * The release host the official installer uses internally.
- *
- * IMPORTANT: this is an implementation detail discovered inside the shipped
- * binary, not a published API. It is kept as a controlled last resort so a user
- * is not left stranded, and it is labelled so that no one mistakes it for a
- * contract. If the documented source works, this is never reached.
- */
-export class ClaudeReleaseHostSource implements RuntimeSource {
-  readonly id = 'claude-release-host';
-  readonly label = 'Host de release usado pelo instalador oficial';
-  readonly contract = 'NOT_PUBLIC_CONTRACT' as const;
-  readonly integrityStrategy: IntegrityStrategy = 'SHA256';
-
-  constructor(
-    private readonly baseUrl = 'https://downloads.claude.ai/claude-code-releases',
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
-
-  async resolve(target: RuntimeTarget, request: VersionRequest): Promise<ResolvedDownload | null> {
-    const channel = request.kind === 'tested' ? request.version : 'stable';
-    let manifest: unknown;
-    try {
-      const response = await this.fetchImpl(`${this.baseUrl}/${channel}`, {
-        headers: { accept: 'application/json' },
-        signal: AbortSignal.timeout(20_000),
-      });
-      if (!response.ok) return null;
-      manifest = await response.json();
-    } catch {
-      return null;
-    }
-    return readClaudeManifest(manifest, target, claudeExecutableNames(target), this.baseUrl);
   }
 }
 
@@ -124,65 +174,33 @@ export class ClaudeSelfInstallSource implements RuntimeSource {
 }
 
 export function defaultClaudeSources(fetchImpl: typeof fetch = fetch): RuntimeSource[] {
-  return [
-    new ClaudeOfficialInstallerSource(undefined, fetchImpl),
-    // Deliberately last: see the class comment.
-    new ClaudeReleaseHostSource(undefined, fetchImpl),
-  ];
+  return [new ClaudeOfficialReleaseSource(undefined, fetchImpl)];
 }
 
 /**
- * Reads a release manifest into a download.
+ * Finds the manifest entry for this machine.
  *
- * Accepts a couple of common shapes and declines on anything else, so an
- * unexpected response can never turn into a guessed URL.
+ * Only keys the manifest actually declares are considered, and the checksum
+ * must be a real SHA-256: a platform without one is skipped rather than
+ * installed unverified.
  */
-function readClaudeManifest(
-  manifest: unknown,
-  target: RuntimeTarget,
-  executableNames: string[],
-  baseUrl?: string,
-): ResolvedDownload | null {
+export function pickPlatform(manifest: unknown, target: RuntimeTarget): ManifestEntry | null {
   if (!manifest || typeof manifest !== 'object') return null;
-  const root = manifest as Record<string, unknown>;
+  const platforms = (manifest as Record<string, unknown>)['platforms'];
+  if (!platforms || typeof platforms !== 'object') return null;
+  const table = platforms as Record<string, unknown>;
 
-  const version =
-    typeof root.version === 'string'
-      ? root.version
-      : typeof root.latest === 'string'
-        ? root.latest
-        : null;
-  if (!version) return null;
-
-  const key = `${target.platform}-${target.arch}`;
-  const platforms = (root.platforms ?? root.builds) as Record<string, unknown> | undefined;
-
-  let url: string | null = null;
-  let integrity: string | undefined;
-
-  if (platforms && typeof platforms === 'object') {
-    const entry = platforms[key];
-    if (typeof entry === 'string') {
-      url = entry;
-    } else if (entry && typeof entry === 'object') {
-      const record = entry as Record<string, unknown>;
-      if (typeof record.url === 'string') url = record.url;
-      if (typeof record.checksum === 'string') integrity = record.checksum;
-      if (typeof record.integrity === 'string') integrity = record.integrity;
-    }
+  for (const key of claudePlatformKeys(target)) {
+    const entry = table[key];
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    const checksum = typeof record['checksum'] === 'string' ? record['checksum'] : null;
+    if (!checksum || !/^[a-f0-9]{64}$/i.test(checksum)) continue;
+    return {
+      key,
+      checksum,
+      size: typeof record['size'] === 'number' ? record['size'] : undefined,
+    };
   }
-
-  if (!url) return null;
-  if (!/^https?:\/\//i.test(url)) {
-    if (!baseUrl) return null;
-    url = `${baseUrl.replace(/\/+$/, '')}/${url.replace(/^\/+/, '')}`;
-  }
-
-  return {
-    url,
-    version,
-    archiveKind: url.endsWith('.zip') ? 'zip' : url.endsWith('.exe') ? 'raw' : 'tgz',
-    executableNames,
-    ...(integrity ? { integrity } : {}),
-  };
+  return null;
 }
