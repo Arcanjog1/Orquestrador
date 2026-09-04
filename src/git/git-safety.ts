@@ -22,6 +22,8 @@ export const READ_ONLY_GIT_SUBCOMMANDS: readonly string[] = [
   'rev-list',
   'config',
   'symbolic-ref',
+  'remote',
+  'for-each-ref',
 ];
 
 export class UnsafeGitCommandError extends Error {
@@ -54,6 +56,16 @@ export function assertReadOnlyGitArgs(args: readonly string[]): void {
   if (subcommand === 'config') {
     const writing = !args.includes('--get') && !args.includes('--list') && !args.includes('-l');
     if (writing) throw new UnsafeGitCommandError('Refusing to run a writing "git config" command.');
+  }
+  if (subcommand === 'remote') {
+    // `git remote` reads; `git remote add|remove|rename|set-url|prune|update`
+    // writes. Allowed by name alone it would be a hole, so the reading verbs
+    // are named explicitly and everything else is refused.
+    const verb = args[args.indexOf('remote') + 1];
+    const reading = verb === undefined || verb.startsWith('-') || ['get-url', 'show'].includes(verb);
+    if (!reading) {
+      throw new UnsafeGitCommandError(`Refusing to run a writing "git remote ${verb}" command.`);
+    }
   }
 }
 

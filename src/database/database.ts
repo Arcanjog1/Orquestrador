@@ -11,6 +11,20 @@ import { MIGRATIONS, SCHEMA_VERSION } from './schema.js';
 import { NodeSqliteDriver } from './node-sqlite-driver.js';
 import { DatabaseUnavailableError, type SqlDriver, type SqlRow, type SqlValue } from './driver.js';
 import { appPaths, type AppPaths } from '../runtime/paths.js';
+import {
+  AccountRepository,
+  AgentInvocationRepository,
+  AgentRepository,
+  ArtifactRepository,
+  ChatSessionRepository,
+  MessageRepository,
+  ProviderRepository,
+  RunRepository,
+  RunStepRepository,
+  VerificationDefinitionRepository,
+  VerificationResultRepository,
+  WorkspaceRepository,
+} from './repositories.js';
 import type { RuntimeManifest } from '../runtime/types.js';
 
 export const DATABASE_FILENAME = 'orchestrator.db';
@@ -76,6 +90,18 @@ export class Database {
 
   readonly runtimeInstallations = new RuntimeInstallationRepository(() => this.driver);
   readonly settings = new SettingsRepository(() => this.driver);
+  readonly providers = new ProviderRepository(() => this.driver);
+  readonly accounts = new AccountRepository(() => this.driver);
+  readonly agents = new AgentRepository(() => this.driver);
+  readonly workspaces = new WorkspaceRepository(() => this.driver);
+  readonly chatSessions = new ChatSessionRepository(() => this.driver);
+  readonly messages = new MessageRepository(() => this.driver);
+  readonly runs = new RunRepository(() => this.driver);
+  readonly runSteps = new RunStepRepository(() => this.driver);
+  readonly agentInvocations = new AgentInvocationRepository(() => this.driver);
+  readonly verificationDefinitions = new VerificationDefinitionRepository(() => this.driver);
+  readonly verificationResults = new VerificationResultRepository(() => this.driver);
+  readonly artifacts = new ArtifactRepository(() => this.driver);
 }
 
 /** Shared helpers for the repositories. */

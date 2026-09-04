@@ -3,21 +3,24 @@
   "version": "0.1.0",
   "description": "Orquestrador local de agentes de programacao: Codex CLI supervisiona, Claude Code CLI executa.",
   "type": "module",
-  "bin": {
-    "orchestrator": "dist/index.js"
-  },
-  "main": "dist/index.js",
+  "main": "dist/main/main.js",
   "engines": {
     "node": ">=20.11.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:main": "tsc -p tsconfig.json",
+    "build:renderer": "vite build",
     "build:tests": "tsc -p tsconfig.test.json",
-    "clean": "node -e \"const f=require('fs');for(const d of ['dist','dist-tests'])f.rmSync(d,{recursive:true,force:true})\"",
-    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "build:all": "npm run build:main && npm run build:renderer",
+    "clean": "node -e \"const f=require('fs');for(const d of ['dist','dist-tests','release'])f.rmSync(d,{recursive:true,force:true})\"",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "dev": "vite",
+    "start": "npm run build:all && electron .",
+    "package": "npm run build:all && electron-builder --win nsis",
+    "package:dir": "npm run build:all && electron-builder --win --dir",
     "pretest": "npm run build && npm run build:tests",
-    "test": "node --test \"dist-tests/tests/**/*.test.js\"",
-    "orchestrator": "node dist/index.js"
+    "test": "node --test \"dist-tests/tests/**/*.test.js\""
   },
   "keywords": [
     "orchestrator",
@@ -29,7 +32,33 @@
   "private": true,
   "dependencies": {},
   "devDependencies": {
+    "@fontsource/jetbrains-mono": "^5.1.1",
+    "@fontsource/manrope": "^5.1.0",
+    "@radix-ui/react-checkbox": "^1.3.3",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-popover": "^1.1.15",
+    "@radix-ui/react-select": "^2.2.6",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-switch": "^1.2.6",
+    "@tailwindcss/vite": "^4.2.1",
     "@types/node": "^22.10.0",
-    "typescript": "^5.7.0"
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "electron": "38.8.6",
+    "electron-builder": "^26.15.3",
+    "lucide-react": "^0.575.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.2.1",
+    "tw-animate-css": "^1.3.4",
+    "typescript": "^5.7.0",
+    "vite": "^7.1.0"
   }
 }

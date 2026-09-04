@@ -1,0 +1,46 @@
+# Packaging for Windows.
+#
+# NSIS per-user, on purpose: the app installs into %LOCALAPPDATA%, the same
+# place it keeps its runtimes and profiles, so nothing ever asks for elevation.
+# Not signed yet - SmartScreen will warn - but the pipeline is shaped to take a
+# certificate without any other change.
+appId: com.arcanjog1.ai-orchestrator
+productName: AI Orchestrator
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: build
+
+# Only what the application actually runs. Sources, tests and the spike tool
+# are development material and stay out of the installer.
+files:
+  - dist/main/**/*
+  - dist/preload/**/*
+  - dist/renderer/**/*
+  - package.json
+  - "!**/*.map"
+
+extraMetadata:
+  main: dist/main/main.js
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.png
+  # No signing configured yet; adding certificateFile/certificatePassword here
+  # is the only change needed once a certificate exists.
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AI Orchestrator
+  artifactName: AI-Orchestrator-Setup.${ext}
+  deleteAppDataOnUninstall: false
+
+publish: null

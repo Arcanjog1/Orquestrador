@@ -61,3 +61,23 @@ entrega. Cada instalação grava um manifesto com origem, URL, versão,
 arquitetura, tamanho, SHA-256, veredito de integridade, nível de confiança e os
 arquivos de licença encontrados. Esse manifesto é a evidência de o que foi
 instalado e de onde veio.
+
+## Manrope
+
+Redistribuída dentro do aplicativo (pacote `@fontsource/manrope`).
+
+- Licença: SIL Open Font License 1.1
+- Origem: https://github.com/sharanda/manrope
+- A OFL permite redistribuição embutida em um produto, inclusive comercial,
+  desde que a fonte não seja vendida isoladamente e o aviso de licença
+  acompanhe os arquivos.
+
+## JetBrains Mono
+
+Redistribuída dentro do aplicativo (pacote `@fontsource/jetbrains-mono`).
+
+- Licença: SIL Open Font License 1.1
+- Origem: https://github.com/JetBrains/JetBrainsMono
+
+As duas são carregadas do disco, nunca da rede: um aplicativo desktop não pode
+depender do Google Fonts estar acessível.

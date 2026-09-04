@@ -91,3 +91,35 @@ test('parseCommandLine handles quotes without acting as a shell', () => {
 test('parseCommandLine reports unbalanced quotes', () => {
   assert.throws(() => parseCommandLine('npm run "broken'), CommandParseError);
 });
+
+// -- Additions made so the interface can read git context (branch, remote) ----
+// Both are read-only in the forms used; the writing forms stay refused.
+
+test('permits the reading forms of git remote', () => {
+  assert.doesNotThrow(() => assertReadOnlyGitArgs(['remote', 'get-url', 'origin']));
+  assert.doesNotThrow(() => assertReadOnlyGitArgs(['remote']));
+  assert.doesNotThrow(() => assertReadOnlyGitArgs(['remote', '-v']));
+  assert.doesNotThrow(() => assertReadOnlyGitArgs(['remote', 'show', 'origin']));
+});
+
+test('still refuses every writing form of git remote', () => {
+  for (const verb of ['add', 'remove', 'rm', 'rename', 'set-url', 'prune', 'update']) {
+    assert.throws(
+      () => assertReadOnlyGitArgs(['remote', verb, 'origin', 'https://example.invalid/x.git']),
+      UnsafeGitCommandError,
+      `"git remote ${verb}" must be refused`,
+    );
+  }
+});
+
+test('permits for-each-ref, which cannot mutate', () => {
+  assert.doesNotThrow(() =>
+    assertReadOnlyGitArgs(['for-each-ref', '--sort=-committerdate', 'refs/heads']),
+  );
+});
+
+test('the allowlist has not quietly widened beyond those two additions', () => {
+  for (const subcommand of ['push', 'commit', 'merge', 'reset', 'clean', 'checkout', 'restore']) {
+    assert.throws(() => assertReadOnlyGitArgs([subcommand]), UnsafeGitCommandError);
+  }
+});

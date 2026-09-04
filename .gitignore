@@ -17,3 +17,6 @@ Thumbs.db
 
 # Spike report is generated per-machine
 spike/spike-report.txt
+
+# Packaging output
+release/
