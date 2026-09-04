@@ -41,6 +41,18 @@ const processManager = new ProcessManager();
 /** Flags and subcommands the adapters actually rely on. */
 const SUBCOMMAND_HELP = { codex: ['exec'] };
 
+/**
+ * Extra invocations that prove the adapter's real code path.
+ *
+ * For Claude the question is not "is this machine signed in" - CI never will
+ * be - but "can the application drive the CLI and read its answer". A clean
+ * exit with parseable JSON, or a clearly-reported unauthenticated state, both
+ * count as the invocation working.
+ */
+const POST_INSTALL_CHECKS = {
+  'claude-code': [{ label: 'auth status --json', args: ['auth', 'status', '--json'] }],
+};
+
 /** Flags the adapter would use, read from the subcommand's own help page. */
 const SUBCOMMAND_FLAGS = {
   codex: [
@@ -155,6 +167,30 @@ for (const runtimeId of runtimes) {
       if (process.env.AI_ORCHESTRATOR_PROBE_DUMP_HELP === '1') {
         console.log(`\n----- ${runtimeId} ${sub} --help -----\n${subText}\n-----`);
       }
+    }
+
+    for (const check of POST_INSTALL_CHECKS[runtimeId] ?? []) {
+      const outcome = await processManager.run({
+        command: install.executablePath,
+        args: check.args,
+        cwd: home,
+        timeoutMs: 120_000,
+      });
+      const text = `${outcome.stdout}${outcome.stderr}`.trim();
+      let shape = 'not JSON';
+      try {
+        const parsed = JSON.parse(text);
+        shape = `JSON with keys: ${Object.keys(parsed).join(', ') || '(none)'}`;
+      } catch {
+        /* left as "not JSON" */
+      }
+      // The invocation is what is being proved. A non-zero exit because nobody
+      // is signed in is a correct answer, not a failure of the plumbing.
+      const invoked = outcome.outcome === 'completed';
+      say(`${check.label}`, `${invoked ? 'INVOKED' : outcome.outcome}, exit ${outcome.exitCode}`);
+      say(`${check.label} shape`, shape);
+      say(`${check.label} first line`, text.split(/\r?\n/)[0]?.slice(0, 200) ?? '');
+      if (!invoked) throw new Error(`${check.label} could not be invoked`);
     }
 
     result.ok = true;
