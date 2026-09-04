@@ -1,0 +1,32 @@
+{
+  "name": "@ai-orchestrator/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI Orchestrator desktop shell: Electron main, preload bridge and React renderer.",
+  "main": "dist/apps/desktop/src/electron/main.js",
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "node scripts/build-renderer.mjs",
+    "build": "npm run build:main && npm run build:renderer",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "start": "npm run build && electron .",
+    "test:electron": "npm run build && node scripts/run-electron-tests.mjs",
+    "test:packaged": "node scripts/packaged-smoke.mjs",
+    "package:dir": "npm run build && electron-builder --dir",
+    "package": "npm run build && electron-builder --win nsis --publish never",
+    "package:linux": "npm run build && electron-builder --linux dir"
+  },
+  "dependencies": {
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.1",
+    "electron": "44.1.1",
+    "electron-builder": "26.0.12",
+    "esbuild": "0.25.10"
+  }
+}

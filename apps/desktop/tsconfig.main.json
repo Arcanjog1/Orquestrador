@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": [
+    "src/main/**/*.ts",
+    "src/electron/**/*.ts",
+    "src/preload/**/*.ts",
+    "src/shared/**/*.ts",
+    "../../src/**/*.ts"
+  ]
+}
