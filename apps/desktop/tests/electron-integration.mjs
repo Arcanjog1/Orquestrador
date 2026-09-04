@@ -39,6 +39,38 @@ const { WEB_PREFERENCES } = await import(join(dist, 'apps/desktop/src/electron/s
 const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
 
+/** No single check may take longer than this. */
+const CASE_TIMEOUT_MS = 90_000;
+/** Nor the suite as a whole. */
+const SUITE_TIMEOUT_MS = 8 * 60_000;
+
+/**
+ * Runs `fn` with a deadline.
+ *
+ * Every check here talks to a real window, and a window that never finishes
+ * loading makes `executeJavaScript` wait forever. Without a bound, that shows
+ * up in CI as a job that burns its whole allowance and says nothing. A timeout
+ * turns it into a named failure.
+ */
+function withTimeout(name, fn) {
+  return async () => {
+    let timer;
+    try {
+      await Promise.race([
+        fn(),
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`timed out after ${CASE_TIMEOUT_MS}ms`)),
+            CASE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
 /* ------------------------------------------------------------- node:sqlite */
 
 test('node:sqlite is available inside the Electron main process', () => {
@@ -273,11 +305,20 @@ async function waitForText(window, pattern, timeoutMs) {
 /* --------------------------------------------------------------- the run */
 
 app.whenReady().then(async () => {
+  // Belt as well as braces: if a check hangs in a way the per-case race cannot
+  // interrupt, the suite still exits with a verdict rather than a stuck job.
+  const watchdog = setTimeout(() => {
+    console.log(`not ok - suite watchdog: no verdict after ${SUITE_TIMEOUT_MS}ms`);
+    console.log('# fail 1');
+    app.exit(1);
+  }, SUITE_TIMEOUT_MS);
+  watchdog.unref?.();
+
   let failed = 0;
   console.log(`1..${cases.length}`);
   for (const [index, [name, fn]] of cases.entries()) {
     try {
-      await fn();
+      await withTimeout(name, fn)();
       console.log(`ok ${index + 1} - ${name}`);
     } catch (error) {
       failed += 1;
@@ -285,6 +326,7 @@ app.whenReady().then(async () => {
       console.log(String(error && error.stack ? error.stack : error).replace(/^/gm, '  # '));
     }
   }
+  clearTimeout(watchdog);
   console.log(`# pass ${cases.length - failed}`);
   console.log(`# fail ${failed}`);
 
