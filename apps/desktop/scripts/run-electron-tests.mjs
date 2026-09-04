@@ -29,6 +29,10 @@ const needsXvfb = process.platform === 'linux' && !process.env.DISPLAY;
 const command = needsXvfb ? 'xvfb-run' : args.shift();
 if (needsXvfb) args.unshift('-a');
 
+// Printed before the spawn so a job that stops here says where it stopped.
+console.log(`# launching: ${command} ${args.join(' ')}`);
+console.log(`# platform=${process.platform} display=${process.env.DISPLAY ?? '(none)'}`);
+
 const result = spawnSync(command, args, {
   stdio: 'inherit',
   env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' },

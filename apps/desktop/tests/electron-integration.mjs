@@ -304,7 +304,10 @@ async function waitForText(window, pattern, timeoutMs) {
 
 /* --------------------------------------------------------------- the run */
 
+console.log('# electron main started, waiting for app ready');
+
 app.whenReady().then(async () => {
+  console.log('# app ready');
   // Belt as well as braces: if a check hangs in a way the per-case race cannot
   // interrupt, the suite still exits with a verdict rather than a stuck job.
   const watchdog = setTimeout(() => {

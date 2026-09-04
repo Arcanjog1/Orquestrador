@@ -55,13 +55,19 @@ jobs:
       - name: Build the desktop application
         run: npm run desktop:build
 
+      # Bounded at the step level as well as inside the suite: whatever hangs,
+      # the job fails within minutes with a log, instead of burning its whole
+      # allowance in silence.
       - name: Electron integration tests
+        timeout-minutes: 15
         run: npm run -w apps/desktop test:electron
 
       - name: Package (NSIS, per-user, no elevation)
+        timeout-minutes: 20
         run: npm run -w apps/desktop package
 
       - name: Packaged smoke test
+        timeout-minutes: 15
         run: npm run -w apps/desktop test:packaged
 
       # Everything below is informational: it records what the real Windows
@@ -152,9 +158,11 @@ jobs:
         run: npm run desktop:build
 
       - name: Electron integration tests
+        timeout-minutes: 15
         run: npm run -w apps/desktop test:electron
 
       - name: Package (unpacked) and smoke-test it
+        timeout-minutes: 20
         run: |
           npm run -w apps/desktop package:linux
           npm run -w apps/desktop test:packaged
