@@ -12,8 +12,9 @@ Escrito em 2026-09-04.
 | | |
 |---|---|
 | Branch | `claude/lovable-on-latest-core` |
-| **HEAD verificado no Windows** | **`66f7a07`** |
+| **Baseline de código verificado no Windows** | **`66f7a07`** |
 | Run de CI | [33910787494](https://github.com/Arcanjog1/Orquestrador/actions/runs/33910787494) — `success` |
+| Commits acima dele | somente documentação; o último também passou ([33915266384](https://github.com/Arcanjog1/Orquestrador/actions/runs/33915266384)) |
 | Base funcional | `claude/ai-orchestrator-continuation-grblen` @ `903a60b` |
 | Design | `Arcanjog1/ai-project-lead` @ `3986bb9` |
 

@@ -11,7 +11,7 @@ Atualizado em 2026-09-04.
 
 | Branch | HEAD | Estado |
 |---|---|---|
-| `claude/lovable-on-latest-core` | `66f7a07` | **BASELINE RECONCILIADO** — verificado no Windows CI ([run 33910787494](https://github.com/Arcanjog1/Orquestrador/actions/runs/33910787494)) |
+| `claude/lovable-on-latest-core` | `66f7a07` | **BASELINE RECONCILIADO** — código verificado no Windows CI ([run 33910787494](https://github.com/Arcanjog1/Orquestrador/actions/runs/33910787494)). Commits acima dele são só documentação. |
 
 ## Superadas
 
