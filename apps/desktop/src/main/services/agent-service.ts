@@ -10,7 +10,13 @@
 import type { Database } from '../core.js';
 import type { AgentView } from '../../shared/ipc-contract.js';
 
-/** The orchestrator is a single fixed agent until more providers arrive. */
+/**
+ * The orchestrator that exists before anyone has signed in.
+ *
+ * Codex can run without an account on a machine that already has one
+ * configured, so this keeps the workspace screen usable from the first launch.
+ * Once a Codex account exists, an agent bound to it is offered alongside.
+ */
 export const CODEX_ORCHESTRATOR_ID = 'agent-codex-orchestrator';
 
 export class AgentService {
@@ -33,14 +39,27 @@ export class AgentService {
       role: 'ORCHESTRATOR',
     });
     for (const account of this.database.accounts.list()) {
-      this.database.agents.ensure({
-        id: workerAgentIdFor(account.id),
-        displayName: account.display_name,
-        providerId: account.provider_id,
-        accountId: account.id,
-        adapterId: 'claude-code-cli',
-        role: 'CODING_WORKER',
-      });
+      // The provider decides the role: an Anthropic account can do the work, an
+      // OpenAI one can supervise. Neither is asked to do the other's job.
+      if (account.provider_id === 'anthropic') {
+        this.database.agents.ensure({
+          id: workerAgentIdFor(account.id),
+          displayName: account.display_name,
+          providerId: account.provider_id,
+          accountId: account.id,
+          adapterId: 'claude-code-cli',
+          role: 'CODING_WORKER',
+        });
+      } else if (account.provider_id === 'openai') {
+        this.database.agents.ensure({
+          id: orchestratorAgentIdFor(account.id),
+          displayName: account.display_name,
+          providerId: account.provider_id,
+          accountId: account.id,
+          adapterId: 'codex-cli',
+          role: 'ORCHESTRATOR',
+        });
+      }
     }
   }
 
@@ -59,4 +78,9 @@ export class AgentService {
 /** Deterministic, so syncing twice does not create a second worker agent. */
 export function workerAgentIdFor(accountId: string): string {
   return `agent-worker-${accountId}`;
+}
+
+/** Likewise for the orchestrator bound to a Codex account. */
+export function orchestratorAgentIdFor(accountId: string): string {
+  return `agent-orchestrator-${accountId}`;
 }

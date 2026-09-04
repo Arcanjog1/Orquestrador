@@ -88,7 +88,8 @@ export class IpcRouter {
 
     this.handlers.set('accounts.list', () => s.accounts.list());
     this.handlers.set('accounts.create', (p) => {
-      const view = s.accounts.create((p as { name: string }).name);
+      const input = p as { name: string; provider: 'anthropic' | 'openai' };
+      const view = s.accounts.create(input.name, input.provider);
       s.agents.sync();
       return view;
     });

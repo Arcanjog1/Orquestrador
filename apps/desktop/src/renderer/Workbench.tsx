@@ -99,13 +99,17 @@ function Accounts({
   onChanged: () => Promise<void>;
 }): ReactElement {
   const [name, setName] = useState('');
+  const [provider, setProvider] = useState<'anthropic' | 'openai'>('anthropic');
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState<Record<string, string>>({});
 
   useEffect(
     () =>
       api.events.accountProgress((event) => {
-        setStage((current) => ({ ...current, [event.accountId]: event.label }));
+        // A device flow shows a code the user has to match in the browser, so
+        // it belongs on screen next to the status, not only in the URL.
+        const label = event.code ? `${event.label} Código: ${event.code}` : event.label;
+        setStage((current) => ({ ...current, [event.accountId]: label }));
       }),
     [],
   );
@@ -114,7 +118,7 @@ function Accounts({
     if (name.trim().length === 0) return;
     setBusy(true);
     try {
-      await api.accounts.create({ name: name.trim() });
+      await api.accounts.create({ name: name.trim(), provider });
       setName('');
       await onChanged();
     } finally {
@@ -146,15 +150,25 @@ function Accounts({
               {account.name}
             </span>
             <button onClick={() => void connect(account.id)} disabled={busy}>
-              {account.state === 'connected' ? 'Reconectar' : 'Conectar Anthropic'}
+              {account.state === 'connected'
+                ? 'Reconectar'
+                : `Conectar ${account.provider === 'openai' ? 'OpenAI' : 'Anthropic'}`}
             </button>
           </div>
           <span className="muted">{stage[account.id] ?? account.detail}</span>
         </div>
       ))}
+      <select
+        value={provider}
+        onChange={(e) => setProvider(e.target.value as 'anthropic' | 'openai')}
+        aria-label="Provedor"
+      >
+        <option value="anthropic">Anthropic (Claude Code)</option>
+        <option value="openai">OpenAI (Codex)</option>
+      </select>
       <div className="row">
         <input
-          placeholder="Claude Trabalho"
+          placeholder={provider === 'anthropic' ? 'Claude Trabalho' : 'Codex Trabalho'}
           value={name}
           onChange={(e) => setName(e.target.value)}
           style={{ flex: 1, minWidth: 0 }}

@@ -94,7 +94,7 @@ test('an account creates its own profile directory, and the user never sees the 
   const fixture = createDesktopFixture();
   try {
     const account = value<{ id: string; name: string; state: string }>(
-      await fixture.router.handle('accounts.create', { name: 'Claude Trabalho' }),
+      await fixture.router.handle('accounts.create', { name: 'Claude Trabalho', provider: 'anthropic' }),
     );
     assert.equal(account.name, 'Claude Trabalho');
     assert.equal(account.state, 'disconnected');
@@ -116,10 +116,10 @@ test('two accounts get two isolated profile directories', async () => {
   const fixture = createDesktopFixture();
   try {
     const first = value<{ id: string }>(
-      await fixture.router.handle('accounts.create', { name: 'Trabalho' }),
+      await fixture.router.handle('accounts.create', { name: 'Trabalho', provider: 'anthropic' }),
     );
     const second = value<{ id: string }>(
-      await fixture.router.handle('accounts.create', { name: 'Pessoal' }),
+      await fixture.router.handle('accounts.create', { name: 'Pessoal', provider: 'anthropic' }),
     );
     const a = fixture.services.accountManager.profileDirectory(first.id);
     const b = fixture.services.accountManager.profileDirectory(second.id);
@@ -133,7 +133,7 @@ test('two accounts get two isolated profile directories', async () => {
 test('creating an account gives the workspace a worker agent to choose', async () => {
   const fixture = createDesktopFixture();
   try {
-    value(await fixture.router.handle('accounts.create', { name: 'Claude Trabalho' }));
+    value(await fixture.router.handle('accounts.create', { name: 'Claude Trabalho', provider: 'anthropic' }));
     const agents = value<Array<{ id: string; role: string; name: string }>>(
       await fixture.router.handle('agents.list', null),
     );
@@ -161,7 +161,7 @@ test('chat history survives closing and reopening the application', async () => 
       await first.router.handle('workspace.create', { name: 'P', localPath: projectDir }),
     );
     const account = value<{ id: string }>(
-      await first.router.handle('accounts.create', { name: 'Claude' }),
+      await first.router.handle('accounts.create', { name: 'Claude', provider: 'anthropic' }),
     );
     const agents = value<Array<{ id: string; role: string; accountId: string | null }>>(
       await first.router.handle('agents.list', null),
@@ -223,5 +223,55 @@ test('sending a task before choosing agents explains what is missing', async () 
   } finally {
     await fixture.cleanup();
     rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('an OpenAI account offers an orchestrator, an Anthropic one offers a worker', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    const claude = value<{ id: string; provider: string }>(
+      await fixture.router.handle('accounts.create', {
+        name: 'Claude Trabalho',
+        provider: 'anthropic',
+      }),
+    );
+    const codex = value<{ id: string; provider: string }>(
+      await fixture.router.handle('accounts.create', { name: 'Codex Trabalho', provider: 'openai' }),
+    );
+    assert.equal(claude.provider, 'anthropic');
+    assert.equal(codex.provider, 'openai');
+
+    const agents = value<Array<{ id: string; role: string; accountId: string | null }>>(
+      await fixture.router.handle('agents.list', null),
+    );
+
+    // The provider decides the role: neither account is asked to do the other's
+    // job.
+    const worker = agents.find((a) => a.accountId === claude.id);
+    const orchestrator = agents.find((a) => a.accountId === codex.id);
+    assert.equal(worker?.role, 'CODING_WORKER');
+    assert.equal(orchestrator?.role, 'ORCHESTRATOR');
+
+    // Two accounts, two isolated homes, and the orchestrator's is a CODEX_HOME.
+    const codexHome = fixture.services.codexAccountManager.buildEnvironment(codex.id);
+    const claudeHome = fixture.services.accountManager.buildEnvironment(claude.id);
+    assert.ok(codexHome['CODEX_HOME']);
+    assert.ok(claudeHome['CLAUDE_CONFIG_DIR']);
+    assert.notEqual(codexHome['CODEX_HOME'], claudeHome['CLAUDE_CONFIG_DIR']);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('a provider nobody supports is refused at the boundary', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    const result = await fixture.router.handle('accounts.create', {
+      name: 'Alguma coisa',
+      provider: 'acme',
+    });
+    assert.equal(errorOf(result).code, 'INVALID_ARGUMENT');
+  } finally {
+    await fixture.cleanup();
   }
 });

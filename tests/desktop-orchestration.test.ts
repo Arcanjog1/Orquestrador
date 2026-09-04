@@ -82,7 +82,7 @@ async function prepare(options: {
     command: 'node check.mjs',
   });
 
-  value(await fixture.router.handle('accounts.create', { name: 'Claude Trabalho' }));
+  value(await fixture.router.handle('accounts.create', { name: 'Claude Trabalho', provider: 'anthropic' }));
   const agents = value<Array<{ id: string; role: string }>>(
     await fixture.router.handle('agents.list', null),
   );

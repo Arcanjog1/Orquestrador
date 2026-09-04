@@ -9,12 +9,24 @@
  * Electron: the shell passes `shell.openExternal`, a test passes a spy.
  */
 
-import type { Account, AuthState, ClaudeAccountManager, Database } from '../core.js';
+import type { Account, AuthState, Database, ProviderAccountManager } from '../core.js';
 import { newId } from '../core.js';
-import type { AccountView } from '../../shared/ipc-contract.js';
+import type { AccountView, ProviderName } from '../../shared/ipc-contract.js';
 import type { EventBus } from '../events.js';
 
 export type UrlOpener = (url: string) => void | Promise<void>;
+
+/**
+ * One manager per provider.
+ *
+ * They implement the same shape - own directory, own credential, ambient
+ * credential never reported as connected - so everything below this line is
+ * provider-agnostic and the service never branches on a vendor name.
+ */
+export interface AccountManagers {
+  readonly anthropic: ProviderAccountManager;
+  readonly openai: ProviderAccountManager;
+}
 
 const STAGE_LABELS: Record<string, string> = {
   starting: 'Preparando a conexão...',
@@ -30,10 +42,23 @@ export class AccountService {
 
   constructor(
     private readonly database: Database,
-    private readonly accounts: ClaudeAccountManager,
+    private readonly managers: AccountManagers,
     private readonly events: EventBus,
     private readonly openUrl: UrlOpener,
   ) {}
+
+  /** The manager that owns an account, chosen by its provider. */
+  private managerFor(provider: string): ProviderAccountManager {
+    const manager = (this.managers as unknown as Record<string, ProviderAccountManager | undefined>)[
+      provider
+    ];
+    if (!manager) throw new Error(`No account manager for provider ${provider}`);
+    return manager;
+  }
+
+  private managerForAccount(accountId: string): ProviderAccountManager {
+    return this.managerFor(this.database.accounts.require(accountId).provider_id);
+  }
 
   list(): AccountView[] {
     return this.database.accounts.list().map((row) => ({
@@ -46,20 +71,21 @@ export class AccountService {
   }
 
   /** Creates the account and the directory it owns, in that order. */
-  create(name: string): AccountView {
+  create(name: string, provider: ProviderName = 'anthropic'): AccountView {
     const id = newId('acc');
+    const manager = this.managerFor(provider);
     const account: Account = {
       id,
-      providerId: 'anthropic',
+      providerId: provider,
       displayName: name,
       createdAt: new Date().toISOString(),
     };
-    this.accounts.createAccount(account);
+    manager.createAccount(account);
     const record = this.database.accounts.create({
       id,
-      providerId: 'anthropic',
+      providerId: provider,
       displayName: name,
-      profileDirectory: this.accounts.profileDirectory(id),
+      profileDirectory: manager.profileDirectory(id),
     });
     return {
       id: record.id,
@@ -86,13 +112,13 @@ export class AccountService {
 
     const account: Account = {
       id: record.id,
-      providerId: 'anthropic',
+      providerId: record.provider_id as Account['providerId'],
       displayName: record.display_name,
       createdAt: record.created_at,
     };
 
     try {
-      const status = await this.accounts.connect(account, {
+      const status = await this.managerForAccount(accountId).connect(account, {
         signal: controller.signal,
         openUrl: this.openUrl,
         onProgress: (progress) => {
@@ -101,6 +127,7 @@ export class AccountService {
             stage: progress.phase,
             label: STAGE_LABELS[progress.phase] ?? progress.message,
             ...(progress.url ? { url: progress.url } : {}),
+            ...(progress.code ? { code: progress.code } : {}),
           });
         },
       });
@@ -130,9 +157,9 @@ export class AccountService {
   /** Asks the CLI, rather than trusting the stored row. */
   async status(accountId: string): Promise<AccountView> {
     const record = this.database.accounts.require(accountId);
-    const status = await this.accounts.getStatus({
+    const status = await this.managerForAccount(accountId).getStatus({
       id: record.id,
-      providerId: 'anthropic',
+      providerId: record.provider_id as Account['providerId'],
       displayName: record.display_name,
       createdAt: record.created_at,
     });
@@ -141,8 +168,8 @@ export class AccountService {
   }
 
   remove(accountId: string): boolean {
-    this.database.accounts.require(accountId);
-    this.accounts.removeAccount(accountId);
+    const manager = this.managerForAccount(accountId);
+    manager.removeAccount(accountId);
     return this.database.accounts.remove(accountId);
   }
 
@@ -165,7 +192,7 @@ function detailFor(state: AuthState): string {
     case 'ambient-credential':
       return 'Entrou com uma credencial que não é desta conta. Conecte novamente para isolá-la.';
     case 'runtime-missing':
-      return 'O Claude Code ainda não está configurado.';
+      return 'O runtime desta conta ainda não está configurado.';
     default:
       return 'Não conectada.';
   }

@@ -315,7 +315,7 @@ test('connecting an account opens the browser for the user and records the resul
   } as unknown as ClaudeAccountManager;
 
   try {
-    const service = new AccountService(database, accountManager, events, (url) => {
+    const service = new AccountService(database, { anthropic: accountManager, openai: accountManager }, events, (url) => {
       opened.push(url);
     });
 
@@ -359,7 +359,12 @@ test('a login that fails leaves the account disconnected and says why', async ()
   } as unknown as ClaudeAccountManager;
 
   try {
-    const service = new AccountService(database, accountManager, new EventBus(), () => {});
+    const service = new AccountService(
+      database,
+      { anthropic: accountManager, openai: accountManager },
+      new EventBus(),
+      () => {},
+    );
     const created = service.create('Claude Pessoal');
     const result = await service.connect(created.id);
 
@@ -387,7 +392,12 @@ test('an ambient credential is never reported as connected', async () => {
   } as unknown as ClaudeAccountManager;
 
   try {
-    const service = new AccountService(database, accountManager, new EventBus(), () => {});
+    const service = new AccountService(
+      database,
+      { anthropic: accountManager, openai: accountManager },
+      new EventBus(),
+      () => {},
+    );
     const created = service.create('Claude Compartilhada');
     const status = await service.status(created.id);
 

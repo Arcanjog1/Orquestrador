@@ -69,6 +69,9 @@ export type EventChannel = (typeof EVENT_CHANNELS)[number];
 
 export type RuntimeId = 'codex' | 'claude-code' | 'git';
 
+/** The providers a user can hold an account with today. */
+export type ProviderName = 'anthropic' | 'openai';
+
 export interface AppInfo {
   readonly appVersion: string;
   readonly electronVersion: string;
@@ -136,6 +139,8 @@ export interface AccountProgressEvent {
   readonly label: string;
   /** Present only when the user must be sent to the browser. */
   readonly url?: string;
+  /** Short confirmation code shown by a device-code sign-in, when there is one. */
+  readonly code?: string;
 }
 
 export interface AgentView {
@@ -211,7 +216,7 @@ export interface IpcMap {
   'runtime.cancelInstall': { request: { runtimeId: RuntimeId }; response: { cancelled: boolean } };
 
   'accounts.list': { request: void; response: readonly AccountView[] };
-  'accounts.create': { request: { name: string }; response: AccountView };
+  'accounts.create': { request: { name: string; provider: ProviderName }; response: AccountView };
   'accounts.connect': { request: { accountId: string }; response: AccountView };
   'accounts.cancelConnect': { request: { accountId: string }; response: { cancelled: boolean } };
   'accounts.status': { request: { accountId: string }; response: AccountView };

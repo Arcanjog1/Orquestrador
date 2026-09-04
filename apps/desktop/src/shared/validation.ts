@@ -163,7 +163,10 @@ export const REQUEST_VALIDATORS: {
   'runtime.cancelInstall': obj({ runtimeId }),
 
   'accounts.list': noArgs,
-  'accounts.create': obj({ name: str({ min: 1, max: 80 }) }),
+  'accounts.create': obj({
+    name: str({ min: 1, max: 80 }),
+    provider: oneOf(['anthropic', 'openai'] as const),
+  }),
   'accounts.connect': obj({ accountId: id }),
   'accounts.cancelConnect': obj({ accountId: id }),
   'accounts.status': obj({ accountId: id }),

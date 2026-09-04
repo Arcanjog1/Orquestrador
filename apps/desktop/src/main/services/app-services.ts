@@ -9,7 +9,14 @@
  * Nothing in this file, or anything it constructs, imports Electron.
  */
 
-import { ClaudeAccountManager, Database, ProcessManager, RuntimeManager, appPaths } from '../core.js';
+import {
+  ClaudeAccountManager,
+  CodexAccountManager,
+  Database,
+  ProcessManager,
+  RuntimeManager,
+  appPaths,
+} from '../core.js';
 import type { AppPaths, WorkspaceWithAgents } from '../core.js';
 import { EventBus } from '../events.js';
 import { AccountService, type UrlOpener } from './account-service.js';
@@ -45,6 +52,7 @@ export class AppServices {
   readonly runtimeManager: RuntimeManager;
   readonly database: Database;
   readonly accountManager: ClaudeAccountManager;
+  readonly codexAccountManager: CodexAccountManager;
 
   readonly runtimes: RuntimeService;
   readonly accounts: AccountService;
@@ -66,11 +74,16 @@ export class AppServices {
       paths: this.paths,
       processManager: this.processManager,
     });
+    this.codexAccountManager = new CodexAccountManager({
+      runtimeManager: this.runtimeManager,
+      paths: this.paths,
+      processManager: this.processManager,
+    });
 
     this.runtimes = new RuntimeService(this.runtimeManager, this.events, this.database);
     this.accounts = new AccountService(
       this.database,
-      this.accountManager,
+      { anthropic: this.accountManager, openai: this.codexAccountManager },
       this.events,
       options.openUrl ?? (() => {}),
     );
@@ -99,12 +112,21 @@ export class AppServices {
       : null;
     const accountId = workerAgent?.account_id ?? null;
 
+    const orchestratorAgent = workspace.orchestrator_agent_id
+      ? this.database.agents.require(workspace.orchestrator_agent_id)
+      : null;
+    const orchestratorAccountId = orchestratorAgent?.account_id ?? null;
+
     const orchestrator = new CodexAdapter({
       processManager: this.processManager,
       resolveExecutable: () => this.runtimeManager.getExecutablePath('codex'),
       // The decision shape is the orchestrator's contract, not the adapter's,
       // so it is handed in rather than baked in.
       outputSchema: DECISION_JSON_SCHEMA,
+      buildEnvironment: () =>
+        orchestratorAccountId
+          ? this.codexAccountManager.buildEnvironment(orchestratorAccountId)
+          : {},
     });
     const worker = new ClaudeCodeAdapter({
       processManager: this.processManager,

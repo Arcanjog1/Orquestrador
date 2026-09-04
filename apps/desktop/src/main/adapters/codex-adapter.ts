@@ -30,6 +30,13 @@ export interface CodexAdapterOptions {
    * `--output-schema`.
    */
   outputSchema?: unknown;
+  /**
+   * Environment for the chosen Codex account, from `CodexAccountManager`.
+   *
+   * Sets that account's CODEX_HOME and deletes any inherited token, so two
+   * workspaces bound to two accounts never share a login.
+   */
+  buildEnvironment?: () => Record<string, string | undefined>;
 }
 
 export class CodexAdapter implements AgentRunner {
@@ -55,6 +62,7 @@ export class CodexAdapter implements AgentRunner {
 
     try {
       const plan = await this.buildArgs(executable, input.workingDirectory, scratch);
+      const env = { ...(this.options.buildEnvironment?.() ?? {}), ...(input.env ?? {}) };
       const result = await this.options.processManager.run({
         command: executable,
         args: plan.args,
@@ -62,7 +70,7 @@ export class CodexAdapter implements AgentRunner {
         stdin: input.prompt,
         timeoutMs: input.timeoutMs,
         signal: controller.signal,
-        ...(input.env ? { env: input.env } : {}),
+        ...(Object.keys(env).length > 0 ? { env } : {}),
       });
 
       // The final message, when Codex was asked to write one, is the answer.

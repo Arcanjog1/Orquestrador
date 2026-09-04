@@ -36,6 +36,7 @@ export type {
 } from '../../../../src/database/repositories.js';
 
 export { ClaudeAccountManager, isUsable } from '../../../../src/accounts/claude-account-manager.js';
+export { CodexAccountManager } from '../../../../src/accounts/codex-account-manager.js';
 export { AccountError } from '../../../../src/accounts/account-types.js';
 export type {
   Account,
@@ -43,6 +44,32 @@ export type {
   AuthState,
   LoginProgress,
 } from '../../../../src/accounts/account-types.js';
+
+/**
+ * What the account service needs from a provider's manager.
+ *
+ * Both managers already satisfy this; naming it keeps the service from
+ * branching on a vendor and makes the next provider a matter of adding one.
+ */
+export interface ProviderAccountManager {
+  profileDirectory(accountId: string): string;
+  createAccount(account: import('../../../../src/accounts/account-types.js').Account): unknown;
+  removeAccount(accountId: string): void;
+  getStatus(
+    account: import('../../../../src/accounts/account-types.js').Account,
+  ): Promise<import('../../../../src/accounts/account-types.js').AccountStatus>;
+  connect(
+    account: import('../../../../src/accounts/account-types.js').Account,
+    options?: {
+      onProgress?: (
+        progress: import('../../../../src/accounts/account-types.js').LoginProgress,
+      ) => void;
+      openUrl?: (url: string) => void | Promise<void>;
+      signal?: AbortSignal;
+    },
+  ): Promise<import('../../../../src/accounts/account-types.js').AccountStatus>;
+  buildEnvironment(accountId: string): Record<string, string | undefined>;
+}
 
 export { ProcessManager } from '../../../../src/process/process-manager.js';
 export type { ProcessResult } from '../../../../src/process/process-manager.js';
