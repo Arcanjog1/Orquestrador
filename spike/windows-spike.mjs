@@ -175,6 +175,9 @@ let redact = (s) => s;
 // ---------------------------------------------------------------------------
 
 let ProcessManager = null;
+let RuntimeManager = null;
+let appPaths = null;
+let ensureAppPaths = null;
 
 function ensureBuild() {
   const built = join(REPO_ROOT, 'dist', 'process', 'process-manager.js');
@@ -214,6 +217,13 @@ async function loadCompiledModules() {
     ({ ProcessManager } = await import(pmUrl));
     const sec = await import(secUrl);
     redact = sec.redact;
+
+    // The runtime layer too, so TEST 8 can exercise the sources the product
+    // actually ships rather than a second list that drifts away from them.
+    const rmUrl = pathToFileURL(join(REPO_ROOT, 'dist', 'runtime', 'runtime-manager.js')).href;
+    const pathsUrl = pathToFileURL(join(REPO_ROOT, 'dist', 'runtime', 'paths.js')).href;
+    ({ RuntimeManager } = await import(rmUrl));
+    ({ appPaths, ensureAppPaths } = await import(pathsUrl));
     return true;
   } catch (err) {
     detail(`Could not load the compiled modules: ${err.message}`);
@@ -1741,167 +1751,62 @@ async function test8RuntimeAcquisition(env) {
   env.runtimeAcquisition = { codex: codexResult, claude: claudeResult };
 }
 
+/**
+ * Installs Codex the way the product does.
+ *
+ * Earlier versions of this test kept their own list of candidate sources and
+ * only *probed* them, which meant it could report "no source produced a working
+ * binary" while the application installed Codex perfectly well. A spike that
+ * contradicts the code it is meant to inform is worse than no spike, so this
+ * now drives the real `CodexRuntime` and reports what actually happened.
+ */
 async function acquireCodex(installRoot, lines) {
-  const arch = windowsArch();
-
-  for (const source of codexSources()) {
-    lines.push(`  Source: ${source.label}`);
-    lines.push(`    Contract: ${source.contract}`);
-
-    if (source.kind === 'probe' || source.kind === 'github') {
-      const urls = source.kind === 'github' ? [source.api] : source.urls;
-      let anyReachable = false;
-      for (const url of urls) {
-        const probe = await probeUrl(url, { wantBody: source.kind === 'github' });
-        lines.push(
-          `    Probe ${url} -> ${probe.reachable ? `HTTP ${probe.status} (${probe.ms}ms)` : `unreachable (${probe.error})`}`,
-        );
-        detail(`${source.id}: ${probe.reachable ? `HTTP ${probe.status}` : `unreachable (${probe.error})`}`);
-        if (probe.reachable && probe.ok) anyReachable = true;
-      }
-      if (!anyReachable) {
-        lines.push('    Result: not usable from this machine.');
-        continue;
-      }
-      // Reachable, but turning a release index into a concrete asset URL is
-      // source-specific; the probe output above is what the adapter design
-      // needs. Fall through to the next source for an actual download.
-      lines.push('    Result: reachable - see probe output for the release shape.');
-      continue;
-    }
-
-    if (source.kind === 'npm') {
-      try {
-        const meta = runSync(IS_WINDOWS ? 'npm.cmd' : 'npm', [
-          'view',
-          `${source.packageName}@${await codexPlatformVersion(source.packageName, source.platformTag)}`,
-          'dist.tarball',
-          'dist.integrity',
-          'version',
-          '--json',
-        ]);
-        const info = tryParseAnyJson(meta.stdout);
-        if (!info?.['dist.tarball']) {
-          lines.push('    Result: could not resolve a tarball for this platform.');
-          continue;
-        }
-
-        const tarball = info['dist.tarball'];
-        const integrity = info['dist.integrity'] ?? null;
-        lines.push(`    Origin URL: ${tarball}`);
-        lines.push(`    Version: ${info.version}`);
-        lines.push(`    Architecture: win32-${arch}`);
-
-        const sizeMib = 134; // observed for 0.152.0-win32-x64
-        const wantDownload = await askYesNo(
-          `TEST 8 will now download the Codex runtime (~${sizeMib} MiB) from ` +
-            `${new URL(tarball).host} into a throwaway folder, to prove the app can install it.\n` +
-            'This costs bandwidth and a minute or two, but no agent quota. Continue?',
-          true,
-        );
-        if (!wantDownload) {
-          lines.push('    Result: download skipped by the user.');
-          finding('Codex runtime download was skipped; RuntimeManager acquisition is unproven.');
-          return { ok: false, skipped: true, source: source.id };
-        }
-
-        step(`Downloading Codex from ${new URL(tarball).host} (~${sizeMib} MiB)...`);
-        const stagingDir = join(installRoot, 'codex-staging');
-        mkdirSync(stagingDir, { recursive: true });
-        const archivePath = join(stagingDir, 'codex.tgz');
-        const dl = await downloadAndVerify(tarball, archivePath, integrity);
-
-        lines.push(`    Size: ${dl.bytes} bytes (${(dl.bytes / 1048576).toFixed(1)} MiB)`);
-        lines.push(`    sha256: ${dl.sha256}`);
-        lines.push(
-          `    Integrity: ${dl.integrityVerified === null ? 'no published checksum to compare' : dl.integrityVerified ? 'VERIFIED against npm dist.integrity' : 'MISMATCH'}`,
-        );
-        if (dl.integrityVerified === false) {
-          lines.push('    Result: integrity mismatch - refusing to install.');
-          return { ok: false, source: source.id };
-        }
-
-        const extractDir = join(stagingDir, 'extracted');
-        const extraction = extractArchive(archivePath, extractDir);
-        if (!extraction.ok) {
-          lines.push(`    Result: extraction failed - ${extraction.stderr}`);
-          continue;
-        }
-
-        const found = findExecutable(extractDir, ['codex.exe', 'codex']);
-        if (!found) {
-          lines.push('    Result: no codex executable inside the archive.');
-          continue;
-        }
-        lines.push(`    Executable inside archive: ${relative(extractDir, found)}`);
-
-        // Promote the WHOLE extracted tree, not just the directory holding the
-        // executable: this build ships sibling folders (codex-resources,
-        // codex-path) that the binary needs at runtime.
-        const finalDir = join(installRoot, 'runtimes', 'codex');
-        mkdirSync(join(finalDir, '..'), { recursive: true });
-        rmSync(finalDir, { recursive: true, force: true });
-        // Atomic promotion: everything is staged, verified, then moved once.
-        renameSync(extractDir, finalDir);
-        const finalExe = join(finalDir, relative(extractDir, found));
-        lines.push(`    Final path: ${finalExe}`);
-        lines.push(`    Installed tree: ${finalDir}`);
-
-        if (!IS_WINDOWS) {
-          try {
-            chmodSync(finalExe, 0o755);
-          } catch {
-            /* best effort */
-          }
-        }
-
-        if (!IS_WINDOWS) {
-          // A win32 binary cannot execute here; say so rather than reporting a
-          // meaningless failure.
-          lines.push('    --version: not run (this is a Windows binary on a non-Windows host)');
-          lines.push('    Health check: INCONCLUSIVE off Windows - download and layout verified');
-          step('Codex downloaded and extracted; --version needs Windows to run.');
-          return {
-            ok: true,
-            inconclusive: true,
-            source: source.id,
-            contract: source.contract,
-            version: info.version,
-            path: finalExe,
-          };
-        }
-
-        const versionRun = runSync(finalExe, ['--version'], { timeoutMs: 60_000 });
-        const versionText = (versionRun.stdout || versionRun.stderr).trim().split(/\r?\n/)[0] ?? '';
-        lines.push(`    --version: exit ${versionRun.status}, "${versionText}"`);
-        step(`Codex installed and answering --version: ${versionText || '(no output)'}`);
-
-        const ok = versionRun.status === 0;
-        lines.push(`    Health check: ${ok ? 'PASS' : 'FAIL'}`);
-        return {
-          ok,
-          source: source.id,
-          contract: source.contract,
-          version: info.version,
-          versionText,
-          path: finalExe,
-        };
-      } catch (err) {
-        lines.push(`    Result: ${redact(String(err.message ?? err))}`);
-        continue;
-      }
-    }
+  if (!RuntimeManager || !appPaths || !ensureAppPaths) {
+    lines.push('  The compiled runtime layer could not be loaded, so this was not attempted.');
+    return { ok: false, source: null };
   }
 
-  lines.push('  No Codex source produced a working binary.');
-  return { ok: false, source: null };
-}
+  const paths = ensureAppPaths(
+    appPaths({ ...process.env, AI_ORCHESTRATOR_HOME: join(installRoot, 'codex-home') }),
+  );
 
-/** Resolves the platform-specific version tag npm publishes for codex. */
-async function codexPlatformVersion(packageName, platformTag) {
-  const meta = runSync(IS_WINDOWS ? 'npm.cmd' : 'npm', ['view', packageName, 'version', '--json']);
-  const base = tryParseAnyJson(`{"v":${meta.stdout.trim()}}`)?.v ?? meta.stdout.trim().replace(/"/g, '');
-  return `${base}-${platformTag}`;
+  try {
+    const manager = new RuntimeManager({ paths });
+    const phases = [];
+    const result = await manager.install('codex', (p) => {
+      if (phases[phases.length - 1] !== p.phase) {
+        phases.push(p.phase);
+        detail(`codex: ${p.phase}`);
+      }
+    });
+
+    const m = result.manifest;
+    lines.push(`  Source: ${m.sourceLabel} (${m.sourceId})`);
+    lines.push(`    Contract: ${m.contract}`);
+    lines.push(`    Release asset: ${m.url}`);
+    lines.push(`    Host: ${m.host}`);
+    lines.push(`    Version: ${m.version}`);
+    lines.push(`    Bytes: ${m.bytes}`);
+    lines.push(`    SHA-256: ${m.sha256}`);
+    lines.push(`    Integrity: ${m.integrity.strategy} - ${m.integrity.detail}`);
+    lines.push(`    Trust level: ${m.trustLevel}`);
+    lines.push(`    Executable: ${result.executablePath}`);
+    lines.push(`    Health: ${result.health.healthy ? 'PASS' : `FAIL - ${result.health.problem ?? ''}`}`);
+
+    if (!m.integrity.verified) {
+      lines.push('    Refused: the download could not be verified against a published digest.');
+      return { ok: false, source: m.sourceId };
+    }
+    if (!result.health.healthy) return { ok: false, source: m.sourceId };
+
+    step(`CODEX installed from ${m.sourceId} (${m.version})`);
+    return { ok: true, source: m.sourceId, version: m.version, executable: result.executablePath };
+  } catch (err) {
+    lines.push(`  No source produced a working Codex binary.`);
+    lines.push(`    ${err?.userMessage ?? err?.message ?? String(err)}`);
+    if (err?.detail) lines.push(`    Detail: ${err.detail}`);
+    return { ok: false, source: null };
+  }
 }
 
 async function acquireClaude(installRoot, lines, env) {

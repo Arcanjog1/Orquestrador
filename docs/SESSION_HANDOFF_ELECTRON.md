@@ -265,12 +265,35 @@ Regras que viraram teste:
 - **A política de versão continua no comando.** A versão testada é pedida pela
   própria tag; se essa release sumiu, a fonte recusa em vez de pegar `latest`.
 
-**Prova real:** `node scripts/probe-real-runtimes.mjs --runtime codex` roda o
-pipeline de verdade contra os feeds de verdade. Nesta máquina trouxe
-`codex-cli 0.153.0`, conferiu o digest, extraiu, promoveu e passou no health
-check em 7,6s — pela fonte npm, porque este container bloqueia a API do GitHub,
-o que é o fallback funcionando como projetado. O CI roda esse mesmo probe como
-passo **obrigatório** nas duas plataformas.
+**Prova real, do CI:**
+
+```
+CODEX: PASS
+  source               codex-github-releases (Releases oficiais do openai/codex)
+  contract             DOCUMENTED
+  host                 release-assets.githubusercontent.com
+  asset url            .../releases/download/rust-v0.153.0/
+                       codex-package-x86_64-unknown-linux-musl.tar.gz
+  version              0.153.0
+  bytes                126134505
+  sha256 (computed)    27b0d7a753ac190c343918541a42067be307cc88a32b1a9feaf6f93648a0e9ea
+  integrity            SHA256 verificado -> trust VERIFIED
+  health               PASS
+  --version            codex-cli 0.153.0
+  elapsed              5028 ms
+```
+
+`node scripts/probe-real-runtimes.mjs --runtime codex` roda o pipeline de
+verdade contra os feeds de verdade, e o CI o executa como passo **obrigatório**
+nas duas plataformas — **verde no Windows e no Linux**. Neste container ele cai
+para a fonte npm (a API do GitHub é bloqueada aqui), que é o fallback
+funcionando como projetado.
+
+O `spike/windows-spike.mjs` TEST 8 também passou a usar o `CodexRuntime` real.
+Antes ele mantinha a própria lista de fontes e só as *sondava*, então reportava
+"No Codex source produced a working binary" enquanto o aplicativo instalava o
+Codex sem problema. Um spike que contradiz o código que ele deveria informar é
+pior do que spike nenhum.
 
 ### 5.2 Capacidades reais do Codex 0.153.0
 
