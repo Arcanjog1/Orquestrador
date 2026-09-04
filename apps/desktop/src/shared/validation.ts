@@ -150,6 +150,26 @@ export function obj<T>(shape: Shape, rules: ObjectRules = {}): Validator<T> {
 export const runtimeId = oneOf(['codex', 'claude-code', 'git'] as const);
 
 /**
+ * A URL that may be handed to the system browser.
+ *
+ * Only http and https. `file:`, `javascript:` and custom schemes are refused
+ * here and again in the shell, so neither side alone decides what may launch.
+ */
+export const externalUrl: Validator<string> = (value, path) => {
+  const raw = str({ min: 1, max: 4096 })(value, path);
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return fail(path, 'must be a valid URL');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return fail(path, 'must be an http(s) URL');
+  }
+  return parsed.toString();
+};
+
+/**
  * One validator per request channel. The router iterates this map to register
  * handlers, so a channel without a validator is a channel that does not exist.
  */
@@ -157,6 +177,11 @@ export const REQUEST_VALIDATORS: {
   [K in RequestChannel]: Validator<IpcMap[K]['request']>;
 } = {
   'app.info': noArgs,
+  'app.openExternal': obj({ url: externalUrl }),
+
+  'settings.all': noArgs,
+  // An empty value is legitimate here (clearing a setting), so the minimum is 0.
+  'settings.set': obj({ key: str({ min: 1, max: 200 }), value: str({ min: 0, max: 10_000 }) }),
 
   'runtime.diagnose': noArgs,
   'runtime.install': obj({ runtimeId }),

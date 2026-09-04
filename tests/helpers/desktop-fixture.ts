@@ -69,6 +69,14 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
 
   const shell: ShellBridge = {
     selectFolder: options.selectFolder ?? (async () => null),
+    // Records instead of launching, and applies the same scheme rule the real
+    // shell does, so the guard is exercised rather than assumed.
+    async openExternal(url: string) {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+      openedUrls.push(parsed.toString());
+      return true;
+    },
     appInfo: () => ({
       appVersion: '0.0.0-test',
       electronVersion: 'test',

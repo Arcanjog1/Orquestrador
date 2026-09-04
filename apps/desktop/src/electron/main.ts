@@ -71,6 +71,14 @@ function buildShellBridge(): ShellBridge {
       if (result.canceled || result.filePaths.length === 0) return null;
       return result.filePaths[0] ?? null;
     },
+    // The router has already validated the scheme; checking again here means
+    // neither side alone decides what may be launched.
+    async openExternal(url: string) {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+      await shell.openExternal(parsed.toString());
+      return true;
+    },
     appInfo: () => ({
       appVersion: app.getVersion(),
       electronVersion: process.versions.electron ?? '',

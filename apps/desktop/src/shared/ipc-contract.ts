@@ -20,6 +20,10 @@
 
 export const REQUEST_CHANNELS = [
   'app.info',
+  'app.openExternal',
+
+  'settings.all',
+  'settings.set',
 
   'runtime.diagnose',
   'runtime.install',
@@ -217,6 +221,17 @@ export interface RunProgressEvent {
 
 export interface IpcMap {
   'app.info': { request: void; response: AppInfo };
+  /**
+   * Hands one http(s) URL to the system browser.
+   *
+   * Not a general "open" capability: the main process re-checks the scheme, so
+   * a `file:` or custom-scheme URL from the renderer cannot launch anything.
+   */
+  'app.openExternal': { request: { url: string }; response: { opened: boolean } };
+
+  /** The `settings` table, which the interface reads and writes as a whole. */
+  'settings.all': { request: void; response: Readonly<Record<string, string>> };
+  'settings.set': { request: { key: string; value: string }; response: { saved: boolean } };
 
   'runtime.diagnose': { request: void; response: DiagnosticView };
   'runtime.install': { request: { runtimeId: RuntimeId }; response: InstallResultView };

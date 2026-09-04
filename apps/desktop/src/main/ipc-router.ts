@@ -32,6 +32,8 @@ export interface ShellBridge {
     chromeVersion: string;
     packaged: boolean;
   };
+  /** Hands an already-validated http(s) URL to the system browser. */
+  openExternal(url: string): Promise<boolean>;
 }
 
 export type Handler = (payload: unknown) => Promise<unknown> | unknown;
@@ -75,6 +77,19 @@ export class IpcRouter {
       arch: process.arch,
       sqliteAvailable: s.database.schemaVersion > 0,
     }));
+
+    this.handlers.set('app.openExternal', async (p) => ({
+      opened: await this.shell.openExternal((p as { url: string }).url),
+    }));
+
+    // The settings table already exists; these two channels are the interface's
+    // read and write of it. No new storage, no second source of truth.
+    this.handlers.set('settings.all', () => s.database.settings.all());
+    this.handlers.set('settings.set', (p) => {
+      const { key, value } = p as { key: string; value: string };
+      s.database.settings.set(key, value);
+      return { saved: true };
+    });
 
     this.handlers.set('runtime.diagnose', () => s.runtimes.diagnose());
     this.handlers.set('runtime.install', (p) =>

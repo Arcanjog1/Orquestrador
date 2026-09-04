@@ -190,3 +190,122 @@ test('app.info reports the runtime facts the footer shows', async () => {
     await fixture.cleanup();
   }
 });
+
+/* ------------------------------------------- channels added for the design */
+/*
+ * `app.openExternal` and the two `settings` channels exist because the approved
+ * interface needs them: an "Abrir no GitHub" button, and a Settings screen whose
+ * switches persist. They are the whole controlled addition to the surface, and
+ * these tests hold them to the same rules as everything else on it.
+ */
+
+test('openExternal hands an http(s) URL to the shell, and records nothing else', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    const result = await fixture.router.handle('app.openExternal', {
+      url: 'https://github.com/Arcanjog1/Orquestrador',
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.ok && result.value, { opened: true });
+    assert.deepEqual(fixture.openedUrls, ['https://github.com/Arcanjog1/Orquestrador']);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('openExternal refuses every scheme that is not http(s)', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    for (const url of [
+      'file:///C:/Windows/System32/cmd.exe',
+      'javascript:alert(1)',
+      'data:text/html,<script>1</script>',
+      'ms-settings:',
+      'vbscript:msgbox(1)',
+    ]) {
+      const result = await fixture.router.handle('app.openExternal', { url });
+      assert.equal(result.ok, false, `${url} must be refused`);
+      assert.equal(result.ok === false && result.error.code, 'INVALID_ARGUMENT');
+    }
+    assert.deepEqual(fixture.openedUrls, [], 'nothing may reach the shell');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('openExternal refuses a payload that is not a URL at all', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    for (const url of ['', 'not a url', 'github.com/x']) {
+      const result = await fixture.router.handle('app.openExternal', { url });
+      assert.equal(result.ok, false, `${JSON.stringify(url)} must be refused`);
+    }
+    assert.deepEqual(fixture.openedUrls, []);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('settings round-trip through the table that already existed', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    const empty = await fixture.router.handle('settings.all', undefined);
+    assert.equal(empty.ok, true);
+    assert.deepEqual(empty.ok && empty.value, {});
+
+    await fixture.router.handle('settings.set', {
+      key: 'execution.maxIterations',
+      value: '9',
+    });
+    await fixture.router.handle('settings.set', { key: 'appearance.theme', value: 'Dark' });
+
+    const all = await fixture.router.handle('settings.all', undefined);
+    assert.deepEqual(all.ok && all.value, {
+      'execution.maxIterations': '9',
+      'appearance.theme': 'Dark',
+    });
+
+    // Writing the same key again replaces it rather than adding a second row.
+    await fixture.router.handle('settings.set', {
+      key: 'execution.maxIterations',
+      value: '20',
+    });
+    const updated = await fixture.router.handle('settings.all', undefined);
+    assert.equal(
+      (updated.ok && (updated.value as Record<string, string>)['execution.maxIterations']) ?? null,
+      '20',
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('settings accepts an empty value but never an empty key', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    // Clearing a setting is legitimate.
+    const cleared = await fixture.router.handle('settings.set', { key: 'appearance.theme', value: '' });
+    assert.equal(cleared.ok, true);
+
+    const rejected = await fixture.router.handle('settings.set', { key: '', value: 'x' });
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.ok === false && rejected.error.code, 'INVALID_ARGUMENT');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('settings.set refuses an oversized value instead of storing it', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    const result = await fixture.router.handle('settings.set', {
+      key: 'k',
+      value: 'x'.repeat(10_001),
+    });
+    assert.equal(result.ok, false);
+    const all = await fixture.router.handle('settings.all', undefined);
+    assert.deepEqual(all.ok && all.value, {});
+  } finally {
+    await fixture.cleanup();
+  }
+});
