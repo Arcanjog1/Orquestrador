@@ -20,7 +20,7 @@ Atualizado em 2026-09-04.
 | Working tree | Limpo |
 | Testes | **206 passando, 0 falhando** (`npm test`) |
 | Testes Electron | **10 passando, 0 falhando** (`npm run desktop:test`) |
-| Smoke empacotado | **7 passando, 0 falhando** (`npm run -w apps/desktop test:packaged`) |
+| Smoke empacotado | **7 passando, 0 falhando** (`npm run -w apps/desktop test:packaged`) — 9 com capturas |
 | Typecheck | `npm run typecheck` → limpo (core + desktop main + renderer) |
 | Electron | **44.1.1** (fixado, sem `^`) |
 | Node embutido | **24.19.0** |
@@ -102,6 +102,18 @@ o renderer passe é usado como nome de canal. Não há `exec`, `shell`,
 Toda entrada é revalidada no Main em runtime: propriedades desconhecidas são
 **recusadas** (não removidas), `__proto__`/`constructor`/`prototype` são
 recusados, e toda string tem tamanho máximo.
+
+### Capturas do build empacotado
+
+`docs/images/onboarding-packaged.png` e
+`docs/images/onboarding-packaged-workbench.png` saíram do executável
+empacotado, não de um servidor de desenvolvimento. Para regerar:
+
+```bash
+npm run -w apps/desktop package:linux
+AI_ORCHESTRATOR_SMOKE_SCREENSHOT=docs/images/onboarding-packaged.png \
+  npm run -w apps/desktop test:packaged
+```
 
 ### Onboarding, instalação e login pela GUI
 A tela inicial consome `RuntimeManager.diagnose()` — o React não decide nada
