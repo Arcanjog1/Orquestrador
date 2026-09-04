@@ -10,8 +10,11 @@
  *   node scripts/real-loop-smoke.mjs                # one file, one iteration
  *   node scripts/real-loop-smoke.mjs --two-step     # forces a correction pass
  *
- * It works in a throwaway git repository under the system temp directory and
- * never touches a real project. Run `npm run desktop:build` first.
+ * It works in a scratch git repository under the system temp directory and
+ * never touches a real project. Once a workspace has been registered for it,
+ * the directory is kept, so the run stays reviewable in the application's
+ * history instead of pointing at a folder that no longer exists.
+ * Run `npm run desktop:build` first.
  *
  * No credential is read, written or printed here; the accounts already exist in
  * the application's own database.
@@ -68,6 +71,8 @@ git('commit', '-q', '-m', 'baseline');
 
 const services = new AppServices();
 let failed = false;
+/** Set once the application knows this directory; from then on it is kept. */
+let registered = false;
 const say = (ok, name, detail) => {
   if (!ok) failed = true;
   console.log(`${ok ? 'ok' : 'not ok'} - ${name}: ${detail}`);
@@ -101,6 +106,7 @@ try {
     process.exit(1);
   }
   services.workspaces.setAgents(workspace.id, orchestrator.id, worker.id);
+  registered = true;
   say(true, 'workspace', dir);
 
   const session = services.chat.createSession(workspace.id, 'Smoke');
@@ -154,7 +160,11 @@ try {
 } finally {
   services.database.close();
   await services.processManager.cancelAll();
-  rmSync(dir, { recursive: true, force: true });
+  if (registered) {
+    console.log(`# scratch workspace kept at ${dir} so the run stays reviewable in the app`);
+  } else {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 console.log(failed ? '# fail' : '# pass');
