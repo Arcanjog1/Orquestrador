@@ -5,6 +5,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPreflight, scanPath } from '../src/preflight/preflight.js';
 
+/**
+ * Compares two filesystem paths for pointing at the same file.
+ *
+ * `scanPath` tries each PATHEXT entry in the spelling PATHEXT uses and then in
+ * lowercase. On a case-insensitive filesystem the uppercase candidate matches
+ * first, so the returned string can be `codex.CMD` where the test wrote
+ * `codex.cmd`. That is the same file and spawns identically; asserting on the
+ * exact bytes of the string would be asserting on something that does not
+ * matter.
+ */
+function assertSamePath(actual: string | null, expected: string): void {
+  assert.ok(actual !== null, `expected to find ${expected}, found nothing`);
+  const normalise = (p: string): string => (process.platform === 'win32' ? p.toLowerCase() : p);
+  assert.equal(normalise(actual), normalise(expected));
+}
+
 function withTempDir<T>(fn: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), 'lao-preflight-'));
   try {
@@ -18,14 +34,14 @@ test('scanPath honours PATHEXT on Windows', () => {
   withTempDir((dir) => {
     writeFileSync(join(dir, 'codex.cmd'), '');
     const found = scanPath('codex', dir, 'win32', '.COM;.EXE;.BAT;.CMD');
-    assert.equal(found, join(dir, 'codex.cmd'));
+    assertSamePath(found, join(dir, 'codex.cmd'));
   });
 });
 
 test('scanPath does not append extensions when the command already has one', () => {
   withTempDir((dir) => {
     writeFileSync(join(dir, 'codex.cmd'), '');
-    assert.equal(scanPath('codex.cmd', dir, 'win32', '.CMD'), join(dir, 'codex.cmd'));
+    assertSamePath(scanPath('codex.cmd', dir, 'win32', '.CMD'), join(dir, 'codex.cmd'));
     assert.equal(scanPath('codex.exe', dir, 'win32', '.CMD'), null);
   });
 });
@@ -35,7 +51,7 @@ test('scanPath searches every PATH entry in order', () => {
     withTempDir((b) => {
       writeFileSync(join(b, 'tool.exe'), '');
       const found = scanPath('tool', [a, b].join(';'), 'win32', '.EXE');
-      assert.equal(found, join(b, 'tool.exe'));
+      assertSamePath(found, join(b, 'tool.exe'));
     });
   });
 });

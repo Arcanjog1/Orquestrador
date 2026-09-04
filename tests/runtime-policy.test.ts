@@ -15,7 +15,14 @@ import { judgeAuthenticode, verifyBytes, verifySubresourceIntegrity } from '../s
 import { ManagedRuntime } from '../src/runtime/managed-runtime.js';
 import { appPaths, ensureAppPaths } from '../src/runtime/paths.js';
 import type { RuntimeId, RuntimeSource } from '../src/runtime/types.js';
-import { buildFakeArchive, makeFetch, StubSource } from './helpers/fake-runtime-source.js';
+import {
+  buildFakeArchive,
+  fakeExecutableBody,
+  fakeExecutableName,
+  fakeExecutableNames,
+  makeFetch,
+  StubSource,
+} from './helpers/fake-runtime-source.js';
 
 // ---------------------------------------------------------------------------
 // 1. Version comparison
@@ -217,7 +224,7 @@ test('an install requests the tested version rather than latest', async () => {
       version: '1.0.0',
       archiveKind: 'tgz',
       integrity: archive.integrity,
-      executableNames: ['codex'],
+      executableNames: fakeExecutableNames('codex'),
     });
     const runtime = new PolicyRuntime([source], {
       paths,
@@ -239,7 +246,7 @@ test('a version outside the window is refused, even when a source offers it', as
           url: archive.url,
           version: '99.0.0',
           archiveKind: 'tgz',
-          executableNames: ['codex'],
+          executableNames: fakeExecutableNames('codex'),
         }),
       ],
       {
@@ -262,8 +269,8 @@ test('a version outside the window is refused, even when a source offers it', as
 
 test('an update keeps the replaced build as previous, and can roll back to it', async () => {
   await withHome(async (paths, home) => {
-    const first = buildFakeArchive(join(home, 'v1'), 'codex', '#!/bin/sh\necho "v1"\n');
-    const second = buildFakeArchive(join(home, 'v2'), 'codex', '#!/bin/sh\necho "v2"\n');
+    const first = buildFakeArchive(join(home, 'v1'), 'codex', 'v1');
+    const second = buildFakeArchive(join(home, 'v2'), 'codex', 'v2');
 
     const options = {
       paths,
@@ -280,7 +287,7 @@ test('an update keeps the replaced build as previous, and can roll back to it', 
           url: first.url,
           version: '1.0.0',
           archiveKind: 'tgz',
-          executableNames: ['codex'],
+          executableNames: fakeExecutableNames('codex'),
         }),
       ],
       options,
@@ -295,7 +302,7 @@ test('an update keeps the replaced build as previous, and can roll back to it', 
           url: 'https://example.invalid/v2.tgz',
           version: '1.1.0',
           archiveKind: 'tgz',
-          executableNames: ['codex'],
+          executableNames: fakeExecutableNames('codex'),
         }),
       ],
       options,
@@ -317,7 +324,7 @@ test('an update keeps the replaced build as previous, and can roll back to it', 
 
 test('a build that fails its capability check never replaces the working one', async () => {
   await withHome(async (paths, home) => {
-    const good = buildFakeArchive(join(home, 'good'), 'codex', '#!/bin/sh\necho "good"\n');
+    const good = buildFakeArchive(join(home, 'good'), 'codex', 'good');
     const options = {
       paths,
       compatibility: OPEN_POLICY,
@@ -330,7 +337,7 @@ test('a build that fails its capability check never replaces the working one', a
           url: good.url,
           version: '1.0.0',
           archiveKind: 'tgz',
-          executableNames: ['codex'],
+          executableNames: fakeExecutableNames('codex'),
         }),
       ],
       options,
@@ -346,7 +353,7 @@ test('a build that fails its capability check never replaces the working one', a
           url: good.url,
           version: '1.2.0',
           archiveKind: 'tgz',
-          executableNames: ['codex'],
+          executableNames: fakeExecutableNames('codex'),
         }),
       ],
       options,
@@ -374,7 +381,7 @@ test('staging is cleaned up even when an install fails', async () => {
           version: '1.0.0',
           archiveKind: 'tgz',
           integrity: 'sha512-DEFINITELYWRONG',
-          executableNames: ['codex'],
+          executableNames: fakeExecutableNames('codex'),
         }),
       ],
       { paths, compatibility: OPEN_POLICY, fetchImpl: makeFetch({ [archive.url]: { bytes: archive.bytes } }) },
@@ -402,7 +409,11 @@ test('licence files shipped with a runtime are recorded in the manifest', async 
     const { mkdirSync } = await import('node:fs');
     mkdirSync(join(extra, 'package'), { recursive: true });
     writeFileSync(join(extra, 'package', 'LICENSE.txt'), 'GNU GENERAL PUBLIC LICENSE v2\n');
-    writeFileSync(join(extra, 'package', 'git'), '#!/bin/sh\necho "git version 2.47.0"\n', { mode: 0o755 });
+    writeFileSync(
+      join(extra, 'package', fakeExecutableName('git')),
+      fakeExecutableBody('git version 2.47.0'),
+      { mode: 0o755 },
+    );
     const tarball = join(home, 'licensed.tgz');
     execFileSync('tar', ['-czf', tarball, '-C', extra, 'package'], { stdio: 'ignore' });
     const bytes = readFileSync(tarball);
@@ -419,7 +430,7 @@ test('licence files shipped with a runtime are recorded in the manifest', async 
           url: 'https://example.invalid/git.tgz',
           version: '2.47.0',
           archiveKind: 'tgz',
-          executableNames: ['git'],
+          executableNames: fakeExecutableNames('git'),
         }),
       ],
       writable: true,

@@ -44,16 +44,43 @@ export interface FakeArchive {
   integrity: string;
   /** Path of the executable inside the archive, relative to its root. */
   executableRelativePath: string;
+  /** What a source must advertise for the pipeline to find it. */
+  executableNames: string[];
 }
 
 /**
  * Builds a .tgz laying out an executable next to a sibling resource folder -
  * the shape that makes promoting only the executable's own directory wrong.
  */
+/**
+ * The name a fake executable has to have to be runnable on this platform.
+ *
+ * Windows cannot execute an extensionless shell script, and the install
+ * pipeline really does run the downloaded build to check it works. So the
+ * fixture ships a `.cmd` there and a shell script everywhere else - the same
+ * shape a real runtime has, which is a `.exe` on Windows and a binary
+ * elsewhere.
+ */
+export function fakeExecutableName(base: string): string {
+  return process.platform === 'win32' ? `${base}.cmd` : base;
+}
+
+/** What a source should advertise so `findExecutable` locates the fixture. */
+export function fakeExecutableNames(base: string): string[] {
+  return process.platform === 'win32' ? [`${base}.cmd`] : [`${base}.exe`, base];
+}
+
+/** A script that prints `version` and exits 0, in this platform's dialect. */
+export function fakeExecutableBody(version: string): string {
+  return process.platform === 'win32'
+    ? `@echo off\r\necho ${version}\r\n`
+    : `#!/bin/sh\necho "${version}"\n`;
+}
+
 export function buildFakeArchive(
   workDir: string,
-  executableName: string,
-  scriptBody = '#!/bin/sh\necho "fake 1.2.3"\n',
+  executableBaseName: string,
+  version = 'fake 1.2.3',
 ): FakeArchive {
   const stage = join(workDir, 'archive-src');
   const binDir = join(stage, 'package', 'vendor', 'bin');
@@ -61,7 +88,8 @@ export function buildFakeArchive(
   mkdirSync(binDir, { recursive: true });
   mkdirSync(resourceDir, { recursive: true });
 
-  writeFileSync(join(binDir, executableName), scriptBody, { mode: 0o755 });
+  const executableName = fakeExecutableName(executableBaseName);
+  writeFileSync(join(binDir, executableName), fakeExecutableBody(version), { mode: 0o755 });
   writeFileSync(join(resourceDir, 'data.txt'), 'the executable needs this sibling\n');
 
   const tarballPath = join(workDir, 'fake.tgz');
@@ -76,6 +104,7 @@ export function buildFakeArchive(
     bytes,
     integrity,
     executableRelativePath: join('package', 'vendor', 'bin', executableName),
+    executableNames: fakeExecutableNames(executableBaseName),
   };
 }
 

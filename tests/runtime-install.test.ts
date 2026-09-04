@@ -9,7 +9,14 @@ import { appPaths, ensureAppPaths } from '../src/runtime/paths.js';
 import { RuntimeNotReadyError, type RuntimeId, type RuntimeSource } from '../src/runtime/types.js';
 import { verifyIntegrity } from '../src/runtime/downloader.js';
 import { findExecutable, planPromotion } from '../src/runtime/archive.js';
-import { buildFakeArchive, makeFetch, StubSource } from './helpers/fake-runtime-source.js';
+import {
+  buildFakeArchive,
+  fakeExecutableBody,
+  fakeExecutableName,
+  fakeExecutableNames,
+  makeFetch,
+  StubSource,
+} from './helpers/fake-runtime-source.js';
 
 function withTempHome<T>(fn: (home: string) => T): T {
   const home = mkdtempSync(join(tmpdir(), 'lao-runtime-'));
@@ -49,7 +56,7 @@ test('installs from a source, verifying integrity and promoting atomically', asy
           version: '1.2.3',
           archiveKind: 'tgz',
           integrity: archive.integrity,
-          executableNames: ['codex.exe', 'codex'],
+          executableNames: fakeExecutableNames('codex'),
         }),
       ],
       { paths, fetchImpl: makeFetch({ [archive.url]: { bytes: archive.bytes } }) },
@@ -95,7 +102,7 @@ test('a corrupted download is rejected and installs nothing', async () => {
           version: '1.2.3',
           archiveKind: 'tgz',
           integrity: archive.integrity, // checksum of the ORIGINAL bytes
-          executableNames: ['codex'],
+          executableNames: fakeExecutableNames('codex'),
         }),
       ],
       { paths, fetchImpl: makeFetch({ [archive.url]: { bytes: tampered } }) },
@@ -118,7 +125,7 @@ test('falls through to the next source when the first one fails', async () => {
       url: archive.url,
       version: '9.9.9',
       archiveKind: 'tgz',
-      executableNames: ['codex'],
+      executableNames: fakeExecutableNames('codex'),
     });
 
     const runtime = new TestRuntime([broken, empty, working], {
@@ -168,7 +175,7 @@ test('detect finds the managed install and getExecutablePath returns an absolute
           url: archive.url,
           version: '1.0.0',
           archiveKind: 'tgz',
-          executableNames: ['codex'],
+          executableNames: fakeExecutableNames('codex'),
         }),
       ],
       { paths, fetchImpl: makeFetch({ [archive.url]: { bytes: archive.bytes } }) },
@@ -208,7 +215,7 @@ test('a corrupt manifest is treated as no install, so repair can recover', async
       url: archive.url,
       version: '1.0.0',
       archiveKind: 'tgz',
-      executableNames: ['codex'],
+      executableNames: fakeExecutableNames('codex'),
     });
     const runtime = new TestRuntime([source], {
       paths,
@@ -236,7 +243,7 @@ test('an install whose files vanished is reported as missing, not managed', asyn
           url: archive.url,
           version: '1.0.0',
           archiveKind: 'tgz',
-          executableNames: ['codex'],
+          executableNames: fakeExecutableNames('codex'),
         }),
       ],
       { paths, fetchImpl: makeFetch({ [archive.url]: { bytes: archive.bytes } }) },
