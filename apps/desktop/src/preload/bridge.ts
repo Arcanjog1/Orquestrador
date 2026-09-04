@@ -25,7 +25,13 @@ export interface BridgeTransport {
   on(channel: string, listener: (payload: unknown) => void): () => void;
 }
 
-/** Error surfaced in the renderer when the main process refuses a request. */
+/**
+ * Error surfaced in the renderer when the main process refuses a request.
+ *
+ * `code` is readable on this side of the bridge and in unit tests. Note that
+ * `contextBridge` carries an Error's message and stack across but not its own
+ * fields, so renderer code branches on the message, never on `error.code`.
+ */
 export class IpcError extends Error {
   constructor(
     readonly code: string,

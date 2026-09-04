@@ -3,10 +3,6 @@
   "version": "0.1.0",
   "description": "Orquestrador local de agentes de programacao: Codex CLI supervisiona, Claude Code CLI executa.",
   "type": "module",
-  "bin": {
-    "orchestrator": "dist/index.js"
-  },
-  "main": "dist/index.js",
   "engines": {
     "node": ">=20.11.0"
   },
@@ -17,7 +13,6 @@
     "typecheck": "tsc -p tsconfig.test.json --noEmit && npm run -w apps/desktop typecheck",
     "pretest": "npm run build && npm run build:tests",
     "test": "node --test \"dist-tests/tests/**/*.test.js\"",
-    "orchestrator": "node dist/index.js",
     "desktop": "npm run -w apps/desktop start",
     "desktop:build": "npm run -w apps/desktop build",
     "desktop:test": "npm run -w apps/desktop test:electron",

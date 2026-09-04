@@ -28,5 +28,51 @@
     "electron": "44.1.1",
     "electron-builder": "26.0.12",
     "esbuild": "0.25.10"
+  },
+  "author": "Arcanjo",
+  "build": {
+    "appId": "com.arcanjo.ai-orchestrator",
+    "productName": "AI Orchestrator",
+    "copyright": "Copyright © 2026 Arcanjo",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "AI-Orchestrator-Setup.${ext}",
+      "executableName": "AI Orchestrator"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI Orchestrator",
+      "artifactName": "AI-Orchestrator-Setup.${ext}"
+    },
+    "linux": {
+      "target": [
+        "dir"
+      ],
+      "category": "Development",
+      "executableName": "ai-orchestrator"
+    },
+    "asar": true,
+    "npmRebuild": false,
+    "publish": null
   }
 }

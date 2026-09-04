@@ -18,6 +18,7 @@ import {
   assertHardened,
   lockDownNavigation,
 } from './security.js';
+import { reportSmoke, runSmokeChecks, smokeRequested } from './smoke.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** `dist/apps/desktop/src/electron` → the app root that holds the bundles. */
@@ -101,6 +102,14 @@ async function boot(): Promise<void> {
   mainWindow = createWindow();
   assertHardened(mainWindow);
   await mainWindow.loadFile(INDEX_HTML);
+
+  // The packaged build can be asked to check itself and quit. Never in normal
+  // use: it only happens when AI_ORCHESTRATOR_SMOKE is set, which CI sets.
+  if (smokeRequested()) {
+    const passed = reportSmoke(await runSmokeChecks(services, mainWindow));
+    await services.shutdown();
+    app.exit(passed ? 0 : 1);
+  }
 }
 
 app.on('web-contents-created', (_event, contents) => {

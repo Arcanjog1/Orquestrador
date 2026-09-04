@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The build that matters: the product ships as a Windows desktop application,
+  # so Windows is the platform whose failures are real failures.
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Ensure the Electron binary is present
+        run: node node_modules/electron/install.js
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit and integration tests
+        run: npm test
+
+      - name: Build the desktop application
+        run: npm run desktop:build
+
+      - name: Electron integration tests
+        run: npm run -w apps/desktop test:electron
+
+      - name: Package (NSIS, per-user, no elevation)
+        run: npm run -w apps/desktop package
+
+      - name: Packaged smoke test
+        run: npm run -w apps/desktop test:packaged
+
+      # Everything below is informational: it records what the real Windows
+      # world actually answers, which is how the open questions about runtime
+      # sources, MinGit and Authenticode publishers get settled. A failure here
+      # must not fail the build - the point is to collect facts, not to assert
+      # them before we know them.
+      - name: Record the real Windows environment
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          "## Windows facts" | Out-File -FilePath windows-facts.md -Encoding utf8
+          "- OS: $([System.Environment]::OSVersion.VersionString)" | Add-Content windows-facts.md
+          "- node: $(node --version)" | Add-Content windows-facts.md
+          "- git: $(git --version)" | Add-Content windows-facts.md
+          $exe = Get-ChildItem -Recurse -Filter 'AI Orchestrator.exe' apps/desktop/release | Select-Object -First 1
+          if ($exe) {
+            $sig = Get-AuthenticodeSignature $exe.FullName
+            "- packaged exe: $($exe.FullName)" | Add-Content windows-facts.md
+            "- signature status: $($sig.Status)" | Add-Content windows-facts.md
+            "- observed publisher: $($sig.SignerCertificate.Subject)" | Add-Content windows-facts.md
+          }
+          Get-Content windows-facts.md
+
+      - name: Probe the real runtime sources
+        continue-on-error: true
+        run: node spike/windows-spike.mjs --non-interactive
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Orchestrator-Setup
+          path: apps/desktop/release/AI-Orchestrator-Setup.exe
+          if-no-files-found: error
+
+      - name: Upload the Windows facts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-facts
+          path: |
+            windows-facts.md
+            spike/spike-report.txt
+          if-no-files-found: ignore
+
+  # Linux is not a target platform. It runs because it is fast, and because a
+  # break here is usually a break everywhere.
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Ensure the Electron binary is present
+        run: node node_modules/electron/install.js
+
+      - name: Install xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit and integration tests
+        run: npm test
+
+      - name: Build the desktop application
+        run: npm run desktop:build
+
+      - name: Electron integration tests
+        run: npm run -w apps/desktop test:electron
+
+      - name: Package (unpacked) and smoke-test it
+        run: |
+          npm run -w apps/desktop package:linux
+          npm run -w apps/desktop test:packaged

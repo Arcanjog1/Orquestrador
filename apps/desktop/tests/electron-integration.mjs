@@ -1,0 +1,298 @@
+/**
+ * The integration suite that only a real Electron can run.
+ *
+ * Everything here executes inside an actual Electron main process, against an
+ * actual BrowserWindow loading the actual renderer bundle through the actual
+ * preload. It answers the questions unit tests cannot:
+ *
+ *  - does `node:sqlite` work inside Electron's Node, all the way through
+ *    migrations, prepared statements, transactions, WAL, close and reopen?
+ *  - are the four security flags really on in a live window?
+ *  - can the renderer reach Node, or only the named channels?
+ *  - does a real IPC round trip work, and does onboarding render from it?
+ *
+ * A tiny harness rather than `node:test`: this process is Electron's, and it
+ * has to be told explicitly when to exit.
+ */
+
+import { app, BrowserWindow, ipcMain } from 'electron';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = resolve(here, '..');
+const dist = join(root, 'dist');
+const bundles = join(root, 'dist-renderer');
+
+const { Database } = await import(join(dist, 'src/database/database.js'));
+const { AppServices } = await import(join(dist, 'apps/desktop/src/main/services/app-services.js'));
+const { IpcRouter } = await import(join(dist, 'apps/desktop/src/main/ipc-router.js'));
+const { REQUEST_CHANNELS } = await import(join(dist, 'apps/desktop/src/shared/ipc-contract.js'));
+const { WEB_PREFERENCES } = await import(join(dist, 'apps/desktop/src/electron/security.js'));
+
+const cases = [];
+const test = (name, fn) => cases.push([name, fn]);
+
+/* ------------------------------------------------------------- node:sqlite */
+
+test('node:sqlite is available inside the Electron main process', () => {
+  const sqlite = require('node:sqlite');
+  assert.ok(sqlite.DatabaseSync, 'DatabaseSync must be exported');
+  assert.ok(process.versions.electron, 'this must be running under Electron');
+});
+
+test('the real Database opens, migrates, writes, reads and survives a reopen', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-db-'));
+  const file = join(dir, 'orchestrator.db');
+  try {
+    let db = new Database({ filePath: file });
+    assert.ok(db.schemaVersion > 0, 'migrations must have run');
+    assert.equal(db.schemaVersion, db.expectedSchemaVersion);
+
+    // WAL, asked of the live connection rather than assumed.
+    const mode = db.driver.get('PRAGMA journal_mode');
+    assert.equal(String(Object.values(mode)[0]).toLowerCase(), 'wal');
+
+    // Prepared statement, insert, select.
+    db.settings.set('greeting', 'olá');
+    assert.equal(db.settings.get('greeting'), 'olá');
+
+    // Transaction commit.
+    db.transaction(() => {
+      db.settings.set('committed', 'yes');
+    });
+    assert.equal(db.settings.get('committed'), 'yes');
+
+    // Transaction rollback: the write inside must not survive.
+    assert.throws(() =>
+      db.transaction(() => {
+        db.settings.set('rolled-back', 'yes');
+        throw new Error('boom');
+      }),
+    );
+    assert.equal(db.settings.get('rolled-back'), null);
+
+    // Foreign keys are enforced, not merely declared.
+    assert.throws(
+      () =>
+        db.driver.run(
+          "INSERT INTO chat_sessions (id, workspace_id, title, created_at, updated_at) VALUES ('s','missing','t','now','now')",
+        ),
+      /FOREIGN KEY/i,
+    );
+
+    db.close();
+
+    // Reopen: the data is still there and no migration re-runs.
+    db = new Database({ filePath: file });
+    assert.equal(db.settings.get('greeting'), 'olá');
+    assert.equal(db.schemaVersion, db.expectedSchemaVersion);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------------------------------------- the live window */
+
+let services = null;
+let appRoot = null;
+
+test('a live window really has contextIsolation, sandbox and webSecurity on', async () => {
+  const window = await openWindow();
+  const preferences = window.webContents.getLastWebPreferences();
+  assert.equal(preferences.contextIsolation, true);
+  assert.equal(preferences.nodeIntegration, false);
+  assert.equal(preferences.sandbox, true);
+  assert.equal(preferences.webSecurity, true);
+  assert.equal(WEB_PREFERENCES.sandbox, true);
+});
+
+test('the renderer cannot reach Node, the filesystem or ipcRenderer', async () => {
+  const window = await openWindow();
+  const probe = await window.webContents.executeJavaScript(`(() => ({
+    require: typeof window.require,
+    process: typeof window.process,
+    module: typeof window.module,
+    ipcRenderer: typeof window.ipcRenderer,
+    electron: typeof window.electron,
+    apiIsObject: typeof window.api,
+  }))()`);
+  assert.equal(probe.require, 'undefined');
+  assert.equal(probe.process, 'undefined');
+  assert.equal(probe.module, 'undefined');
+  assert.equal(probe.ipcRenderer, 'undefined');
+  assert.equal(probe.electron, 'undefined');
+  assert.equal(probe.apiIsObject, 'object');
+});
+
+test('the bridge exposes exactly the contract, and no command escape hatch', async () => {
+  const window = await openWindow();
+  const exposed = await window.webContents.executeJavaScript(`(() => {
+    const out = [];
+    for (const [group, methods] of Object.entries(window.api)) {
+      if (group === 'events') continue;
+      for (const method of Object.keys(methods)) out.push(group + '.' + method);
+    }
+    return out;
+  })()`);
+  assert.deepEqual([...exposed].sort(), [...REQUEST_CHANNELS].sort());
+  for (const forbidden of ['exec', 'shell', 'runCommand', 'invoke', 'send']) {
+    assert.ok(
+      !exposed.some((name) => name.split('.').pop() === forbidden),
+      `bridge must not expose ${forbidden}`,
+    );
+  }
+});
+
+test('a real IPC round trip reaches the main process and comes back', async () => {
+  const window = await openWindow();
+  const info = await window.webContents.executeJavaScript('window.api.app.info()');
+  assert.equal(info.electronVersion, process.versions.electron);
+  assert.equal(info.nodeVersion, process.versions.node);
+  assert.equal(info.chromeVersion, process.versions.chrome);
+  assert.equal(info.sqliteAvailable, true);
+});
+
+test('RuntimeManager.diagnose() answers over IPC with the three runtimes', async () => {
+  const window = await openWindow();
+  const report = await window.webContents.executeJavaScript('window.api.runtime.diagnose()');
+  assert.deepEqual(
+    report.runtimes.map((r) => r.runtimeId).sort(),
+    ['claude-code', 'codex', 'git'],
+  );
+  assert.equal(typeof report.ready, 'boolean');
+  assert.equal(typeof report.checkedAt, 'string');
+});
+
+test('an invalid payload is refused at the boundary, as an error the UI can show', async () => {
+  const window = await openWindow();
+  const outcome = await window.webContents.executeJavaScript(`
+    window.api.runtime.install({ runtimeId: 'bash' })
+      .then(() => ({ thrown: false }))
+      .catch((error) => ({ thrown: true, message: String(error.message) }))
+  `);
+  assert.equal(outcome.thrown, true);
+  // contextBridge carries an Error's message across, not its custom fields, so
+  // the message is what the interface has to work with - and it says what was
+  // wrong rather than dumping a stack.
+  assert.match(outcome.message, /runtimeId/);
+  assert.match(outcome.message, /codex/);
+});
+
+test('the onboarding screen renders the runtime checklist from diagnose()', async () => {
+  const window = await openWindow();
+  const text = await waitForText(window, /Codex/, 15_000);
+  assert.match(text, /Codex/);
+  assert.match(text, /Claude Code/);
+  assert.match(text, /Git/);
+  assert.match(text, /AI Orchestrator/);
+  // The footer proves the renderer got real numbers from the main process.
+  assert.match(text, new RegExp(`Electron ${process.versions.electron.replace(/\./g, '\\.')}`));
+});
+
+test('a workspace added over IPC is persisted and listed back', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-ws-'));
+  try {
+    const created = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Projeto', localPath: dir })})`,
+    );
+    assert.equal(created.localPath, dir);
+    const listed = await window.webContents.executeJavaScript('window.api.workspace.list()');
+    assert.ok(listed.some((w) => w.id === created.id));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------------------------------------------------ helpers */
+
+let sharedWindow = null;
+
+async function openWindow() {
+  if (sharedWindow && !sharedWindow.isDestroyed()) return sharedWindow;
+
+  appRoot = mkdtempSync(join(tmpdir(), 'lao-electron-app-'));
+  const paths = {
+    root: appRoot,
+    runtimes: join(appRoot, 'runtimes'),
+    profiles: join(appRoot, 'profiles'),
+    data: join(appRoot, 'data'),
+    logs: join(appRoot, 'logs'),
+    artifacts: join(appRoot, 'artifacts'),
+    updates: join(appRoot, 'updates'),
+    staging: join(appRoot, 'staging'),
+  };
+
+  services = new AppServices({ paths, openUrl: () => {} });
+  const router = new IpcRouter(services, {
+    selectFolder: async () => null,
+    appInfo: () => ({
+      appVersion: '0.1.0-test',
+      electronVersion: process.versions.electron,
+      nodeVersion: process.versions.node,
+      chromeVersion: process.versions.chrome,
+      packaged: app.isPackaged,
+    }),
+  });
+  for (const channel of REQUEST_CHANNELS) {
+    ipcMain.handle(channel, async (_event, payload) => router.handle(channel, payload));
+  }
+
+  sharedWindow = new BrowserWindow({
+    show: false,
+    width: 1100,
+    height: 700,
+    webPreferences: { ...WEB_PREFERENCES, preload: join(bundles, 'preload.cjs') },
+  });
+  services.events.subscribe((channel, payload) => {
+    if (!sharedWindow.isDestroyed()) sharedWindow.webContents.send(channel, payload);
+  });
+  await sharedWindow.loadFile(join(bundles, 'index.html'));
+  return sharedWindow;
+}
+
+async function waitForText(window, pattern, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let text = '';
+  while (Date.now() < deadline) {
+    text = await window.webContents.executeJavaScript('document.body.innerText');
+    if (pattern.test(text)) return text;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`timed out waiting for ${pattern}; body was:\n${text}`);
+}
+
+/* --------------------------------------------------------------- the run */
+
+app.whenReady().then(async () => {
+  let failed = 0;
+  console.log(`1..${cases.length}`);
+  for (const [index, [name, fn]] of cases.entries()) {
+    try {
+      await fn();
+      console.log(`ok ${index + 1} - ${name}`);
+    } catch (error) {
+      failed += 1;
+      console.log(`not ok ${index + 1} - ${name}`);
+      console.log(String(error && error.stack ? error.stack : error).replace(/^/gm, '  # '));
+    }
+  }
+  console.log(`# pass ${cases.length - failed}`);
+  console.log(`# fail ${failed}`);
+
+  try {
+    if (services) await services.shutdown();
+    if (appRoot) rmSync(appRoot, { recursive: true, force: true });
+  } catch {
+    /* teardown must never change the verdict */
+  }
+  app.exit(failed === 0 ? 0 : 1);
+});
