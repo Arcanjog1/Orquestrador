@@ -4,5 +4,12 @@
     "rootDir": ".",
     "outDir": "dist-tests"
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "apps/desktop/src/main/**/*.ts",
+    "apps/desktop/src/shared/**/*.ts",
+    "apps/desktop/src/preload/bridge.ts",
+    "apps/desktop/src/electron/security.ts"
+  ]
 }
