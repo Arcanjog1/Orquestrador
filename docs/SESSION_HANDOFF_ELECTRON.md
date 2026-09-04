@@ -16,8 +16,9 @@ Atualizado em 2026-09-04.
 |---|---|
 | Repositório | `Arcanjog1/Orquestrador` |
 | Branch | `claude/ai-orchestrator-continuation-grblen` |
+| Branch paralela | `claude/ai-orchestrator-continuation-sbzrfg` — ver seção 6 |
 | Working tree | Limpo |
-| Testes | **205 passando, 0 falhando** (`npm test`) |
+| Testes | **206 passando, 0 falhando** (`npm test`) |
 | Testes Electron | **10 passando, 0 falhando** (`npm run desktop:test`) |
 | Smoke empacotado | **7 passando, 0 falhando** (`npm run -w apps/desktop test:packaged`) |
 | Typecheck | `npm run typecheck` → limpo (core + desktop main + renderer) |
@@ -152,7 +153,7 @@ redistribuído; segurança git preservada.
 ```bash
 npm install
 npm run typecheck                     # core + desktop main + renderer
-npm test                              # 205 testes
+npm test                              # 206 testes
 npm run desktop:build                 # tsc (main) + esbuild (preload/renderer)
 npm run desktop                       # abre o aplicativo
 npm run desktop:test                  # testes dentro do Electron real
@@ -199,7 +200,40 @@ Se `node_modules/electron/dist` não existir (npm com scripts desabilitados):
 
 ---
 
-## 6. Próxima fase sugerida
+## 6. A outra branch: `claude/ai-orchestrator-continuation-sbzrfg`
+
+Existe no remoto uma segunda branch, `claude/ai-orchestrator-continuation-sbzrfg`
+(HEAD `1e8a4d6`), com uma **fundação Electron paralela**, escrita por outra
+sessão a partir do mesmo commit base (`5ca6062`). As duas não se conhecem.
+
+O que ela tem e esta não:
+
+- prova de **instalação real de runtime pela GUI** (Codex vindo do registry npm,
+  com progresso chegando ao renderer) e de um **login Claude real iniciado e
+  cancelado** pela interface;
+- capturas de tela do executável empacotado (`docs/images/`);
+- remoção do resíduo CLI (`src/config/config.ts` e seu teste), que aqui ainda
+  existe;
+- renderer com Vite; `react`/`react-dom` em devDependencies.
+
+O que esta tem e ela não:
+
+- workspaces, chat, runs e o **loop de orquestração completo**, com adapters de
+  Codex e Claude, loop corretivo e cancelamento;
+- Windows CI cobrindo até o instalador NSIS;
+- smoke do build **empacotado** rodando dentro do próprio executável.
+
+Em escopo, esta branch é um superconjunto. As partes que se sobrepõem
+(main, preload, IPC, validação, onboarding, instalação, login) foram escritas
+duas vezes, de forma independente.
+
+**Decisão pendente do dono do repositório:** ficar com esta e portar as provas
+reais e as capturas de `sbzrfg`, ou o contrário. Nada foi mesclado nem
+descartado — as duas branches continuam intactas no remoto.
+
+---
+
+## 7. Próxima fase sugerida
 
 1. Rodar o Windows CI e baixar o `AI-Orchestrator-Setup.exe`.
 2. Instalar em Windows real e percorrer o fluxo inteiro: configurar runtimes,
