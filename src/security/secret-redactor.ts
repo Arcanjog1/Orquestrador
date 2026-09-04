@@ -136,6 +136,9 @@ export const SENSITIVE_ENV_KEYS: readonly string[] = [
   'CLAUDE_CODE_OAUTH_TOKEN',
   'OPENAI_API_KEY',
   'OPENAI_TOKEN',
+  // `codex login --with-access-token` reads this one; left in the environment
+  // it would satisfy every profile at once and collapse account isolation.
+  'CODEX_ACCESS_TOKEN',
 ];
 
 /** Produces a log-safe view of an environment overlay: keys only, no values. */

@@ -64,6 +64,14 @@ export interface LoginProgress {
    * browser. It is never logged: it can carry a one-time code.
    */
   url?: string;
+  /**
+   * The short confirmation code a device-code flow shows.
+   *
+   * Displayed to the user so they can match it on the browser page. Not a
+   * secret on its own - the page is useless without the account's own login -
+   * but it is still never written to a log.
+   */
+  code?: string;
 }
 
 export class AccountError extends Error {
