@@ -215,7 +215,14 @@ export class OrchestrationService {
         feedback,
         iterations,
       });
-      const decision = await this.askForDecision(runId, sessionId, runners, prompt, iteration, signal);
+      const decision = await this.askForDecision({
+        runId,
+        workspace,
+        runners,
+        prompt,
+        iteration,
+        signal,
+      });
       if (signal.aborted) return this.finishCancelled(runId, sessionId);
       if (!decision) {
         this.database.runs.setStatus(runId, 'FAILED', 'O orquestrador não devolveu uma decisão válida.');
@@ -374,22 +381,21 @@ export class OrchestrationService {
   }
 
   /** One parse attempt, then one format-repair attempt, then give up. */
-  private async askForDecision(
-    runId: string,
-    sessionId: string,
-    runners: RunnerPair,
-    prompt: string,
-    iteration: number,
-    signal: AbortSignal,
-  ): Promise<Decision | null> {
-    let currentPrompt = prompt;
+  private async askForDecision(input: {
+    runId: string;
+    workspace: WorkspaceWithAgents;
+    runners: RunnerPair;
+    prompt: string;
+    iteration: number;
+    signal: AbortSignal;
+  }): Promise<Decision | null> {
+    const { runId, workspace, runners, iteration, signal } = input;
+    let currentPrompt = input.prompt;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const startedAt = new Date().toISOString();
       const result = await runners.orchestrator.run({
         prompt: currentPrompt,
-        workingDirectory: this.database.runs.require(runId).workspace_id
-          ? this.database.workspaces.require(this.database.runs.require(runId).workspace_id).local_path
-          : process.cwd(),
+        workingDirectory: workspace.local_path,
         timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
         runId,
         iteration,
@@ -397,7 +403,7 @@ export class OrchestrationService {
       this.database.runs.recordInvocation({
         runId,
         iteration,
-        agentId: this.database.runs.require(runId).orchestrator_agent_id,
+        agentId: workspace.orchestrator_agent_id,
         accountId: null,
         role: 'ORCHESTRATOR',
         task: null,

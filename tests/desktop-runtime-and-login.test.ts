@@ -13,7 +13,28 @@ import assert from 'node:assert/strict';
 import { RuntimeService } from '../apps/desktop/src/main/services/runtime-service.js';
 import { AccountService } from '../apps/desktop/src/main/services/account-service.js';
 import { EventBus } from '../apps/desktop/src/main/events.js';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Database } from '../src/database/database.js';
+import { RuntimeManager as RealRuntimeManager } from '../src/runtime/runtime-manager.js';
+import { ManagedRuntime } from '../src/runtime/managed-runtime.js';
+import { ensureAppPaths } from '../src/runtime/paths.js';
+import type { RuntimeSource } from '../src/runtime/types.js';
+import { StubSource } from './helpers/fake-runtime-source.js';
+
+/** A codex runtime whose only source stalls, so a cancel has something to cut. */
+class StallingRuntime extends ManagedRuntime {
+  readonly id: RuntimeId = 'codex';
+  readonly displayName = 'Codex';
+  readonly sources: readonly RuntimeSource[];
+  protected readonly systemExecutableNames = ['definitely-not-installed-xyz'] as const;
+
+  constructor(sources: RuntimeSource[], options: ConstructorParameters<typeof ManagedRuntime>[0]) {
+    super(options);
+    this.sources = sources;
+  }
+}
 import type { RuntimeManager } from '../src/runtime/runtime-manager.js';
 import type { ClaudeAccountManager } from '../src/accounts/claude-account-manager.js';
 import type { InstallProgress, ProgressReporter, RuntimeId } from '../src/runtime/types.js';
@@ -158,6 +179,75 @@ test('a failed install reports a sentence, never a raw error', async () => {
   assert.equal(result.message, 'Não foi possível baixar o Codex agora.');
   assert.ok(!/ENOTFOUND/.test(JSON.stringify(result)));
   assert.equal(seen.at(-1)!.label, 'Não foi possível configurar');
+});
+
+test('cancelling a real install aborts the download and is not reported as a failure', async () => {
+  // A fetch that never finishes unless its signal aborts: exactly what a slow
+  // download looks like, and the only honest way to prove Cancelar works.
+  const neverFinishes = ((_url: unknown, init?: { signal?: AbortSignal }) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () =>
+        reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+      );
+    })) as unknown as typeof fetch;
+
+  const dir = mkdtempSync(join(tmpdir(), 'lao-cancel-'));
+  const paths = ensureAppPaths({
+    root: dir,
+    runtimes: join(dir, 'runtimes'),
+    profiles: join(dir, 'profiles'),
+    data: join(dir, 'data'),
+    logs: join(dir, 'logs'),
+    artifacts: join(dir, 'artifacts'),
+    updates: join(dir, 'updates'),
+    staging: join(dir, 'staging'),
+  });
+
+  try {
+    const manager = new RealRuntimeManager({ paths, fetchImpl: neverFinishes });
+    manager.register(
+      new StallingRuntime(
+        [
+          new StubSource('stub', 'Stub', 'DOCUMENTED', {
+            version: '0.153.0',
+            url: 'https://example.invalid/codex.zip',
+            archiveKind: 'zip',
+            executableNames: ['codex.exe'],
+          }),
+        ],
+        { paths, fetchImpl: neverFinishes },
+      ),
+    );
+
+    const events = new EventBus();
+    const seen: RuntimeProgressEvent[] = [];
+    events.subscribe((channel, payload) => {
+      if (channel === 'runtime:progress') seen.push(payload as RuntimeProgressEvent);
+    });
+
+    const service = new RuntimeService(manager, events, null);
+    const running = service.install('codex');
+
+    // Wait until the download has actually started.
+    const deadline = Date.now() + 5000;
+    while (!seen.some((e) => e.phase === 'downloading') && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(seen.some((e) => e.phase === 'downloading'), 'the download must have started');
+
+    assert.equal(service.cancelInstall('codex'), true);
+    const result = await running;
+
+    assert.equal(result.ok, false);
+    assert.equal(result.message, 'Instalação cancelada.');
+    assert.equal(seen.at(-1)!.phase, 'cancelled');
+    assert.equal(seen.at(-1)!.label, 'Cancelado');
+
+    // Nothing was promoted: whatever was there before is still what is there.
+    assert.equal(existsSync(join(paths.runtimes, 'codex', 'current')), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('cancelling reports whether there was anything to cancel', async () => {

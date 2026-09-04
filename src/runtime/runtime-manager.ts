@@ -18,6 +18,7 @@ import type { ManagedRuntime, ManagedRuntimeOptions } from './managed-runtime.js
 import {
   RuntimeError,
   type HealthStatus,
+  type InstallOptions,
   type InstallResult,
   type ProgressReporter,
   type RuntimeDetection,
@@ -118,16 +119,28 @@ export class RuntimeManager {
     };
   }
 
-  async install(runtimeId: RuntimeId, onProgress?: ProgressReporter): Promise<InstallResult> {
-    return this.get(runtimeId).install(onProgress);
+  async install(
+    runtimeId: RuntimeId,
+    onProgress?: ProgressReporter,
+    options?: InstallOptions,
+  ): Promise<InstallResult> {
+    return this.get(runtimeId).install(onProgress, options);
   }
 
-  async repair(runtimeId: RuntimeId, onProgress?: ProgressReporter): Promise<InstallResult> {
-    return this.get(runtimeId).repair(onProgress);
+  async repair(
+    runtimeId: RuntimeId,
+    onProgress?: ProgressReporter,
+    options?: InstallOptions,
+  ): Promise<InstallResult> {
+    return this.get(runtimeId).repair(onProgress, options);
   }
 
-  async update(runtimeId: RuntimeId, onProgress?: ProgressReporter): Promise<InstallResult | null> {
-    return this.get(runtimeId).update(onProgress);
+  async update(
+    runtimeId: RuntimeId,
+    onProgress?: ProgressReporter,
+    options?: InstallOptions,
+  ): Promise<InstallResult | null> {
+    return this.get(runtimeId).update(onProgress, options);
   }
 
   /**

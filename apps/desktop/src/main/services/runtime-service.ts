@@ -75,7 +75,9 @@ export class RuntimeService {
     };
 
     try {
-      const result = await this.runtimeManager.install(runtimeId, report);
+      const result = await this.runtimeManager.install(runtimeId, report, {
+        signal: controller.signal,
+      });
       this.database?.runtimeInstallations.record(result.manifest, {
         healthy: result.health.healthy,
         ...(result.health.problem ? { problem: result.health.problem } : {}),
@@ -93,11 +95,14 @@ export class RuntimeService {
         message: `${result.manifest.version} instalado.`,
       };
     } catch (error) {
-      const message = userMessageFor(error);
+      // A cancellation is not a failure: the interface says so, and offers the
+      // action again instead of apologising.
+      const cancelled = controller.signal.aborted;
+      const message = cancelled ? 'Instalação cancelada.' : userMessageFor(error);
       this.events.emit('runtime:progress', {
         runtimeId,
-        phase: 'failed',
-        label: 'Não foi possível configurar',
+        phase: cancelled ? 'cancelled' : 'failed',
+        label: cancelled ? 'Cancelado' : 'Não foi possível configurar',
         message,
         percent: null,
       });

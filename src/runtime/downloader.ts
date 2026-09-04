@@ -48,6 +48,8 @@ export interface DownloadOptions {
   expectedBytes?: number | undefined;
   onProgress?: ((receivedBytes: number, totalBytes: number | null) => void) | undefined;
   timeoutMs?: number;
+  /** Cancels the download. Combined with the timeout, whichever fires first. */
+  signal?: AbortSignal | undefined;
   /** Injected in tests. Defaults to the global fetch. */
   fetchImpl?: typeof fetch;
 }
@@ -61,12 +63,12 @@ export async function downloadAndVerify(options: DownloadOptions): Promise<Downl
   const fetchImpl = options.fetchImpl ?? fetch;
   const started = Date.now();
 
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? 300_000);
+  const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
+
   let response: Response;
   try {
-    response = await fetchImpl(options.url, {
-      redirect: 'follow',
-      signal: AbortSignal.timeout(options.timeoutMs ?? 300_000),
-    });
+    response = await fetchImpl(options.url, { redirect: 'follow', signal });
   } catch (err) {
     throw new DownloadError(options.url, describeNetworkError(err));
   }

@@ -162,6 +162,16 @@ export interface InstallProgress {
 
 export type ProgressReporter = (progress: InstallProgress) => void;
 
+/** Options common to install, repair and update. */
+export interface InstallOptions {
+  /**
+   * Cancels the work. The download aborts and the pipeline stops between
+   * phases, so a cancelled install never promotes a half-finished build.
+   */
+  signal?: AbortSignal | undefined;
+}
+
+
 export interface InstallResult {
   runtimeId: RuntimeId;
   executablePath: string;
@@ -199,5 +209,19 @@ export class RuntimeNotReadyError extends RuntimeError {
       'no managed install and no compatible system installation was found',
     );
     this.name = 'RuntimeNotReadyError';
+  }
+}
+
+/**
+ * Raised when the user cancelled an installation.
+ *
+ * Distinct from a failure on purpose: the interface says "Cancelado", not
+ * "Não foi possível configurar", and offers the action again rather than
+ * apologising for something that went wrong.
+ */
+export class RuntimeInstallCancelledError extends RuntimeError {
+  constructor(runtimeId: RuntimeId) {
+    super(runtimeId, 'Instalação cancelada.', 'Configurar automaticamente', 'cancelled by the user');
+    this.name = 'RuntimeInstallCancelledError';
   }
 }

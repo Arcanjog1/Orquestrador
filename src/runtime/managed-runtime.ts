@@ -41,8 +41,10 @@ import { compareVersions } from './version.js';
 import { appPaths, runtimeDir, type AppPaths } from './paths.js';
 import {
   RuntimeError,
+  RuntimeInstallCancelledError,
   RuntimeNotReadyError,
   type HealthStatus,
+  type InstallOptions,
   type InstallPhase,
   type InstallResult,
   type ProgressReporter,
@@ -191,20 +193,20 @@ export abstract class ManagedRuntime {
    * First install. Prefers the version this project has been tested against,
    * rather than whatever a source happens to call "latest".
    */
-  async install(onProgress?: ProgressReporter): Promise<InstallResult> {
-    return this.acquire(firstInstallRequest(this.compatibility), onProgress);
+  async install(onProgress?: ProgressReporter, options: InstallOptions = {}): Promise<InstallResult> {
+    return this.acquire(firstInstallRequest(this.compatibility), onProgress, options);
   }
 
-  async repair(onProgress?: ProgressReporter): Promise<InstallResult> {
+  async repair(onProgress?: ProgressReporter, options: InstallOptions = {}): Promise<InstallResult> {
     rmSync(this.installDir, { recursive: true, force: true });
-    return this.install(onProgress);
+    return this.install(onProgress, options);
   }
 
   /**
    * Checks for a newer build and installs it only if the policy allows and it
    * passes staging. A failure leaves the working build exactly where it was.
    */
-  async update(onProgress?: ProgressReporter): Promise<InstallResult | null> {
+  async update(onProgress?: ProgressReporter, options: InstallOptions = {}): Promise<InstallResult | null> {
     const installed = this.readManifest();
     const available = await this.findAvailableVersion();
     if (!available) return null;
@@ -218,7 +220,7 @@ export abstract class ManagedRuntime {
       return null;
     }
 
-    return this.acquire({ kind: 'latest' }, onProgress);
+    return this.acquire({ kind: 'latest' }, onProgress, options);
   }
 
   /** Restores the previous build. Used when an update misbehaves after promotion. */
@@ -285,6 +287,7 @@ export abstract class ManagedRuntime {
   private async acquire(
     request: VersionRequest,
     onProgress?: ProgressReporter,
+    options: InstallOptions = {},
   ): Promise<InstallResult> {
     const report = (phase: InstallPhase, message: string, percent?: number): void => {
       onProgress?.({ runtimeId: this.id, phase, message, ...(percent === undefined ? {} : { percent }) });
@@ -292,6 +295,10 @@ export abstract class ManagedRuntime {
     const failures: string[] = [];
 
     for (const source of this.orderedSources()) {
+      // Cancellation is checked between phases as well as inside the download:
+      // giving up before touching the next source is what makes "Cancelar"
+      // feel immediate rather than eventual.
+      throwIfCancelled(this.id, options.signal);
       report('resolving', `Procurando ${this.displayName}...`);
 
       let resolved: ResolvedDownload | null;
@@ -313,7 +320,8 @@ export abstract class ManagedRuntime {
       }
 
       try {
-        const result = await this.installFrom(source, resolved, report);
+        throwIfCancelled(this.id, options.signal);
+        const result = await this.installFrom(source, resolved, report, options.signal);
         report('done', `${this.displayName} pronto`, 100);
         return result;
       } catch (err) {
@@ -321,6 +329,7 @@ export abstract class ManagedRuntime {
       }
     }
 
+    throwIfCancelled(this.id, options.signal);
     throw new RuntimeError(
       this.id,
       `Não foi possível preparar ${this.displayName} automaticamente.`,
@@ -333,6 +342,7 @@ export abstract class ManagedRuntime {
     source: RuntimeSource,
     resolved: ResolvedDownload,
     report: (phase: InstallPhase, message: string, percent?: number) => void,
+    signal?: AbortSignal,
   ): Promise<InstallResult> {
     const stagingDir = join(this.paths.staging, `${this.id}-${Date.now()}`);
     mkdirSync(stagingDir, { recursive: true });
@@ -348,6 +358,7 @@ export abstract class ManagedRuntime {
         url: resolved.url,
         destination: archivePath,
         expectedBytes: resolved.expectedBytes,
+        signal,
         fetchImpl: this.fetchImpl,
         onProgress: (received, total) => {
           const percent = total ? Math.min(99, Math.round((received / total) * 100)) : undefined;
@@ -355,6 +366,7 @@ export abstract class ManagedRuntime {
         },
       });
 
+      throwIfCancelled(this.id, signal);
       report('verifying', 'Verificando...', 100);
       const bytes = readFileSync(archivePath);
       let verdict: IntegrityVerdict = verifyBytes(
@@ -525,4 +537,15 @@ function safeHost(url: string): string {
   } catch {
     return '(unknown)';
   }
+}
+
+/**
+ * Stops the pipeline the moment the user cancels.
+ *
+ * Checked between phases so a cancelled install never leaves a half-promoted
+ * build behind: the staging directory is discarded by the caller's cleanup and
+ * whatever was working before is untouched.
+ */
+function throwIfCancelled(runtimeId: RuntimeId, signal?: AbortSignal): void {
+  if (signal?.aborted) throw new RuntimeInstallCancelledError(runtimeId);
 }
