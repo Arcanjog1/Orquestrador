@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { collectLoopEvidence, printLoopEvidence } from './lib/loop-evidence.mjs';
 
 const twoStep = process.argv.includes('--two-step');
 const EXPECTED = 'Olá AI Orchestrator';
@@ -129,7 +130,15 @@ try {
   say(seen.includes('evidence'), 'evidence-collected', seen.includes('evidence') ? 'yes' : 'never reached');
   say(verifications.length > 0, 'verification-ran', `${verifications.length} result(s)`);
   if (twoStep) {
-    say(workerTurns >= 2, 'second-prompt-was-automatic', `${workerTurns} worker turns from one user message`);
+    // A real orchestrator may read check.mjs and get both files right first
+    // time. That is a one-pass success, not a broken loop - but it also does
+    // not prove the automatic second prompt, so it is reported as partial
+    // rather than folded into either PASS or FAIL.
+    if (workerTurns >= 2) {
+      say(true, 'second-prompt-was-automatic', `${workerTurns} worker turns from one user message`);
+    } else {
+      say(false, 'second-prompt-was-automatic', `only ${workerTurns} worker turn; two-step not exercised (PARTIAL, run again)`);
+    }
   }
   say(run.status === 'DONE', 'done-gate', `${run.status}${run.summary ? ` - ${run.summary}` : ''}`);
 
@@ -137,6 +146,11 @@ try {
     ? readFileSync(join(dir, 'hello.txt'), 'utf8').trim()
     : null;
   say(hello === EXPECTED, 'file-content', JSON.stringify(hello));
+
+  // The record, read back from the database rather than from anything the
+  // agents said: every turn, every prompt the loop handed the worker, every
+  // verdict, and the gate. This is what makes the run reviewable afterwards.
+  printLoopEvidence(collectLoopEvidence(services.database, sent.run.id, session.id));
 } finally {
   services.database.close();
   await services.processManager.cancelAll();
