@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDesktopFixture, ScriptedAgent } from './helpers/desktop-fixture.js';
+import { createGitFixture } from './helpers/git-fixture.js';
 import type { IpcResult } from '../apps/desktop/src/shared/ipc-contract.js';
 
 function value<T>(result: IpcResult<unknown>): T {
@@ -273,5 +274,41 @@ test('a provider nobody supports is refused at the boundary', async () => {
     assert.equal(errorOf(result).code, 'INVALID_ARGUMENT');
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test('the project header shows the branch the working copy is actually on', async () => {
+  const repo = createGitFixture('lao-branch-');
+  repo.write('a.txt', 'x');
+  repo.commitAll('first');
+  repo.git('checkout', '-q', '-b', 'feature/xyz');
+
+  const fixture = createDesktopFixture();
+  try {
+    value(await fixture.router.handle('workspace.create', { name: 'P', localPath: repo.dir }));
+    const listed = value<Array<{ branch: string | null; localPath: string }>>(
+      await fixture.router.handle('workspace.list', null),
+    );
+    // Read from disk, not remembered: the branch was switched after the
+    // workspace was added.
+    assert.equal(listed[0]!.branch, 'feature/xyz');
+  } finally {
+    await fixture.cleanup();
+    repo.cleanup();
+  }
+});
+
+test('a folder that is not a repository reports no branch rather than guessing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lao-plain-'));
+  const fixture = createDesktopFixture();
+  try {
+    value(await fixture.router.handle('workspace.create', { name: 'P', localPath: dir }));
+    const listed = value<Array<{ branch: string | null }>>(
+      await fixture.router.handle('workspace.list', null),
+    );
+    assert.equal(listed[0]!.branch, null);
+  } finally {
+    await fixture.cleanup();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

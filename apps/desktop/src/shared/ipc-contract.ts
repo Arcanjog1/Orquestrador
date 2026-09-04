@@ -158,6 +158,13 @@ export interface WorkspaceView {
   readonly localPath: string;
   readonly repositoryUrl: string | null;
   readonly defaultBranch: string | null;
+  /**
+   * The branch checked out right now, read from the working copy.
+   *
+   * Null when the folder is not a repository, or when git could not answer -
+   * the interface says so rather than showing a stale guess.
+   */
+  readonly branch: string | null;
   readonly orchestratorAgentId: string | null;
   readonly workerAgentId: string | null;
   readonly createdAt: string;

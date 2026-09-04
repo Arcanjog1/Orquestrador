@@ -104,7 +104,7 @@ export class IpcRouter {
 
     this.handlers.set('agents.list', () => s.agents.list());
 
-    this.handlers.set('workspace.list', () => s.workspaces.list());
+    this.handlers.set('workspace.list', () => s.workspaces.listWithBranches());
     this.handlers.set('workspace.selectFolder', async () => ({
       path: await this.shell.selectFolder(),
     }));

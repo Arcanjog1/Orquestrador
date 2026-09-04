@@ -32,6 +32,45 @@ export class WorkspaceService {
     return this.database.workspaces.list().map(toView);
   }
 
+  /**
+   * The same list, with each working copy's current branch.
+   *
+   * Read from disk rather than remembered, because the user can switch branches
+   * outside the application and a stale answer would be worse than none. A
+   * folder that is not a repository, or a git that cannot answer, gives null.
+   */
+  async listWithBranches(): Promise<WorkspaceView[]> {
+    const records = this.database.workspaces.list();
+    return Promise.all(
+      records.map(async (record) => ({
+        ...toView(record),
+        branch: await this.currentBranch(record.local_path),
+      })),
+    );
+  }
+
+  private async currentBranch(localPath: string): Promise<string | null> {
+    let git: string;
+    try {
+      git = await this.runtimes.executablePath('git');
+    } catch {
+      return null;
+    }
+    try {
+      const result = await this.processManager.run({
+        command: git,
+        args: ['branch', '--show-current'],
+        cwd: localPath,
+        timeoutMs: 15_000,
+      });
+      if (result.outcome !== 'completed' || result.exitCode !== 0) return null;
+      const branch = result.stdout.trim();
+      return branch.length > 0 ? branch : null;
+    } catch {
+      return null;
+    }
+  }
+
   create(input: {
     name: string;
     localPath: string;
@@ -117,6 +156,8 @@ function toView(record: WorkspaceWithAgents): WorkspaceView {
     localPath: record.local_path,
     repositoryUrl: record.repository_url,
     defaultBranch: record.default_branch,
+    // Filled in by `listWithBranches`; a plain view does not touch the disk.
+    branch: null,
     orchestratorAgentId: record.orchestrator_agent_id,
     workerAgentId: record.worker_agent_id,
     createdAt: record.created_at,

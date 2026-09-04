@@ -412,6 +412,7 @@ function Chat({ workspace }: { workspace: WorkspaceView }): ReactElement {
           <strong>{workspace.name}</strong>
           <span className="muted" style={{ fontSize: 12 }}>
             {workspace.localPath}
+            {workspace.branch ? ` · branch ${workspace.branch}` : ''}
           </span>
         </div>
         {running && run ? (
