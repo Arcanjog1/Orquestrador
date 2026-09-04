@@ -109,7 +109,9 @@ export function buildFakeArchive(
 }
 
 /** A `fetch` that serves prepared responses by URL. */
-export function makeFetch(routes: Record<string, { status?: number; body?: unknown; bytes?: Buffer }>): typeof fetch {
+export function makeFetch(
+  routes: Record<string, { status?: number; body?: unknown; text?: string; bytes?: Buffer }>,
+): typeof fetch {
   return (async (input: string | URL | Request) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const route = routes[url];
@@ -118,6 +120,14 @@ export function makeFetch(routes: Record<string, { status?: number; body?: unkno
       return new Response(route.bytes, {
         status: route.status ?? 200,
         headers: { 'content-length': String(route.bytes.length) },
+      });
+    }
+    // A checksum manifest is plain text, not JSON: serving it through
+    // JSON.stringify would wrap it in quotes and no parser would recognise it.
+    if (route.text !== undefined) {
+      return new Response(route.text, {
+        status: route.status ?? 200,
+        headers: { 'content-type': 'text/plain' },
       });
     }
     return new Response(JSON.stringify(route.body ?? {}), {

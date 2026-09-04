@@ -26,6 +26,8 @@ export class CodexAdapter implements AgentRunner {
   readonly label = 'Codex';
 
   private capabilities: CliCapabilities | null = null;
+  /** `codex exec --help`: a subcommand's flags are not in the top-level help. */
+  private execCapabilities: CliCapabilities | null = null;
   private readonly controllers = new Set<AbortController>();
 
   constructor(private readonly options: CodexAdapterOptions) {}
@@ -94,6 +96,22 @@ export class CodexAdapter implements AgentRunner {
    * `codex exec` is the documented headless mode. If a build does not offer it
    * we refuse rather than fall back to the interactive TUI, which would hang
    * forever behind a GUI with no terminal attached.
+   *
+   * Flags are read from `codex exec --help`, not from the top level: a
+   * subcommand's options do not appear in its parent's help, so checking the
+   * top-level page finds nothing and silently drops every flag. Measured
+   * against codex-cli 0.153.0, where `--skip-git-repo-check` and `--sandbox`
+   * live on `exec` alone.
+   *
+   * Two flags this build offers are deliberately not used yet:
+   *
+   *  - `--json` prints *events* as JSONL, not a single answer. Feeding an event
+   *    stream to the decision parser would have it read the first event as the
+   *    decision.
+   *  - `--output-schema` and `-o/--output-last-message` are the right long-term
+   *    mechanism for getting a clean decision, but adopting them changes what
+   *    the loop parses, and that cannot be validated without an authenticated
+   *    model run. Left for when there is one.
    */
   private async buildArgs(executable: string, cwd: string): Promise<string[]> {
     this.capabilities ??= await readCapabilities(this.options.processManager, executable, cwd);
@@ -102,10 +120,23 @@ export class CodexAdapter implements AgentRunner {
         'Esta versão do Codex não oferece um modo não interativo compatível.',
       );
     }
+
+    this.execCapabilities ??= await readCapabilities(this.options.processManager, executable, cwd, [
+      'exec',
+      '--help',
+    ]);
+
     const args = ['exec'];
-    // `--skip-git-repo-check` only exists on builds that refuse to run outside a
-    // repository; adding it when offered keeps a scratch folder usable.
-    if (this.capabilities.flags.has('--skip-git-repo-check')) args.push('--skip-git-repo-check');
+    // Keeps a scratch folder usable on builds that otherwise refuse to run
+    // outside a repository.
+    if (this.execCapabilities.flags.has('--skip-git-repo-check')) {
+      args.push('--skip-git-repo-check');
+    }
+    // The orchestrator supervises; the worker edits. Read-only makes that the
+    // sandbox's rule rather than a line in a prompt.
+    if (this.execCapabilities.flags.has('--sandbox')) {
+      args.push('--sandbox', 'read-only');
+    }
     return args;
   }
 }

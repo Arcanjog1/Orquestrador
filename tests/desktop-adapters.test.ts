@@ -42,16 +42,54 @@ function fakeProcessManager(responses: Record<string, string>): {
   return { manager, calls };
 }
 
-const CODEX_HELP = `Usage: codex [OPTIONS] <COMMAND>
+/** Top-level help, in the shape codex-cli 0.153.0 really prints. */
+const CODEX_HELP = `Usage: codex [OPTIONS] [PROMPT]
+       codex [OPTIONS] <COMMAND>
 
 Commands:
-  exec     Run without an interactive UI
-  login    Sign in
-  help     Print this message
+  exec     Run Codex non-interactively
+  login    Manage login
+  resume   Resume a previous session
+  help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help                   Print help
-      --skip-git-repo-check    Allow running outside a git repository
+  -c, --config <key=value>   Override a configuration value
+  -m, --model <MODEL>        Model the agent should use
+  -h, --help                 Print help
+`;
+
+/**
+ * `codex exec --help`, abridged from the real page.
+ *
+ * The flags the adapter cares about live here and nowhere else, which is the
+ * whole point of the test below.
+ */
+const CODEX_EXEC_HELP = `Run Codex non-interactively
+
+Usage: codex exec [OPTIONS] [PROMPT]
+
+Arguments:
+  [PROMPT]
+          Initial instructions for the agent. If not provided as an argument (or if \`-\` is used),
+          instructions are read from stdin.
+
+Options:
+  -s, --sandbox <SANDBOX_MODE>
+          Select the sandbox policy to use when executing model-generated shell commands
+
+          [possible values: read-only, workspace-write, danger-full-access]
+
+      --skip-git-repo-check
+          Allow running Codex outside a Git repository
+
+      --output-schema <FILE>
+          Path to a JSON Schema file describing the model's final response shape
+
+      --json
+          Print events to stdout as JSONL
+
+  -o, --output-last-message <FILE>
+          Write the last message to a file
 `;
 
 const CLAUDE_HELP = `Usage: claude [options] [prompt]
@@ -66,12 +104,19 @@ test('parseHelp finds long flags and subcommands, and is not fooled by option li
   const capabilities = parseHelp(CODEX_HELP);
   assert.ok(capabilities.subcommands.has('exec'));
   assert.ok(capabilities.subcommands.has('login'));
-  assert.ok(capabilities.flags.has('--skip-git-repo-check'));
+  assert.ok(capabilities.flags.has('--config'));
   assert.ok(!capabilities.subcommands.has('-h'));
+  // Measured: these live on `codex exec`, not on the top-level page.
+  assert.ok(!capabilities.flags.has('--skip-git-repo-check'));
+  assert.ok(parseHelp(CODEX_EXEC_HELP).flags.has('--skip-git-repo-check'));
+  assert.ok(parseHelp(CODEX_EXEC_HELP).flags.has('--sandbox'));
 });
 
 test('Codex runs headless via `exec`, with the prompt on stdin and never in argv', async () => {
-  const { manager, calls } = fakeProcessManager({ '--help': CODEX_HELP });
+  const { manager, calls } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': CODEX_EXEC_HELP,
+  });
   const adapter = new CodexAdapter({
     processManager: manager,
     resolveExecutable: async () => '/managed/codex.exe',
@@ -87,12 +132,69 @@ test('Codex runs headless via `exec`, with the prompt on stdin and never in argv
 
   const invocation = calls.at(-1)!;
   assert.equal(invocation.command, '/managed/codex.exe', 'the managed path, not "codex"');
-  assert.deepEqual(invocation.args, ['exec', '--skip-git-repo-check']);
+  // Read-only because the orchestrator supervises and never edits; the flags
+  // come from `exec --help`, which is where this build actually declares them.
+  assert.deepEqual(invocation.args, [
+    'exec',
+    '--skip-git-repo-check',
+    '--sandbox',
+    'read-only',
+  ]);
   assert.equal(invocation.stdin, 'segredo do prompt');
   assert.ok(
     !(invocation.args ?? []).some((arg) => arg.includes('segredo')),
     'the prompt must never reach argv',
   );
+});
+
+test('Codex reads its flags from `exec --help`, not from the top-level page', async () => {
+  // The flags exist only on the subcommand. An adapter that checked the parent
+  // page would find none of them and silently drop every one.
+  const { manager, calls } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': CODEX_EXEC_HELP,
+  });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+  });
+
+  await adapter.run({
+    prompt: 'x',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'r',
+    iteration: 1,
+  });
+
+  assert.ok(
+    calls.some((c) => (c.args ?? []).join(' ') === 'exec --help'),
+    'the subcommand help page must be read',
+  );
+  assert.ok((calls.at(-1)!.args ?? []).includes('--skip-git-repo-check'));
+});
+
+test('Codex does not adopt --json, which prints an event stream rather than an answer', async () => {
+  const { manager, calls } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': CODEX_EXEC_HELP,
+  });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+  });
+
+  await adapter.run({
+    prompt: 'x',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'r',
+    iteration: 1,
+  });
+
+  const args = calls.at(-1)!.args ?? [];
+  assert.ok(!args.includes('--json'), 'JSONL events would be parsed as the decision');
+  assert.ok(!args.includes('--output-schema'), 'not adopted until a real run can validate it');
 });
 
 test('Codex refuses a build with no non-interactive mode instead of hanging in a TUI', async () => {

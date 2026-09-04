@@ -135,7 +135,7 @@ test('asking for an unknown runtime is a programming error, not a silent null', 
 test('Codex prefers the documented release channel over package internals', () => {
   const sources = defaultCodexSources(makeFetch({}));
   assert.equal(sources[0]!.contract, 'DOCUMENTED');
-  assert.equal(sources[0]!.id, 'codex-official-release');
+  assert.equal(sources[0]!.id, 'codex-github-releases');
   const npmSource = sources.find((s) => s.id === 'codex-npm-registry')!;
   assert.equal(npmSource.contract, 'PACKAGE_INTERNAL');
   assert.ok(sources.indexOf(npmSource) > 0, 'npm must not be the primary contract');
@@ -162,38 +162,167 @@ test('the contract labels are the exact strings shown in reports', () => {
   );
 });
 
+interface FakeAsset {
+  name: string;
+  url: string;
+  bytes?: number;
+}
+
+/** A GitHub release payload in the shape the API really returns. */
+function release(tag: string, assets: readonly FakeAsset[]): Record<string, unknown> {
+  return {
+    tag_name: tag,
+    name: tag.replace(/^rust-v/, ''),
+    draft: false,
+    prerelease: false,
+    assets: assets.map((a) => ({
+      name: a.name,
+      browser_download_url: a.url,
+      size: a.bytes ?? 0,
+    })),
+  };
+}
+
+const CODEX_LATEST = 'https://api.github.com/repos/openai/codex/releases/latest';
+const CODEX_TAGGED = 'https://api.github.com/repos/openai/codex/releases/tags/rust-v0.153.0';
+
 test('a source that cannot serve the target declines instead of guessing a URL', async () => {
-  // The release channel answers with a manifest that has no matching asset.
-  const { CodexOfficialReleaseSource } = await import('../src/runtime/sources/codex-sources.js');
+  // A release with builds for other platforms, but nothing for Windows x64.
+  const { CodexGitHubReleaseSource } = await import('../src/runtime/sources/codex-sources.js');
   const fetchImpl = makeFetch({
-    'https://releases.openai.com/codex/latest': {
-      body: { version: '1.0.0', assets: [{ name: 'codex-linux-arm64.tar.gz', url: 'https://x/y' }] },
+    [CODEX_LATEST]: {
+      body: release('rust-v1.0.0', [
+        { name: 'codex-package-aarch64-apple-darwin.tar.gz', url: 'https://x/mac' },
+      ]),
     },
   });
-  const source = new CodexOfficialReleaseSource(undefined, fetchImpl);
+  const source = new CodexGitHubReleaseSource(fetchImpl, 'openai/codex', {});
   const resolved = await source.resolve({ platform: 'win32', arch: 'x64' }, { kind: 'latest' });
   assert.equal(resolved, null, 'no Windows asset means decline, not a wrong URL');
 });
 
-test('the release channel resolves a matching Windows asset', async () => {
-  const { CodexOfficialReleaseSource } = await import('../src/runtime/sources/codex-sources.js');
+test('the Windows asset is matched by target triple, not by the word "windows"', async () => {
+  const { CodexGitHubReleaseSource } = await import('../src/runtime/sources/codex-sources.js');
+  const digest = 'a'.repeat(64);
+  const arm = 'b'.repeat(64);
   const fetchImpl = makeFetch({
-    'https://releases.openai.com/codex/latest': {
-      body: {
-        version: '2.5.0',
-        assets: [
-          { name: 'codex-aarch64-apple-darwin.tar.gz', url: 'https://x/mac' },
-          { name: 'codex-x86_64-pc-windows-msvc.zip', url: 'https://x/win.zip' },
-        ],
-      },
+    [CODEX_LATEST]: {
+      body: release('rust-v2.5.0', [
+        // The ARM64 build is listed first on purpose: a matcher that takes the
+        // first asset mentioning windows would pick exactly the wrong one.
+        { name: 'codex-package-aarch64-pc-windows-msvc.tar.gz', url: 'https://x/win-arm' },
+        { name: 'codex-package-x86_64-pc-windows-msvc.tar.gz', url: 'https://x/win-x64', bytes: 42 },
+        { name: 'codex-package_SHA256SUMS', url: 'https://x/sums' },
+      ]),
+    },
+    'https://x/sums': {
+      text: [
+        `${arm}  codex-package-aarch64-pc-windows-msvc.tar.gz`,
+        `${digest}  codex-package-x86_64-pc-windows-msvc.tar.gz`,
+      ].join('\n'),
     },
   });
-  const source = new CodexOfficialReleaseSource(undefined, fetchImpl);
+
+  const source = new CodexGitHubReleaseSource(fetchImpl, 'openai/codex', {});
   const resolved = await source.resolve({ platform: 'win32', arch: 'x64' }, { kind: 'latest' });
-  assert.equal(resolved?.url, 'https://x/win.zip');
+
+  assert.equal(resolved?.url, 'https://x/win-x64');
   assert.equal(resolved?.version, '2.5.0');
-  assert.equal(resolved?.archiveKind, 'zip');
+  assert.equal(resolved?.archiveKind, 'tgz');
+  assert.equal(resolved?.integrity, digest);
+  assert.equal(resolved?.expectedBytes, 42);
   assert.deepEqual(resolved?.executableNames, ['codex.exe']);
+});
+
+test('an asset with no published digest is refused rather than installed unverified', async () => {
+  const { CodexGitHubReleaseSource } = await import('../src/runtime/sources/codex-sources.js');
+  const fetchImpl = makeFetch({
+    [CODEX_LATEST]: {
+      body: release('rust-v2.5.0', [
+        { name: 'codex-package-x86_64-pc-windows-msvc.tar.gz', url: 'https://x/win' },
+        { name: 'codex-x86_64-pc-windows-msvc.exe.zip', url: 'https://x/win-zip' },
+        // The manifest exists but covers neither asset.
+        { name: 'codex-package_SHA256SUMS', url: 'https://x/sums' },
+      ]),
+    },
+    'https://x/sums': { text: `${'c'.repeat(64)}  codex-package-x86_64-apple-darwin.tar.gz` },
+  });
+
+  const source = new CodexGitHubReleaseSource(fetchImpl, 'openai/codex', {});
+  const resolved = await source.resolve({ platform: 'win32', arch: 'x64' }, { kind: 'latest' });
+  assert.equal(resolved, null, 'an agent binary is never installed without a published digest');
+});
+
+test('a tested version is requested by its own tag, never silently as latest', async () => {
+  const { CodexGitHubReleaseSource } = await import('../src/runtime/sources/codex-sources.js');
+  const digest = 'd'.repeat(64);
+  const asked: string[] = [];
+  const base = makeFetch({
+    [CODEX_TAGGED]: {
+      body: release('rust-v0.153.0', [
+        { name: 'codex-package-x86_64-pc-windows-msvc.tar.gz', url: 'https://x/win' },
+        { name: 'codex-package_SHA256SUMS', url: 'https://x/sums' },
+      ]),
+    },
+    'https://x/sums': { text: `${digest}  codex-package-x86_64-pc-windows-msvc.tar.gz` },
+  });
+  const fetchImpl = ((input: string, init?: RequestInit) => {
+    asked.push(String(input));
+    return base(input as never, init as never);
+  }) as typeof fetch;
+
+  const source = new CodexGitHubReleaseSource(fetchImpl, 'openai/codex', {});
+  const resolved = await source.resolve(
+    { platform: 'win32', arch: 'x64' },
+    { kind: 'tested', version: '0.153.0' },
+  );
+
+  assert.equal(resolved?.version, '0.153.0');
+  assert.ok(asked.includes(CODEX_TAGGED), 'the tested version is asked for by tag');
+  assert.ok(!asked.includes(CODEX_LATEST), 'and latest is never consulted behind its back');
+});
+
+test('a tested version that no longer has a release declines instead of taking latest', async () => {
+  const { CodexGitHubReleaseSource } = await import('../src/runtime/sources/codex-sources.js');
+  const fetchImpl = makeFetch({
+    // Only `latest` is served: the tagged release is gone.
+    [CODEX_LATEST]: {
+      body: release('rust-v9.9.9', [
+        { name: 'codex-package-x86_64-pc-windows-msvc.tar.gz', url: 'https://x/win' },
+      ]),
+    },
+  });
+  const source = new CodexGitHubReleaseSource(fetchImpl, 'openai/codex', {});
+  const resolved = await source.resolve(
+    { platform: 'win32', arch: 'x64' },
+    { kind: 'tested', version: '0.153.0' },
+  );
+  assert.equal(resolved, null, 'a missing tested release is not an invitation to install latest');
+});
+
+test('the ARM64 Windows triple is prepared, even while it is out of scope', async () => {
+  const { codexTargetTriple, codexAssetCandidates } = await import(
+    '../src/runtime/sources/codex-sources.js'
+  );
+  const triple = codexTargetTriple({ platform: 'win32', arch: 'arm64' });
+  assert.equal(triple, 'aarch64-pc-windows-msvc');
+  const names = codexAssetCandidates(triple!, { platform: 'win32', arch: 'arm64' }).map(
+    (c) => c.name,
+  );
+  assert.deepEqual(names, [
+    'codex-package-aarch64-pc-windows-msvc.tar.gz',
+    'codex-aarch64-pc-windows-msvc.exe.zip',
+  ]);
+});
+
+test('the endpoint that answered 404 on real Windows is no longer tried', async () => {
+  const { defaultCodexSources } = await import('../src/runtime/sources/codex-sources.js');
+  const ids = defaultCodexSources().map((s) => s.id);
+  assert.deepEqual(ids, ['codex-github-releases', 'codex-npm-registry']);
+  assert.ok(
+    !ids.includes('codex-official-release'),
+    'releases.openai.com/codex 404s; it must not spend a first run',
+  );
 });
 
 test('an unreachable source declines rather than throwing the install away', async () => {
