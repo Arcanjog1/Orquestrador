@@ -10,6 +10,15 @@ import { join } from 'node:path';
 import { MIGRATIONS, SCHEMA_VERSION } from './schema.js';
 import { NodeSqliteDriver } from './node-sqlite-driver.js';
 import { DatabaseUnavailableError, type SqlDriver, type SqlRow, type SqlValue } from './driver.js';
+import {
+  AccountRepository,
+  AgentRepository,
+  ChatRepository,
+  ProviderRepository,
+  RunRepository,
+  VerificationDefinitionRepository,
+  WorkspaceRepository,
+} from './repositories.js';
 import { appPaths, type AppPaths } from '../runtime/paths.js';
 import type { RuntimeManifest } from '../runtime/types.js';
 
@@ -76,6 +85,13 @@ export class Database {
 
   readonly runtimeInstallations = new RuntimeInstallationRepository(() => this.driver);
   readonly settings = new SettingsRepository(() => this.driver);
+  readonly providers = new ProviderRepository(() => this.driver);
+  readonly accounts = new AccountRepository(() => this.driver);
+  readonly agents = new AgentRepository(() => this.driver);
+  readonly workspaces = new WorkspaceRepository(() => this.driver);
+  readonly chat = new ChatRepository(() => this.driver);
+  readonly runs = new RunRepository(() => this.driver);
+  readonly verifications = new VerificationDefinitionRepository(() => this.driver);
 }
 
 /** Shared helpers for the repositories. */
@@ -207,4 +223,5 @@ export class SettingsRepository extends Repository {
 }
 
 export { DatabaseUnavailableError };
+export * from './repositories.js';
 export type { SqlDriver, SqlRow, SqlValue };

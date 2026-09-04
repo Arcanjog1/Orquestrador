@@ -236,6 +236,17 @@ CREATE TABLE settings (
 );
 `,
   },
+  {
+    id: 2,
+    name: 'workspace-updated-at',
+    sql: `
+-- The interface lists workspaces most-recently-touched first, which needs a
+-- column that moves when anything about the workspace changes. The existing
+-- last_opened_at column means something narrower and is kept as it is.
+ALTER TABLE workspaces ADD COLUMN updated_at TEXT;
+UPDATE workspaces SET updated_at = created_at WHERE updated_at IS NULL;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;
