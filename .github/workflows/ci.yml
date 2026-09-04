@@ -25,10 +25,10 @@ jobs:
           node-version: '22'
           cache: npm
 
-      # The Electron binary is ~160 MB and its postinstall has no timeout: when
-      # the download stalls, `npm ci` hangs for the whole job. Fetching it in a
-      # step of its own keeps install fast and deterministic, and lets the cache
-      # skip the download entirely on later runs.
+      # The Electron binary is ~160 MB and its postinstall has no timeout of its
+      # own, so a slow download shows up as `npm ci` hanging with nothing in the
+      # log to explain it. Fetching it in a step of its own gives it a visible
+      # name and a bound, and lets the cache skip the download on later runs.
       - name: Install
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
