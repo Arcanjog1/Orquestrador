@@ -21,7 +21,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const require = createRequire(import.meta.url);
 
@@ -30,11 +30,20 @@ const root = resolve(here, '..');
 const dist = join(root, 'dist');
 const bundles = join(root, 'dist-renderer');
 
-const { Database } = await import(join(dist, 'src/database/database.js'));
-const { AppServices } = await import(join(dist, 'apps/desktop/src/main/services/app-services.js'));
-const { IpcRouter } = await import(join(dist, 'apps/desktop/src/main/ipc-router.js'));
-const { REQUEST_CHANNELS } = await import(join(dist, 'apps/desktop/src/shared/ipc-contract.js'));
-const { WEB_PREFERENCES } = await import(join(dist, 'apps/desktop/src/electron/security.js'));
+/**
+ * Dynamic imports go through a file:// URL.
+ *
+ * `import('D:\\...')` is refused by Node's ESM loader as "protocol 'd:'", so a
+ * bare absolute path works everywhere except the platform this product ships
+ * on.
+ */
+const load = (relative) => import(pathToFileURL(join(dist, relative)).href);
+
+const { Database } = await load('src/database/database.js');
+const { AppServices } = await load('apps/desktop/src/main/services/app-services.js');
+const { IpcRouter } = await load('apps/desktop/src/main/ipc-router.js');
+const { REQUEST_CHANNELS } = await load('apps/desktop/src/shared/ipc-contract.js');
+const { WEB_PREFERENCES } = await load('apps/desktop/src/electron/security.js');
 
 const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
