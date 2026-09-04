@@ -48,10 +48,19 @@ export function Workbench({ onBack }: { onBack: () => void }): ReactElement {
   const workspace = workspaces.find((w) => w.id === selected) ?? null;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', height: '100%' }}>
+    <div
+      style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', height: '100%' }}
+    >
       <aside
         className="col"
-        style={{ borderRight: '1px solid var(--line)', padding: 14, overflowY: 'auto' }}
+        style={{
+          borderRight: '1px solid var(--line)',
+          padding: 14,
+          overflowY: 'auto',
+          // A flex item refuses to shrink below its content by default, which
+          // pushes the buttons out of a fixed-width sidebar.
+          minWidth: 0,
+        }}
       >
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <strong>AI Orchestrator</strong>
@@ -148,7 +157,7 @@ function Accounts({
           placeholder="Claude Trabalho"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          style={{ flex: 1 }}
+          style={{ flex: 1, minWidth: 0 }}
         />
         <button onClick={() => void create()} disabled={busy || name.trim().length === 0}>
           Adicionar
@@ -236,7 +245,7 @@ function Projects({
           placeholder="https://github.com/..."
           value={repositoryUrl}
           onChange={(e) => setRepositoryUrl(e.target.value)}
-          style={{ flex: 1 }}
+          style={{ flex: 1, minWidth: 0 }}
         />
         <button onClick={() => void clone()} disabled={busy}>
           Clonar

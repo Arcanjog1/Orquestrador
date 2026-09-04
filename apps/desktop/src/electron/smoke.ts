@@ -10,6 +10,8 @@
  * Enabled by `AI_ORCHESTRATOR_SMOKE=1`, so it can never fire in normal use.
  */
 
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { BrowserWindow } from 'electron';
 import type { AppServices } from '../main/services/app-services.js';
 
@@ -21,6 +23,18 @@ export interface SmokeCheck {
 
 export function smokeRequested(env: NodeJS.ProcessEnv = process.env): boolean {
   return env['AI_ORCHESTRATOR_SMOKE'] === '1';
+}
+
+/**
+ * Where to write a screenshot of the running window, if anywhere.
+ *
+ * Assertions describe what the screen shows; a picture is what a person can
+ * check at a glance. Off unless a path is given, so it never fires in normal
+ * use.
+ */
+export function screenshotTarget(env: NodeJS.ProcessEnv = process.env): string | null {
+  const target = env['AI_ORCHESTRATOR_SMOKE_SCREENSHOT'];
+  return target && target.length > 0 ? target : null;
 }
 
 export async function runSmokeChecks(
@@ -99,7 +113,36 @@ export async function runSmokeChecks(
     throw new Error(`checklist never rendered; body was: ${text.slice(0, 400)}`);
   });
 
+  const screenshot = screenshotTarget();
+  if (screenshot) {
+    await check('screenshot-onboarding', async () => save(window, screenshot));
+
+    // Then walk to the working screen, so the pair shows both halves of the
+    // experience rather than only the first-run one.
+    await check('screenshot-workbench', async () => {
+      await window.webContents.executeJavaScript(
+        'document.querySelector(\'[data-testid="continue"]\')?.click()',
+      );
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const text = (await window.webContents.executeJavaScript(
+          'document.body.innerText',
+        )) as string;
+        if (/Projetos/.test(text)) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      return save(window, screenshot.replace(/\.png$/, '-workbench.png'));
+    });
+  }
+
   return checks;
+}
+
+async function save(window: BrowserWindow, target: string): Promise<string> {
+  const image = await window.webContents.capturePage();
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, image.toPNG());
+  return target;
 }
 
 export function reportSmoke(checks: readonly SmokeCheck[]): boolean {
