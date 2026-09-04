@@ -96,7 +96,20 @@ jobs:
         continue-on-error: true
         run: node spike/windows-spike.mjs --non-interactive
 
+      # Whether the installer was built and whether it could be uploaded are
+      # two different questions. The first is this build's business and fails
+      # the job; the second depends on the account's artifact storage quota,
+      # which a green build has no business being red about.
+      - name: Check the installer was produced
+        shell: pwsh
+        run: |
+          $exe = 'apps/desktop/release/AI-Orchestrator-Setup.exe'
+          if (-not (Test-Path $exe)) { throw "no installer at $exe" }
+          $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          "Installer built: $exe ($size MB)" | Tee-Object -FilePath installer.txt
+
       - name: Upload the installer
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: AI-Orchestrator-Setup

@@ -16,10 +16,10 @@ Atualizado em 2026-09-04.
 |---|---|
 | Repositório | `Arcanjog1/Orquestrador` |
 | Branch | `claude/ai-orchestrator-continuation-grblen` |
-| Branch paralela | `claude/ai-orchestrator-continuation-sbzrfg` — ver seção 6 |
+| Branch paralela | `claude/ai-orchestrator-continuation-sbzrfg` — ver seção 7 |
 | Working tree | Limpo |
 | Testes | **206 passando, 0 falhando** (`npm test`) |
-| Testes Electron | **10 passando, 0 falhando** (`npm run desktop:test`) |
+| Testes Electron | **10 passando, 0 falhando** (`npm run desktop:test`) — verde também no Windows |
 | Smoke empacotado | **7 passando, 0 falhando** (`npm run -w apps/desktop test:packaged`) — 9 com capturas |
 | Typecheck | `npm run typecheck` → limpo (core + desktop main + renderer) |
 | Electron | **44.1.1** (fixado, sem `^`) |
@@ -181,18 +181,69 @@ Se `node_modules/electron/dist` não existir (npm com scripts desabilitados):
 
 ---
 
-## 5. Blockers abertos
+## 5. O que o Windows real respondeu
 
-1. **`AI-Orchestrator-Setup.exe` não foi validado em Windows real.** O
-   `win-unpacked` é gerado aqui; o wrapper NSIS precisa de Windows (ou wine com
-   loader 32 bits, que este container não tem). O workflow de CI monta e publica
-   o instalador como artifact — falta alguém instalar e usar.
-2. **Windows CI ainda não rodou.** `.github/workflows/ci.yml` existe e cobre
-   install → typecheck → testes → build → testes Electron → NSIS → smoke
-   empacotado → artifact, mas ninguém o executou ainda.
-3. **Fontes reais de Codex/Claude/MinGit no Windows — não verificadas.** Os
-   resolvers só viram respostas simuladas. O passo "Probe the real runtime
-   sources" no CI existe para começar a responder isso.
+Primeira execução do CI em `windows-latest` (run `33832605345`, commit
+`469d96f`). Windows 10.0.26100, Node 22.23.2, **git 2.55.0.windows.5**.
+
+**Verde:** install, typecheck, **206 testes**, build, **10 testes Electron**,
+**empacotamento NSIS**, e o **smoke do app empacotado**. Ou seja:
+`AI-Orchestrator-Setup.exe` **foi produzido**, e o executável empacotado abre,
+o `node:sqlite` funciona nele, o IPC responde e o onboarding renderiza — no
+Windows.
+
+O upload do instalador falhou por **cota de artifacts da conta esgotada**
+("Artifact storage quota has been hit"), não por problema de build. O log
+confirma o arquivo no caminho esperado antes de tentar enviar.
+
+**Achados que mudam o plano:**
+
+1. **Codex não tem fonte de instalação funcionando.** Medido, não suposto:
+   - `https://releases.openai.com/codex/latest` → **HTTP 404**
+   - `https://releases.openai.com/codex` → **HTTP 404**
+   - tarball npm `@openai/codex-win32-x64` → nenhum tarball para esta
+     plataforma
+   - `https://api.github.com/repos/openai/codex/releases/latest` → **HTTP 200**
+     (alcançável, mas o `CodexRuntime` ainda não usa essa fonte)
+
+   Conclusão do spike: *"No Codex source produced a working binary."* O
+   requisito de configuração zero **não é atendido para o Codex hoje**. É o
+   blocker número 1.
+
+2. **Claude tem fonte funcionando:** `https://claude.ai/install.ps1` → HTTP 200,
+   apontando para `https://downloads.claude.ai/claude-code-releases/bootstrap.ps1`.
+
+3. **Cancelamento no Windows:** `taskkill /T` → **0 órfãos, nenhum sobrevivente,
+   live count 0, outcome `cancelled`** em 3138ms. O spike ainda marca FAIL
+   porque o seu próprio check de heartbeat do neto não confirmou a parada
+   (`Grandchild heartbeat stopped: false`). Ou seja: **sem órfãos, mas ainda
+   não totalmente provado**.
+
+4. **argv e stdin no Windows:** `.exe`, `.cmd` e `.bat` passam o round trip de
+   argumentos; stdin através de `.cmd` passa; um prompt de **80757 bytes**
+   chega byte a byte, direto e através do launcher `.cmd`.
+
+5. **`testedVersion` do Git está desatualizado:** o Windows real traz
+   **2.55.0**, e a política testa `2.47.0`.
+
+6. Codex e Claude **não estavam instalados** no runner, então TEST 1, 2, 3 e 7
+   do spike não puderam rodar. Os adapters continuam **não exercitados contra
+   os CLIs reais**.
+
+---
+
+## 6. Blockers abertos
+
+1. **Codex não pode ser instalado pelo aplicativo.** Ver seção 5, item 1. Sem
+   isso, a primeira execução não consegue preparar o orquestrador sozinha. O
+   caminho óbvio é acrescentar uma fonte baseada nas releases do GitHub, que
+   respondeu 200 — mas isso exige escolher o nome do asset e a estratégia de
+   integridade, e validar no Windows.
+2. **`AI-Orchestrator-Setup.exe` foi construído mas ninguém o instalou.** O CI
+   o produz e o smoke empacotado passa; falta baixar, instalar e usar. O upload
+   depende da cota de artifacts da conta, hoje esgotada.
+3. **Adapters nunca rodaram contra os CLIs reais.** Nenhum runner tinha Codex ou
+   Claude instalado.
 4. **Authenticode publishers — desconhecidos.** Nenhum `expectedPublisher`
    configurado, de propósito. O CI registra o subject observado.
 5. **Duas contas Claude reais simultâneas — não comprovado.** O isolamento de
@@ -212,7 +263,7 @@ Se `node_modules/electron/dist` não existir (npm com scripts desabilitados):
 
 ---
 
-## 6. A outra branch: `claude/ai-orchestrator-continuation-sbzrfg`
+## 7. A outra branch: `claude/ai-orchestrator-continuation-sbzrfg`
 
 Existe no remoto uma segunda branch, `claude/ai-orchestrator-continuation-sbzrfg`
 (HEAD `1e8a4d6`), com uma **fundação Electron paralela**, escrita por outra
@@ -245,10 +296,18 @@ descartado — as duas branches continuam intactas no remoto.
 
 ---
 
-## 7. Próxima fase sugerida
+## 8. Próxima fase sugerida
 
-1. Rodar o Windows CI e baixar o `AI-Orchestrator-Setup.exe`.
-2. Instalar em Windows real e percorrer o fluxo inteiro: configurar runtimes,
-   conectar conta, adicionar projeto, enviar tarefa.
-3. Corrigir o que a realidade contradisser (fontes, flags, versões).
-4. Só então: Agents completo, Runs completo, diff viewer, Gemini, design final.
+1. **Dar ao Codex uma fonte que funcione.** É o que separa o produto do
+   requisito de configuração zero. As releases do GitHub respondem 200; falta
+   decidir o asset e a integridade, e provar no Windows.
+2. Liberar cota de artifacts na conta (ou publicar via release) e **baixar o
+   `AI-Orchestrator-Setup.exe`**.
+3. Instalar em Windows real e percorrer o fluxo inteiro: configurar runtimes,
+   conectar conta, adicionar projeto, enviar tarefa. É o que valida os adapters
+   contra os CLIs reais.
+4. Ajustar `testedVersion` do Git para o que o MinGit realmente entregar
+   (o Windows real já mostra 2.55.0).
+5. Fechar o cancelamento no Windows: 0 órfãos já está medido, falta o check de
+   heartbeat do spike concordar.
+6. Só então: Agents completo, Runs completo, diff viewer, Gemini, design final.
