@@ -9,8 +9,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { AppServices } from '../apps/desktop/src/main/services/app-services.js';
 import { createGitFixture, type GitFixture } from './helpers/git-fixture.js';
 import { createDesktopFixture, HangingAgent, ScriptedAgent } from './helpers/desktop-fixture.js';
 import type { DesktopFixture } from './helpers/desktop-fixture.js';
@@ -631,5 +632,124 @@ test('a run that stops for a person reports BLOCKED, distinct from a failure', a
     assert.equal(invocations.filter((i) => i.role === 'CODING_WORKER').length, 0);
   } finally {
     await prepared.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------------ *
+ * Persistence.
+ *
+ * The loop's record has to outlive the process that produced it: the
+ * interface reads history after a restart, and the real-provider smoke reads
+ * its evidence back from the database. The reopen test in desktop-workspace
+ * covers chat messages; this one closes the database after a full
+ * two-iteration run, opens the same files again through a fresh AppServices,
+ * and checks that every table the loop writes to still tells the whole story -
+ * including the second worker prompt, which is the artefact that proves the
+ * reprompt was automatic.
+ * ------------------------------------------------------------------------ */
+
+test('a finished two-iteration run survives closing and reopening the application', async () => {
+  const prepared = await prepare({
+    orchestratorScript: [
+      () => delegate('Crie hello.txt'),
+      (input: AgentInput) => {
+        const observed = /hello\.txt is "([^"]*)"/.exec(input.prompt)?.[1];
+        return delegate(
+          `A tentativa anterior gravou ${JSON.stringify(observed)}. ` +
+            `Corrija hello.txt para conter exatamente ${JSON.stringify(EXPECTED)}.`,
+        );
+      },
+      () => done(),
+    ],
+    workerScript: [
+      (input: AgentInput) => {
+        const wanted = /exatamente "([^"]*)"/.exec(input.prompt)?.[1];
+        writeFileSync(join(input.workingDirectory, 'hello.txt'), `${wanted ?? WRONG}\n`, 'utf8');
+        return wanted ? 'corrigido' : 'criado';
+      },
+    ],
+  });
+
+  const { fixture, repo, sessionId } = prepared;
+  let reopened: AppServices | null = null;
+  try {
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId, text: 'Crie hello.txt' }),
+    );
+    const finished = await fixture.services.orchestration.waitFor(sent.run.id);
+    assert.equal(finished.status, 'DONE');
+
+    // Close everything, then open the same data directory as a new process would.
+    await fixture.services.shutdown();
+    reopened = new AppServices({ paths: fixture.paths });
+    const db = reopened.database;
+
+    const run = db.runs.require(sent.run.id);
+    assert.equal(run.status, 'DONE');
+    assert.ok(run.iteration >= 2, `the run reached iteration ${run.iteration}`);
+    assert.ok(run.finished_at, 'the finish time was persisted');
+
+    // Steps: the loop's own trace, by iteration and phase.
+    const steps = db.runs.steps(sent.run.id);
+    const phasesAt = (iteration: number) =>
+      steps.filter((s) => s.iteration === iteration).map((s) => s.phase);
+    assert.ok(phasesAt(0).includes('baseline'));
+    for (const iteration of [1, 2]) {
+      for (const phase of ['orchestrator', 'worker', 'evidence', 'verification']) {
+        assert.ok(phasesAt(iteration).includes(phase), `iteration ${iteration} recorded ${phase}`);
+      }
+    }
+    assert.deepEqual(
+      steps.filter((s) => s.phase === 'orchestrator').map((s) => s.summary),
+      ['delegate', 'delegate', 'done'],
+      'every orchestrator decision was recorded, in order',
+    );
+    assert.equal(steps.filter((s) => s.phase === 'done-gate').at(-1)?.status, 'passed');
+
+    // Invocations: both agents, every turn, with the worker's prompts intact.
+    const invocations = db.runs.invocations(sent.run.id) as Array<{
+      role: string;
+      iteration: number;
+      task: string | null;
+      outcome: string;
+      exit_code: number | null;
+      duration_ms: number | null;
+    }>;
+    const workers = invocations.filter((i) => i.role === 'CODING_WORKER');
+    const orchestrators = invocations.filter((i) => i.role === 'ORCHESTRATOR');
+    assert.equal(workers.length, 2);
+    assert.equal(orchestrators.length, 3);
+    assert.deepEqual(workers.map((i) => i.iteration), [1, 2]);
+    assert.ok(invocations.every((i) => i.outcome === 'completed' && i.exit_code === 0));
+    assert.ok(invocations.every((i) => typeof i.duration_ms === 'number'));
+    // The persisted second prompt is the proof that the reprompt was automatic,
+    // and it must still be there after the restart.
+    assert.equal(workers[0]!.task, 'Crie hello.txt');
+    assert.ok(workers[1]!.task?.includes(WRONG), 'the second prompt still carries the observed value');
+    assert.ok(workers[1]!.task?.includes(EXPECTED));
+
+    // Verifications: the failure and the pass, each on its own iteration.
+    const verifications = db.runs.verifications(sent.run.id) as Array<{
+      iteration: number;
+      passed: number;
+      exit_code: number | null;
+    }>;
+    assert.equal(verifications.find((v) => v.iteration === 1)?.passed, 0);
+    assert.equal(verifications.find((v) => v.iteration === 1)?.exit_code, 1);
+    assert.equal(verifications.find((v) => v.iteration === 2)?.passed, 1);
+
+    // Chat: one message from the user, the rest from the loop.
+    const messages = db.chat.listMessages(sessionId);
+    assert.equal(messages.filter((m) => m.author === 'user').length, 1);
+    assert.ok(messages.some((m) => m.author === 'orchestrator'));
+    assert.ok(messages.some((m) => m.author === 'worker'));
+    assert.ok(messages.every((m) => m.run_id === sent.run.id || m.author === 'user'));
+  } finally {
+    // The fixture's own cleanup would close a database that is already closed,
+    // so the teardown is done by hand: stop the reopened services, then remove
+    // both directories.
+    await reopened?.shutdown();
+    rmSync(fixture.paths.root, { recursive: true, force: true });
+    repo.cleanup();
   }
 });
