@@ -32,4 +32,6 @@ profiles/**/.claude.json
 apps/desktop/dist/
 apps/desktop/dist-renderer/
 apps/desktop/release/
+# electron-builder writes here when it is run from the repository root
+release/
 out/
