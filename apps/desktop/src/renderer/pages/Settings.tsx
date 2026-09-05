@@ -31,6 +31,7 @@ import type {
   AppInfo,
   DiagnosticView,
   ProviderName,
+  VerificationView,
   WorkspaceView,
 } from "@shared/ipc-contract";
 
@@ -40,6 +41,7 @@ const tabs = [
   { id: "agents", label: "Agents" },
   { id: "accounts", label: "Accounts & Integrations" },
   { id: "execution", label: "Execution" },
+  { id: "verifications", label: "Verificações do projeto" },
   { id: "git", label: "Git" },
   { id: "advanced", label: "Advanced" },
   { id: "developer", label: "Developer Mode" },
@@ -222,6 +224,10 @@ export function SettingsPage({
                 a pasta isolada da conta, e exige confirmação.
               </p>
             </div>
+          )}
+
+          {active === "verifications" && (
+            <VerificationsTab workspace={workspace} />
           )}
 
           {active === "execution" && (
@@ -429,6 +435,258 @@ export function SettingsPage({
               }}
             >
               Remover conta
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+/**
+ * The project's verifications.
+ *
+ * Configuration, not a console: what a person writes here is stored as a
+ * `verification_definition`, and the orchestration loop later asks for it *by
+ * id* and runs the stored command. Nothing typed here runs when it is saved,
+ * and no agent can reach this screen. The main process screens each command
+ * with the same rule the Verifier applies, so a command it would refuse is
+ * refused while the person is still looking at it.
+ */
+function VerificationsTab({ workspace }: { workspace: WorkspaceView | null }) {
+  const [items, setItems] = useState<readonly VerificationView[] | null>(null);
+  const [editing, setEditing] = useState<{ mode: "create" | "edit"; item: VerificationView | null } | null>(null);
+  const [removing, setRemoving] = useState<VerificationView | null>(null);
+  const [form, setForm] = useState({ id: "", label: "", command: "" });
+  const [saving, setSaving] = useState(false);
+
+  const fail = (e: unknown) => toast(messageOf(e));
+  const workspaceId = workspace?.id ?? null;
+
+  const refresh = () => {
+    if (!workspaceId) return;
+    void api.verifications
+      .list({ workspaceId })
+      .then((rows) => setItems(rows))
+      .catch((e: unknown) => {
+        setItems([]);
+        fail(e);
+      });
+  };
+
+  useEffect(refresh, [workspaceId]);
+
+  if (!workspace) {
+    return (
+      <p className="mt-8 text-sm text-muted-foreground">
+        Escolha um projeto para configurar as verificações dele.
+      </p>
+    );
+  }
+
+  const openCreate = () => {
+    setForm({ id: "", label: "", command: "" });
+    setEditing({ mode: "create", item: null });
+  };
+  const openEdit = (item: VerificationView) => {
+    setForm({ id: item.id, label: item.label, command: item.command });
+    setEditing({ mode: "edit", item });
+  };
+
+  const submit = () => {
+    if (!editing) return;
+    setSaving(true);
+    const done = () => {
+      setSaving(false);
+      setEditing(null);
+      refresh();
+    };
+    const failed = (e: unknown) => {
+      setSaving(false);
+      fail(e);
+    };
+    if (editing.mode === "create") {
+      void api.verifications
+        .create({
+          workspaceId: workspace.id,
+          id: form.id.trim(),
+          label: form.label.trim(),
+          command: form.command.trim(),
+        })
+        .then(done)
+        .catch(failed);
+    } else {
+      void api.verifications
+        .update({
+          workspaceId: workspace.id,
+          id: editing.item!.id,
+          label: form.label.trim(),
+          command: form.command.trim(),
+        })
+        .then(done)
+        .catch(failed);
+    }
+  };
+
+  const toggle = (item: VerificationView, enabled: boolean) => {
+    void api.verifications
+      .update({ workspaceId: workspace.id, id: item.id, enabled })
+      .then(refresh)
+      .catch(fail);
+  };
+
+  return (
+    <div className="mt-8 space-y-6">
+      <p className="text-sm text-muted-foreground">
+        O orquestrador pede uma verificação <strong className="text-foreground/85">pelo id</strong>{" "}
+        e o aplicativo executa o comando salvo aqui. Um id que não existe, ou que está desativado,
+        é recusado — nunca adivinhado.
+      </p>
+
+      <button
+        data-testid="add-verification"
+        onClick={openCreate}
+        className="flex w-full items-center gap-2 rounded-lg border border-dashed border-border px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:text-primary"
+      >
+        <Plus className="size-3.5" /> Adicionar verificação
+      </button>
+
+      {items === null ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" /> Carregando…
+        </div>
+      ) : items.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          Nenhuma verificação cadastrada neste projeto.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {items.map((item) => (
+            <div key={item.id} className="rounded-lg border border-border bg-surface p-4">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-sm font-semibold">{item.id}</span>
+                <span
+                  className={cn(
+                    "ml-auto text-xs",
+                    item.enabled ? "text-success" : "text-muted-foreground",
+                  )}
+                >
+                  {item.enabled ? "Ativa" : "Desativada"}
+                </span>
+                <Switch
+                  data-testid={`toggle-${item.id}`}
+                  checked={item.enabled}
+                  onCheckedChange={(v) => toggle(item, v === true)}
+                />
+              </div>
+              <p className="mt-2 text-sm">{item.label}</p>
+              <p className="mt-1 font-mono text-xs text-muted-foreground">{item.command}</p>
+              <div className="mt-3 flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  data-testid={`edit-${item.id}`}
+                  onClick={() => openEdit(item)}
+                >
+                  Editar
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-danger hover:text-danger"
+                  data-testid={`remove-${item.id}`}
+                  onClick={() => setRemoving(item)}
+                >
+                  Remover
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <Dialog open={editing !== null} onOpenChange={(v) => !v && setEditing(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-sm">
+              {editing?.mode === "edit" ? `Editar ${editing.item?.id}` : "Adicionar verificação"}
+            </DialogTitle>
+            <DialogDescription>
+              O comando roda na pasta do projeto, sem shell. O aplicativo recusa operadores de
+              shell e comandos git destrutivos.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Input
+              value={form.id}
+              disabled={editing?.mode === "edit"}
+              onChange={(e) => setForm((f) => ({ ...f, id: e.target.value }))}
+              placeholder="Id, ex.: typecheck"
+              data-testid="verification-id"
+            />
+            <Input
+              value={form.label}
+              onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+              placeholder="Nome, ex.: TypeScript typecheck"
+              data-testid="verification-label"
+            />
+            <Input
+              value={form.command}
+              onChange={(e) => setForm((f) => ({ ...f, command: e.target.value }))}
+              placeholder="Comando, ex.: npm run typecheck"
+              className="font-mono"
+              data-testid="verification-command"
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setEditing(null)}>
+              Voltar
+            </Button>
+            <Button
+              data-testid="save-verification"
+              disabled={
+                saving ||
+                !form.label.trim() ||
+                !form.command.trim() ||
+                (editing?.mode === "create" && !form.id.trim())
+              }
+              onClick={submit}
+            >
+              Salvar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!removing} onOpenChange={(v) => !v && setRemoving(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-sm">Remover {removing?.id}?</DialogTitle>
+            <DialogDescription>
+              O projeto deixa de oferecer esta verificação ao orquestrador. O histórico dos runs
+              anteriores não muda.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRemoving(null)}>
+              Voltar
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                const target = removing;
+                setRemoving(null);
+                if (!target) return;
+                void api.verifications
+                  .remove({ workspaceId: workspace.id, id: target.id })
+                  .then(() => {
+                    refresh();
+                    toast(`${target.id} removida`);
+                  })
+                  .catch(fail);
+              }}
+            >
+              Remover verificação
             </Button>
           </DialogFooter>
         </DialogContent>
