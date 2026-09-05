@@ -9,11 +9,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AppServices } from '../apps/desktop/src/main/services/app-services.js';
 import { createGitFixture, type GitFixture } from './helpers/git-fixture.js';
 import { createDesktopFixture, HangingAgent, ScriptedAgent } from './helpers/desktop-fixture.js';
+import { loadTwoStageCheck } from './helpers/two-stage-check.js';
 import type { DesktopFixture } from './helpers/desktop-fixture.js';
 import type { IpcResult } from '../apps/desktop/src/shared/ipc-contract.js';
 import type { AgentInput } from '../src/core/types.js';
@@ -62,8 +63,12 @@ async function prepare(options: {
   workerScript?: ReadonlyArray<string | ((input: AgentInput) => string)>;
   workerAgent?: HangingAgent;
   maxIterations?: number;
+  /** The workspace to use instead of the default scratch repository. */
+  repository?: () => GitFixture;
+  /** The verification to register instead of the default in-workspace check. */
+  verification?: { id: string; label: string; command: string };
 }): Promise<Prepared & { orchestrator: ScriptedAgent; worker: ScriptedAgent | HangingAgent }> {
-  const repo = scratchRepository();
+  const repo = options.repository ? options.repository() : scratchRepository();
   const orchestrator = new ScriptedAgent('mock-codex', 'Codex', options.orchestratorScript);
   const worker: ScriptedAgent | HangingAgent =
     options.workerAgent ?? new ScriptedAgent('mock-claude', 'Claude', options.workerScript ?? ['']);
@@ -77,10 +82,12 @@ async function prepare(options: {
     await fixture.router.handle('workspace.create', { name: 'Scratch', localPath: repo.dir }),
   );
   fixture.services.database.verifications.upsert({
-    id: 'hello-exists',
     workspaceId: workspace.id,
-    label: 'hello.txt tem o conteúdo exato',
-    command: 'node check.mjs',
+    ...(options.verification ?? {
+      id: 'hello-exists',
+      label: 'hello.txt tem o conteúdo exato',
+      command: 'node check.mjs',
+    }),
   });
 
   value(await fixture.router.handle('accounts.create', { name: 'Claude Trabalho', provider: 'anthropic' }));
@@ -751,5 +758,156 @@ test('a finished two-iteration run survives closing and reopening the applicatio
     await reopened?.shutdown();
     rmSync(fixture.paths.root, { recursive: true, force: true });
     repo.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------------ *
+ * A second iteration by construction.
+ *
+ * The reactive test above proves the reprompt closes the chain, but it makes
+ * the first attempt fall short by having the worker write the wrong value.
+ * A real worker would not: it writes "Olá" correctly first time, verification
+ * passes, and a two-iteration proof never happens. So the real-provider smoke
+ * uses a different scenario, and this test is that scenario run with fake
+ * agents - the same check script, from the same source, kept outside the
+ * workspace.
+ *
+ * The verification has two stages. The objective names only the first
+ * (hello.txt). The second (bye.txt) is reported only once the first holds,
+ * by a script neither agent can see: the orchestrator is shown a
+ * verification's id and label, never its command, and the worker is shown
+ * only the task it is given. A worker that follows every instruction to the
+ * letter therefore still fails the first verification, and the only place
+ * the second requirement ever appears before the second prompt is that
+ * failure's output. If a second worker prompt carries it, it came through
+ * verification -> feedback -> orchestrator -> decision.task, and nowhere else.
+ * ------------------------------------------------------------------------ */
+
+const SECOND_STAGE = { file: 'bye.txt', content: 'Tchau' };
+
+test('a two-stage verification forces a second iteration from a worker that follows every instruction', async () => {
+  const { writeTwoStageCheck } = await loadTwoStageCheck();
+  const check = writeTwoStageCheck({ hello: EXPECTED, then: SECOND_STAGE, prefix: 'lao-two-stage-check-' });
+
+  // What the orchestrator answered, turn by turn, to compare with what the
+  // loop then handed the worker.
+  const decisions: Array<{ action: string; task?: string }> = [];
+  const decide = (decision: { action: string; task?: string }): string => {
+    decisions.push(decision);
+    return JSON.stringify({
+      acceptanceCriteria: [],
+      verificationCommands: ['two-stage'],
+      summary: decision.action,
+      ...decision,
+    });
+  };
+
+  // The one message from the user. It says nothing about the second stage.
+  const objective =
+    `Crie hello.txt contendo exatamente "${EXPECTED}". A verificação registrada é o critério ` +
+    'completo: peça-a por id e, se ela falhar, delegue a correção que ela reportar.';
+
+  const prepared = await prepare({
+    repository: () => {
+      const repo = createGitFixture('lao-two-stage-');
+      repo.write('README.md', '# scratch\n');
+      repo.commitAll('baseline');
+      return repo;
+    },
+    verification: { id: 'two-stage', label: 'o workspace passa na verificação registrada', command: check.command },
+    orchestratorScript: [
+      (input: AgentInput) => {
+        assert.doesNotMatch(input.prompt, /RESULT OF THE PREVIOUS ITERATION/);
+        assert.doesNotMatch(input.prompt, /check\.mjs/, 'the command line is never shown to the orchestrator');
+        return decide({ action: 'delegate', task: `Crie hello.txt contendo exatamente "${EXPECTED}"` });
+      },
+      (input: AgentInput) => {
+        assert.match(input.prompt, /FAIL \(exit 1\)/, 'the first verification failed');
+        // Read what is missing from the verification's own output, and ask
+        // for exactly that. The file name and content exist nowhere else.
+        const missing = /(\S+) is null, expected "([^"]*)"/.exec(input.prompt);
+        assert.ok(missing, 'the failure names what is missing');
+        return decide({ action: 'delegate', task: `Crie ${missing[1]} contendo exatamente "${missing[2]}"` });
+      },
+      (input: AgentInput) => {
+        assert.match(input.prompt, /PASS: node /, 'the second verification passed');
+        return decide({ action: 'done' });
+      },
+    ],
+    workerScript: [
+      // A perfect worker: it does exactly what it is told, every time.
+      (input: AgentInput) => {
+        const order = /Crie (\S+) contendo exatamente "([^"]*)"/.exec(input.prompt);
+        assert.ok(order, 'the worker only ever receives a concrete instruction');
+        writeFileSync(join(input.workingDirectory, order[1]!), `${order[2]}\n`, 'utf8');
+        return 'feito';
+      },
+    ],
+  });
+
+  try {
+    // The script is outside the workspace, so nothing in the repository can
+    // reveal the second stage.
+    assert.equal(existsSync(join(prepared.repo.dir, 'check.mjs')), false);
+    assert.ok(!check.dir.startsWith(prepared.repo.dir));
+    assert.doesNotMatch(objective, new RegExp(`${SECOND_STAGE.file}|${SECOND_STAGE.content}`));
+
+    const sent = value<{ run: { id: string } }>(
+      await prepared.fixture.router.handle('chat.sendMessage', {
+        sessionId: prepared.sessionId,
+        text: objective,
+      }),
+    );
+    const run = await prepared.fixture.services.orchestration.waitFor(sent.run.id);
+    assert.equal(run.status, 'DONE', run.summary ?? '');
+
+    // -- two worker turns, from one message, on consecutive iterations ------
+    const db = prepared.fixture.services.database;
+    const invocations = db.runs.invocations(sent.run.id) as Array<{
+      role: string;
+      iteration: number;
+      task: string | null;
+    }>;
+    const workers = invocations.filter((i) => i.role === 'CODING_WORKER');
+    assert.equal(workers.length, 2, 'the worker ran exactly twice');
+    assert.deepEqual(workers.map((i) => i.iteration), [1, 2]);
+    assert.equal(invocations.filter((i) => i.role === 'ORCHESTRATOR').length, 3);
+    assert.equal(db.chat.listMessages(prepared.sessionId).filter((m) => m.author === 'user').length, 1);
+
+    // -- the first prompt could not have known about the second stage -------
+    const worker = prepared.worker as ScriptedAgent;
+    const [first, second] = worker.calls.map((c) => c.prompt);
+    assert.doesNotMatch(first!, new RegExp(`${SECOND_STAGE.file}|${SECOND_STAGE.content}`));
+
+    // -- and the second is the orchestrator's decision, verbatim ------------
+    assert.equal(decisions[1]!.action, 'delegate');
+    assert.equal(second, decisions[1]!.task, 'the worker received decision.task unchanged');
+    assert.equal(workers[1]!.task, decisions[1]!.task, 'and the database recorded the same');
+    assert.notEqual(second, objective, 'not the objective handed down again');
+    assert.equal(second, `Crie ${SECOND_STAGE.file} contendo exatamente "${SECOND_STAGE.content}"`);
+
+    // -- the verdicts that drove it: a failure, then a pass -----------------
+    const verifications = db.runs.verifications(sent.run.id) as Array<{
+      iteration: number;
+      command: string;
+      passed: number;
+      exit_code: number | null;
+    }>;
+    assert.equal(verifications.find((v) => v.iteration === 1)?.passed, 0);
+    assert.equal(verifications.find((v) => v.iteration === 1)?.exit_code, 1);
+    assert.equal(verifications.find((v) => v.iteration === 2)?.passed, 1);
+    assert.ok(verifications.every((v) => v.command === check.command), 'only the registered command ran');
+
+    // -- the evidence the loop collected itself, not the agents' word -------
+    const evidence = db.runs.steps(sent.run.id).filter((s) => s.phase === 'evidence');
+    assert.deepEqual(
+      evidence.map((s) => `${s.iteration}:${s.status}:${s.summary}`),
+      ['1:changed:1 arquivo(s)', '2:changed:2 arquivo(s)', '3:changed:2 arquivo(s)'],
+    );
+    assert.equal(readFileSync(join(prepared.repo.dir, 'hello.txt'), 'utf8').trim(), EXPECTED);
+    assert.equal(readFileSync(join(prepared.repo.dir, SECOND_STAGE.file), 'utf8').trim(), SECOND_STAGE.content);
+  } finally {
+    await prepared.cleanup();
+    rmSync(check.dir, { recursive: true, force: true });
   }
 });
