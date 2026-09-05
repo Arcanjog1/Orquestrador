@@ -461,6 +461,15 @@ export function LoginDialog({
   const done = stage === "connected";
   const failed = stage === "failed" || stage === "cancelled";
 
+  // A connected account closes the dialog by itself, after the confirmation
+  // has been on screen long enough to be read. Failure stays open: it carries
+  // the reason and the retry button.
+  useEffect(() => {
+    if (!open || !done) return;
+    const timer = setTimeout(() => onOpenChange(false), 1500);
+    return () => clearTimeout(timer);
+  }, [open, done, onOpenChange]);
+
   return (
     <Dialog
       open={open}
