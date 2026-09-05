@@ -14,7 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createGitFixture, type GitFixture } from './helpers/git-fixture.js';
 import { createDesktopFixture, ScriptedAgent } from './helpers/desktop-fixture.js';
@@ -600,6 +600,242 @@ test('an id that is not registered, or is disabled, is refused rather than run',
       .steps(sent.run.id)
       .filter((s) => s.phase === 'done-gate');
     assert.ok(gate.length > 0 && gate.every((g) => g.status === 'rejected'), 'the gate refused');
+  } finally {
+    await fixture.cleanup();
+    repo.cleanup();
+  }
+});
+
+/* ------------------------------------------------- a verification a person
+ * can register without leaving the application.
+ *
+ * The scenarios above register `node check.mjs`, which assumes somebody put a
+ * script in the project first - a text editor or a terminal, before the
+ * application is any use. That is the last step of the loop a person could not
+ * do from the window.
+ *
+ * A command line is enough on its own, as long as it survives the screen: no
+ * shell operator, so no `;`, `>`, `<`, `|`, backtick or `$(`. A JavaScript
+ * expression written without those - commas and ternaries instead of
+ * statements - passes the screen, tokenises into three arguments and runs
+ * without a shell, exactly like any other verification.
+ *
+ * These two tests pin the exact commands the documentation tells a person to
+ * paste, so a change to the screen or the tokeniser that would break them
+ * fails here rather than in front of a user.
+ * ------------------------------------------------------------------------ */
+
+/** Reads a file and trims it, or gives null. One expression, no separators. */
+const READ_FILE =
+  "(function(f){try{return require('fs').readFileSync(f,'utf8').trim()}catch(e){return null}})";
+
+/** Passes only when hello.txt holds exactly the agreed text. */
+const HELLO_EXACT =
+  `node -e "process.exit(${READ_FILE}('hello.txt')==='${EXPECTED}'?0:` +
+  `(console.error('hello.txt is '+JSON.stringify(${READ_FILE}('hello.txt'))+', expected ${EXPECTED}'),1))"`;
+
+/**
+ * The same, plus a second stage that is only ever reported once the first
+ * holds. The objective never mentions bye.txt, so the only place its name can
+ * come from is this command's own output on a failing run.
+ */
+const HELLO_THEN_BYE =
+  `node -e "process.exit((function(h,b){return h!=='${EXPECTED}'?` +
+  `(console.error('hello.txt is '+JSON.stringify(h)+', expected ${EXPECTED}'),1):` +
+  `b!=='Tchau'?(console.error('bye.txt is '+JSON.stringify(b)+', expected Tchau'),1):0})` +
+  `(${READ_FILE}('hello.txt'),${READ_FILE}('bye.txt')))"`;
+
+test('the commands the documentation tells a person to paste are the tested ones', () => {
+  // docs/PROVA_LOOP_REAL.md is the roteiro a person follows with the real
+  // accounts: it says to paste these two lines into the dialog. If the screen,
+  // the tokeniser or the expected text ever changes, the failure belongs here
+  // and not in front of somebody halfway through the proof.
+  const roteiro = readFileSync(join(process.cwd(), 'docs', 'PROVA_LOOP_REAL.md'), 'utf8');
+  const fenced = [...roteiro.matchAll(/```\n(node -e[\s\S]*?)\n```/g)].map((m) => m[1]!.trim());
+  assert.deepEqual(fenced, [HELLO_EXACT, HELLO_THEN_BYE], 'the roteiro is out of step with the tests');
+});
+
+test('a verification typed straight into the interface needs no file in the project', async () => {
+  const repo = createGitFixture('lao-verif-typed-');
+  repo.write('README.md', '# scratch\n');
+  repo.commitAll('baseline');
+
+  const orchestrator = new ScriptedAgent('mock-codex', 'Codex', [
+    () => decision('delegate', 'Crie hello.txt com o conteúdo combinado'),
+    () => decision('done'),
+  ]);
+  const worker = new ScriptedAgent('mock-claude', 'Claude', [
+    (input: AgentInput) => {
+      writeFileSync(join(input.workingDirectory, 'hello.txt'), `${EXPECTED}\n`, 'utf8');
+      return 'criado';
+    },
+  ]);
+  const fixture = createDesktopFixture({
+    createRunners: async () => ({ orchestrator, worker, workerAccountId: null }),
+  });
+
+  try {
+    const workspaceId = await addWorkspace(fixture, repo, 'Projeto');
+    // The whole configuration is this one call - what the dialog sends.
+    value(
+      await fixture.router.handle('verifications.create', {
+        workspaceId,
+        id: 'gui-check',
+        label: 'Hello exact content',
+        command: HELLO_EXACT,
+      }),
+    );
+    // The project still has nothing in it but the README.
+    assert.equal(existsSync(join(repo.dir, 'check.mjs')), false);
+
+    value(await fixture.router.handle('accounts.create', { name: 'Claude', provider: 'anthropic' }));
+    const agents = value<Array<{ id: string; role: string }>>(
+      await fixture.router.handle('agents.list', null),
+    );
+    value(
+      await fixture.router.handle('workspace.setAgents', {
+        workspaceId,
+        orchestratorAgentId: agents.find((a) => a.role === 'ORCHESTRATOR')!.id,
+        workerAgentId: agents.find((a) => a.role === 'CODING_WORKER')!.id,
+      }),
+    );
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId, title: 'Conversa' }),
+    );
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', {
+        sessionId: session.id,
+        text: `Crie um arquivo chamado hello.txt contendo exatamente: ${EXPECTED}`,
+      }),
+    );
+    const run = await fixture.services.orchestration.waitFor(sent.run.id);
+
+    const results = fixture.services.database.runs.verifications(sent.run.id) as Array<{
+      command: string;
+      passed: number;
+      exit_code: number | null;
+    }>;
+    assert.ok(results.length > 0, 'the typed command really ran');
+    assert.ok(results.every((r) => r.command === HELLO_EXACT), 'and it ran verbatim');
+    assert.ok(results.every((r) => r.passed === 1 && r.exit_code === 0));
+    assert.equal(run.status, 'DONE');
+    assert.equal(readFileSync(join(repo.dir, 'hello.txt'), 'utf8').trim(), EXPECTED);
+  } finally {
+    await fixture.cleanup();
+    repo.cleanup();
+  }
+});
+
+test('a two-stage command typed into the interface drives a second iteration', async () => {
+  const repo = createGitFixture('lao-verif-staged-');
+  repo.write('README.md', '# scratch\n');
+  repo.commitAll('baseline');
+
+  // What the orchestrator answered, to compare with what the worker received.
+  const tasks: string[] = [];
+  const orchestrator = new ScriptedAgent('mock-codex', 'Codex', [
+    (input: AgentInput) => {
+      assert.doesNotMatch(input.prompt, /bye\.txt|Tchau/, 'nothing yet knows about the second stage');
+      const task = `Crie hello.txt contendo exatamente "${EXPECTED}"`;
+      tasks.push(task);
+      return decision('delegate', task);
+    },
+    (input: AgentInput) => {
+      // Read what is missing out of the verification's own output.
+      assert.match(input.prompt, /FAIL \(exit 1\)/);
+      const missing = /(\S+) is null, expected (\S+)/.exec(input.prompt);
+      assert.ok(missing, 'the failure names what is still missing');
+      const task = `Crie ${missing[1]} contendo exatamente "${missing[2]}"`;
+      tasks.push(task);
+      return decision('delegate', task);
+    },
+    (input: AgentInput) => {
+      assert.match(input.prompt, /PASS: node -e/, 'the passing run was reported back');
+      return decision('done');
+    },
+  ]);
+  const worker = new ScriptedAgent('mock-claude', 'Claude', [
+    (input: AgentInput) => {
+      const order = /Crie (\S+) contendo exatamente "([^"]*)"/.exec(input.prompt);
+      assert.ok(order, 'the worker only ever receives a concrete instruction');
+      writeFileSync(join(input.workingDirectory, order[1]!), `${order[2]}\n`, 'utf8');
+      return 'feito';
+    },
+  ]);
+  const fixture = createDesktopFixture({
+    createRunners: async () => ({ orchestrator, worker, workerAccountId: null }),
+  });
+
+  try {
+    const workspaceId = await addWorkspace(fixture, repo, 'Projeto');
+    value(
+      await fixture.router.handle('verifications.create', {
+        workspaceId,
+        id: 'gui-check',
+        label: 'Hello exact content',
+        command: HELLO_THEN_BYE,
+      }),
+    );
+
+    value(await fixture.router.handle('accounts.create', { name: 'Claude', provider: 'anthropic' }));
+    const agents = value<Array<{ id: string; role: string }>>(
+      await fixture.router.handle('agents.list', null),
+    );
+    value(
+      await fixture.router.handle('workspace.setAgents', {
+        workspaceId,
+        orchestratorAgentId: agents.find((a) => a.role === 'ORCHESTRATOR')!.id,
+        workerAgentId: agents.find((a) => a.role === 'CODING_WORKER')!.id,
+      }),
+    );
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId, title: 'Conversa' }),
+    );
+
+    // One message, naming only hello.txt.
+    const objective = `Crie um arquivo chamado hello.txt contendo exatamente: ${EXPECTED}. Depois verifique se ele foi criado corretamente.`;
+    assert.doesNotMatch(objective, /bye\.txt|Tchau/);
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: objective }),
+    );
+    const run = await fixture.services.orchestration.waitFor(sent.run.id);
+    assert.equal(run.status, 'DONE', run.summary ?? '');
+
+    const db = fixture.services.database;
+    const invocations = db.runs.invocations(sent.run.id) as Array<{
+      role: string;
+      iteration: number;
+      task: string | null;
+    }>;
+    const workers = invocations.filter((i) => i.role === 'CODING_WORKER');
+
+    assert.equal(db.chat.listMessages(session.id).filter((m) => m.author === 'user').length, 1);
+    assert.equal(workers.length, 2);
+    assert.equal(invocations.filter((i) => i.role === 'ORCHESTRATOR').length, 3);
+    assert.deepEqual(workers.map((i) => i.iteration), [1, 2]);
+
+    // The second prompt is the orchestrator's own decision, and it names the
+    // file that existed nowhere but in the verification's failure output.
+    assert.doesNotMatch(workers[0]!.task ?? '', /bye\.txt|Tchau/);
+    assert.equal(workers[1]!.task, tasks[1], 'the worker received decision.task unchanged');
+    assert.equal(workers[1]!.task, 'Crie bye.txt contendo exatamente "Tchau"');
+
+    const verifications = db.runs.verifications(sent.run.id) as Array<{
+      iteration: number;
+      command: string;
+      passed: number;
+      exit_code: number | null;
+    }>;
+    assert.equal(verifications.find((v) => v.iteration === 1)?.passed, 0);
+    assert.equal(verifications.find((v) => v.iteration === 1)?.exit_code, 1);
+    assert.equal(verifications.find((v) => v.iteration === 2)?.passed, 1);
+    assert.ok(verifications.every((v) => v.command === HELLO_THEN_BYE));
+
+    assert.deepEqual(
+      db.runs.steps(sent.run.id).filter((s) => s.phase === 'done-gate').map((s) => s.status),
+      ['passed'],
+    );
+    assert.equal(readFileSync(join(repo.dir, 'bye.txt'), 'utf8').trim(), 'Tchau');
   } finally {
     await fixture.cleanup();
     repo.cleanup();
