@@ -15,7 +15,13 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CodexAccountManager, extractDeviceCode, extractUrl } from '../src/accounts/codex-account-manager.js';
+import {
+  CodexAccountManager,
+  extractDeviceCode,
+  extractUrl,
+  stripAnsi,
+} from '../src/accounts/codex-account-manager.js';
+import { ProcessManager as RealProcessManager } from '../src/process/process-manager.js';
 import { ensureAppPaths, type AppPaths } from '../src/runtime/paths.js';
 import type { RuntimeManager } from '../src/runtime/runtime-manager.js';
 import type { ProcessManager, RunProcessOptions, ProcessResult } from '../src/process/process-manager.js';
@@ -33,6 +39,8 @@ function fixture(responses: (options: RunProcessOptions) => Partial<ProcessResul
   manager: CodexAccountManager;
   paths: AppPaths;
   calls: RunProcessOptions[];
+  /** How often the whole manager was cancelled - which a sign-in must never do. */
+  readonly cancelAllCalls: number;
   cleanup(): void;
 } {
   const root = mkdtempSync(join(tmpdir(), 'lao-codex-acc-'));
@@ -48,6 +56,7 @@ function fixture(responses: (options: RunProcessOptions) => Partial<ProcessResul
   });
 
   const calls: RunProcessOptions[] = [];
+  let cancelAllCalls = 0;
   const processManager = {
     async run(options: RunProcessOptions): Promise<ProcessResult> {
       calls.push(options);
@@ -68,7 +77,9 @@ function fixture(responses: (options: RunProcessOptions) => Partial<ProcessResul
         ...scripted,
       } as ProcessResult;
     },
-    async cancelAll(): Promise<void> {},
+    async cancelAll(): Promise<void> {
+      cancelAllCalls += 1;
+    },
     get liveCount(): number {
       return 0;
     },
@@ -84,9 +95,34 @@ function fixture(responses: (options: RunProcessOptions) => Partial<ProcessResul
     manager: new CodexAccountManager({ runtimeManager, paths, processManager }),
     paths,
     calls,
+    get cancelAllCalls() {
+      return cancelAllCalls;
+    },
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+/**
+ * Exactly what codex-cli 0.153.0 prints for `codex login --device-auth`
+ * (login/src/device_code_auth.rs, `device_code_prompt`), colour codes and all.
+ * The constants are unconditional in the CLI, so a pipe receives them too.
+ */
+const ANSI_BLUE = '\x1b[94m';
+const ANSI_GRAY = '\x1b[90m';
+const ANSI_RESET = '\x1b[0m';
+const DEVICE_PROMPT =
+  `\nWelcome to Codex [v${ANSI_GRAY}0.153.0${ANSI_RESET}]\n${ANSI_GRAY}OpenAI's command-line coding agent${ANSI_RESET}\n` +
+  '\nFollow these steps to sign in with ChatGPT using device code authorization:\n' +
+  `\n1. Open this link in your browser and sign in to your account\n   ${ANSI_BLUE}https://auth.openai.com/codex/device${ANSI_RESET}\n` +
+  `\n2. Enter this one-time code ${ANSI_GRAY}(expires in 15 minutes)${ANSI_RESET}\n   ${ANSI_BLUE}ABCD-EFGH${ANSI_RESET}\n` +
+  `\n${ANSI_GRAY}Continue only if you started this login in Codex. If a website or another person gave you this code, cancel.${ANSI_RESET}\n`;
+
+/** What the browser flow prints (cli/src/login.rs): the callback server first. */
+const BROWSER_PROMPT =
+  'Starting local login server on http://localhost:1455.\n' +
+  'If your browser did not open, navigate to this URL to authenticate:\n\n' +
+  'https://auth.openai.com/oauth/authorize?response_type=code&client_id=app&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=s\n\n' +
+  'On a remote or headless machine? Use `codex login --device-auth` instead.\n';
 
 test('each account gets its own CODEX_HOME inside the application folder', () => {
   const f = fixture(() => ({}));
@@ -262,4 +298,150 @@ test('the URL and device code are pulled out of real-looking CLI output', () => 
   assert.equal(extractDeviceCode(output), 'WXYZ-1234');
   assert.equal(extractUrl('nothing here'), null);
   assert.equal(extractDeviceCode('nothing here'), null);
+});
+
+/* ------------------------------------------------------------------------ *
+ * The Windows sign-in that never finished.
+ *
+ * Observed on the installed build: the browser opened, the person signed in,
+ * and landed on the ChatGPT home page while the application kept waiting.
+ * The CLI had printed the device-flow prompt with its colour codes, the URL
+ * handed to the browser ended in the reset sequence, and the code the person
+ * would have had to type was never found in the text at all. These tests use
+ * the CLI's real prompt, byte for byte.
+ * ------------------------------------------------------------------------ */
+
+test('the real 0.153.0 device-auth prompt yields a clean URL and the code', () => {
+  assert.equal(extractUrl(DEVICE_PROMPT), 'https://auth.openai.com/codex/device');
+  assert.equal(extractDeviceCode(DEVICE_PROMPT), 'ABCD-EFGH');
+  // Neither carries a trace of the colour codes that wrapped them.
+  assert.doesNotMatch(extractUrl(DEVICE_PROMPT)!, /\x1b/);
+  assert.equal(stripAnsi(`${ANSI_BLUE}x${ANSI_RESET}`), 'x');
+  // A longer code shape, should the service ever issue one, is read too.
+  assert.equal(extractDeviceCode(`code ${ANSI_BLUE}ABCDE-FGHIJ${ANSI_RESET}\n`), 'ABCDE-FGHIJ');
+});
+
+test('the browser flow prompt yields the sign-in address, not the local callback', () => {
+  assert.equal(
+    extractUrl(BROWSER_PROMPT),
+    'https://auth.openai.com/oauth/authorize?response_type=code&client_id=app&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=s',
+  );
+});
+
+test('a real device-flow sign-in opens the right page, shows the code and completes under one CODEX_HOME', async () => {
+  let signedIn = false;
+  const f = fixture((options) => {
+    const args = (options.args ?? []).join(' ');
+    if (args === 'login --help') return { stdout: '  --device-auth\n' };
+    if (args === 'login --device-auth') return { stdout: DEVICE_PROMPT };
+    if (args === 'login status') {
+      return signedIn ? { stdout: 'Logged in using ChatGPT\n' } : { stdout: 'Not logged in\n', exitCode: 1 };
+    }
+    return {};
+  });
+
+  try {
+    f.manager.createAccount(ACCOUNT);
+    const opened: string[] = [];
+    const phases: string[] = [];
+    let shownCode: string | undefined;
+
+    // The person completes the browser step a moment after the page opens:
+    // the CLI then writes the credential into this account's home.
+    const result = await f.manager.connect(ACCOUNT, {
+      openUrl: (url) => {
+        opened.push(url);
+        setTimeout(() => {
+          writeFileSync(join(f.manager.profileDirectory(ACCOUNT.id), 'auth.json'), '{}', 'utf8');
+          signedIn = true;
+        }, 300);
+      },
+      onProgress: (p) => {
+        phases.push(p.phase);
+        if (p.code) shownCode = p.code;
+      },
+      urlTimeoutMs: 3000,
+      completionTimeoutMs: 10_000,
+    });
+
+    assert.deepEqual(opened, ['https://auth.openai.com/codex/device'], 'exactly the page the CLI named');
+    assert.equal(shownCode, 'ABCD-EFGH', 'the one-time code reaches the interface');
+    assert.equal(result.state, 'connected');
+    assert.deepEqual(phases, ['starting', 'awaiting-browser', 'waiting-for-completion', 'connected']);
+
+    // Login and every status check ran under the same CODEX_HOME - the one the
+    // account owns - so the credential written by one is what the other sees.
+    const home = f.manager.profileDirectory(ACCOUNT.id);
+    const codexCalls = f.calls.filter((c) => (c.args ?? [])[0] === 'login' && (c.args ?? [])[1] !== '--help');
+    assert.ok(codexCalls.length >= 2);
+    for (const call of codexCalls) assert.equal(call.env?.['CODEX_HOME'], home);
+    assert.equal(f.cancelAllCalls, 0, 'a successful sign-in never touches other processes');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('giving up on a sign-in stops only that sign-in, and the manager keeps working', async () => {
+  // A real ProcessManager and a stand-in codex. The manager runs every codex
+  // command with the application root as its working directory, so a script
+  // named `login` there is what `node login ...` resolves to: `--help` offers
+  // the device flow, `--device-auth` prints the real prompt and then waits as
+  // the CLI does, and `status` says "Not logged in".
+  const root = mkdtempSync(join(tmpdir(), 'lao-codex-real-pm-'));
+  const paths = ensureAppPaths({
+    root,
+    runtimes: join(root, 'runtimes'),
+    profiles: join(root, 'profiles'),
+    data: join(root, 'data'),
+    logs: join(root, 'logs'),
+    artifacts: join(root, 'artifacts'),
+    updates: join(root, 'updates'),
+    staging: join(root, 'staging'),
+  });
+  writeFileSync(
+    join(root, 'login'),
+    [
+      "const args = process.argv.slice(2).join(' ');",
+      "if (args === '--help') { console.log('  --device-auth'); process.exit(0); }",
+      "if (args === 'status') { console.log('Not logged in'); process.exit(1); }",
+      "if (args === '--device-auth') { console.log(" + JSON.stringify(DEVICE_PROMPT) + '); setTimeout(() => {}, 60_000); }',
+    ].join('\n'),
+    'utf8',
+  );
+
+  const processManager = new RealProcessManager();
+  const runtimeManager = {
+    async getExecutablePath() {
+      return process.execPath;
+    },
+  } as unknown as RuntimeManager;
+  const manager = new CodexAccountManager({ runtimeManager, paths, processManager });
+
+  try {
+    manager.createAccount(ACCOUNT);
+    const opened: string[] = [];
+    const result = await manager.connect(ACCOUNT, {
+      openUrl: (url) => {
+        opened.push(url);
+      },
+      urlTimeoutMs: 15_000,
+      completionTimeoutMs: 2_500,
+    });
+
+    // The page was the right one, and nobody signed in, so the attempt failed.
+    assert.deepEqual(opened, ['https://auth.openai.com/codex/device']);
+    assert.equal(result.state, 'disconnected');
+
+    // The sign-in process was stopped - it was still waiting - and nothing
+    // else was: the manager accepts new work, and the next status check gets
+    // a real answer rather than a refusal.
+    assert.equal(processManager.liveCount, 0, 'the sign-in process did not outlive the attempt');
+    assert.equal(processManager.isCancelled, false, 'giving up did not cancel the whole manager');
+    const after = await manager.getStatus(ACCOUNT);
+    assert.equal(after.state, 'disconnected');
+    assert.equal(after.remedy, 'Conectar conta', 'the CLI answered; the check was not refused');
+  } finally {
+    await processManager.cancelAll(1000);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
