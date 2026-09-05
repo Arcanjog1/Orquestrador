@@ -273,6 +273,76 @@ test('a workspace added over IPC is persisted and listed back', async () => {
   }
 });
 
+test('a verification is added, edited and switched off on the real Settings screen', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-verif-'));
+  try {
+    // A project to configure, added the way the interface adds one.
+    const workspace = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Projeto verificado', localPath: dir })})`,
+    );
+    assert.equal(workspace.localPath, dir);
+
+    // Open Settings on the verifications tab. The hash router is the app's own;
+    // the reload is driven from here rather than from inside the page, because
+    // a navigation started by `executeJavaScript` tears down the very context
+    // that would resolve its promise.
+    await window.webContents.executeJavaScript(
+      `(() => { location.hash = '#/configuracoes?tab=verifications'; return true; })()`,
+    );
+    await reloadWindow(window);
+    await waitForText(window, /Verificações do projeto/, 15_000);
+    await waitForText(window, /Nenhuma verificação cadastrada/, 15_000);
+
+    // The screen configures whichever project the application has selected -
+    // its own rule, the first in the list - so the assertions follow that.
+    const selected = (await window.webContents.executeJavaScript('window.api.workspace.list()'))[0];
+    const stored = async () =>
+      window.webContents.executeJavaScript(
+        `window.api.verifications.list(${JSON.stringify({ workspaceId: selected.id })})`,
+      );
+
+    // Fill the real dialog and save it.
+    await click(window, 'add-verification');
+    await waitForText(window, /Adicionar verificação/, 10_000);
+    await type(window, 'verification-id', 'hello-exists');
+    await type(window, 'verification-label', 'hello.txt exato');
+    await type(window, 'verification-command', 'node check.mjs');
+    await click(window, 'save-verification');
+
+    // It appears on the screen the person is looking at...
+    const listed = await waitForText(window, /hello-exists/, 15_000);
+    assert.match(listed, /hello\.txt exato/);
+    assert.match(listed, /node check\.mjs/);
+    assert.match(listed, /Ativa/);
+
+    // ...and it really is in the table the orchestration loop reads.
+    assert.deepEqual(
+      (await stored()).map((v) => [v.id, v.label, v.command, v.enabled]),
+      [['hello-exists', 'hello.txt exato', 'node check.mjs', true]],
+    );
+
+    // Editing through the screen changes what is stored, and nothing else.
+    await click(window, 'edit-hello-exists');
+    await waitForText(window, /Editar hello-exists/, 10_000);
+    await type(window, 'verification-label', 'hello.txt exato (revisado)');
+    await click(window, 'save-verification');
+    await waitForText(window, /revisado/, 15_000);
+    const afterEdit = await stored();
+    assert.equal(afterEdit[0].label, 'hello.txt exato (revisado)');
+    assert.equal(afterEdit[0].command, 'node check.mjs', 'the command was not disturbed');
+    assert.equal(afterEdit[0].enabled, true);
+
+    // Switching it off is a real change of state, not a local one: a disabled
+    // verification is the one thing the loop refuses to run.
+    await click(window, 'toggle-hello-exists');
+    await waitForText(window, /Desativada/, 15_000);
+    assert.equal((await stored())[0].enabled, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /* ------------------------------------------------------------------ helpers */
 
 let sharedWindow = null;
@@ -318,6 +388,54 @@ async function openWindow() {
   });
   await sharedWindow.loadFile(join(bundles, 'index.html'));
   return sharedWindow;
+}
+
+/** Clicks the element carrying a `data-testid`, failing loudly if it is absent. */
+async function click(window, testid) {
+  const done = await window.webContents.executeJavaScript(`
+    (() => {
+      const el = document.querySelector('[data-testid="${testid}"]');
+      if (!el) return 'missing';
+      el.click();
+      return 'clicked';
+    })()
+  `);
+  if (done !== 'clicked') throw new Error(`no element with data-testid="${testid}"`);
+}
+
+/**
+ * Types into a controlled input the way React sees it.
+ *
+ * Setting `.value` directly would not reach React's state, so the native setter
+ * is used and an input event dispatched - the standard way to drive a
+ * controlled component from outside.
+ */
+async function type(window, testid, text) {
+  const done = await window.webContents.executeJavaScript(`
+    (() => {
+      const el = document.querySelector('[data-testid="${testid}"]');
+      if (!el) return 'missing';
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, ${JSON.stringify(text)});
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return 'typed';
+    })()
+  `);
+  if (done !== 'typed') throw new Error(`no input with data-testid="${testid}"`);
+}
+
+/** Reloads the page and resolves once the new document has finished loading. */
+async function reloadWindow(window) {
+  const loaded = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('reload did not finish')), 30_000);
+    window.webContents.once('did-finish-load', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  window.webContents.reload();
+  await loaded;
 }
 
 async function waitForText(window, pattern, timeoutMs) {
