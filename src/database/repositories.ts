@@ -619,11 +619,101 @@ export class VerificationDefinitionRepository extends Repository {
     );
   }
 
+  /**
+   * The definitions an orchestrator may ask for: enabled ones only.
+   *
+   * A disabled definition is deliberately invisible here, so `resolve` reports
+   * it as unknown and the loop refuses it rather than running it. The interface
+   * uses `listAll` instead, which is the only place a disabled row is seen.
+   */
   list(workspaceId: string): VerificationDefinitionRecord[] {
     return this.db.all<VerificationDefinitionRecord>(
       'SELECT * FROM verification_definitions WHERE workspace_id = ? AND enabled = 1 ORDER BY id',
       [workspaceId],
     );
+  }
+
+  /** Every definition of one workspace, enabled or not, for the interface. */
+  listAll(workspaceId: string): VerificationDefinitionRecord[] {
+    return this.db.all<VerificationDefinitionRecord>(
+      'SELECT * FROM verification_definitions WHERE workspace_id = ? ORDER BY id',
+      [workspaceId],
+    );
+  }
+
+  /**
+   * One definition, looked up by workspace *and* id.
+   *
+   * The workspace is part of the key, so a caller holding an id from another
+   * project gets nothing back rather than someone else's row.
+   */
+  find(workspaceId: string, id: string): VerificationDefinitionRecord | undefined {
+    return this.db.get<VerificationDefinitionRecord>(
+      'SELECT * FROM verification_definitions WHERE workspace_id = ? AND id = ?',
+      [workspaceId, id],
+    );
+  }
+
+  /**
+   * Adds a definition, refusing to overwrite one that already exists.
+   *
+   * `upsert` is the loader used by scripts and tests, where replacing is the
+   * point. A person adding a verification in the interface means to add one, so
+   * a clash is an error they can see rather than a silent replacement of the
+   * command a run may already depend on.
+   */
+  create(input: {
+    id: string;
+    workspaceId: string;
+    label: string;
+    command: string;
+    enabled?: boolean;
+  }): VerificationDefinitionRecord {
+    this.db.run(
+      'INSERT INTO verification_definitions (id, workspace_id, label, command, enabled, created_at) VALUES (?,?,?,?,?,?)',
+      [
+        input.id,
+        input.workspaceId,
+        input.label,
+        input.command,
+        input.enabled === false ? 0 : 1,
+        now(),
+      ],
+    );
+    return this.require(input.workspaceId, input.id);
+  }
+
+  /** Changes label, command and/or enabled on an existing definition. */
+  update(
+    workspaceId: string,
+    id: string,
+    changes: { label?: string; command?: string; enabled?: boolean },
+  ): VerificationDefinitionRecord {
+    const existing = this.require(workspaceId, id);
+    const label = changes.label ?? existing.label;
+    const command = changes.command ?? existing.command;
+    const enabled = changes.enabled === undefined ? existing.enabled : changes.enabled ? 1 : 0;
+    this.db.run(
+      'UPDATE verification_definitions SET label = ?, command = ?, enabled = ? WHERE workspace_id = ? AND id = ?',
+      [label, command, enabled, workspaceId, id],
+    );
+    return this.require(workspaceId, id);
+  }
+
+  /** Removes one definition. Past results keep their own copy of the command. */
+  remove(workspaceId: string, id: string): boolean {
+    this.require(workspaceId, id);
+    this.db.run('DELETE FROM verification_definitions WHERE workspace_id = ? AND id = ?', [
+      workspaceId,
+      id,
+    ]);
+    return true;
+  }
+
+  require(workspaceId: string, id: string): VerificationDefinitionRecord {
+    const found = this.find(workspaceId, id);
+    if (!found) throw new RecordNotFoundError('verification_definition', id);
+    return found;
   }
 
   /** Resolves requested ids to commands, reporting the ones that do not exist. */
