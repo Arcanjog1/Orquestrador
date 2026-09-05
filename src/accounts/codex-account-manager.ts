@@ -14,6 +14,13 @@
  *   codex login --with-api-key       reads a key from stdin
  *   codex login --with-access-token  reads a token from stdin
  *
+ * What `codex login --device-auth` actually prints (0.153.0,
+ * login/src/device_code_auth.rs) is a banner, then the verification URL and the
+ * one-time code, each wrapped in ANSI colour codes - unconditionally, pipe or
+ * terminal. Parsing therefore strips escape sequences first; without that the
+ * URL handed to the browser ends in the reset sequence and the sign-in page
+ * never loads, which is how this was found.
+ *
  * Two things this module refuses to get wrong, exactly as the Claude one does:
  * an ambient credential must never be reported as the account's own, and no
  * credential value is ever read or logged.
@@ -42,6 +49,15 @@ const CREDENTIALS_FILENAME = 'auth.json';
 
 /** What `codex login status` prints while signed out. */
 const SIGNED_OUT = /not\s+logged\s+in/i;
+
+/**
+ * How long a sign-in may take before the application gives up.
+ *
+ * A device code expires after fifteen minutes, so the CLI keeps polling for
+ * that long. Giving up sooner would leave the CLI still able to complete a
+ * login the application had already reported as failed.
+ */
+const DEVICE_CODE_TTL_MS = 15 * 60_000;
 
 export interface CodexAccountManagerOptions {
   runtimeManager: RuntimeManager;
@@ -218,14 +234,24 @@ export class CodexAccountManager {
 
     let output = '';
     let capturedUrl: string | null = null;
+    const completionTimeoutMs = options.completionTimeoutMs ?? DEVICE_CODE_TTL_MS;
+
+    // The sign-in process is stopped through its own signal, never through
+    // `cancelAll`: the process manager is shared with everything else the
+    // application runs, and a cancel there is sticky - every later process,
+    // including the status check that would show this account connected, is
+    // refused until restart.
+    const login = new AbortController();
+    if (options.signal?.aborted) login.abort();
+    options.signal?.addEventListener('abort', () => login.abort(), { once: true });
 
     const running = this.processManager.run({
       command: executable,
       args,
       cwd: this.paths.root,
       env: this.buildEnvironment(account.id),
-      timeoutMs: options.completionTimeoutMs ?? 600_000,
-      ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: completionTimeoutMs,
+      signal: login.signal,
       onStdout: (chunk) => {
         output += chunk;
       },
@@ -265,7 +291,7 @@ export class CodexAccountManager {
       message: 'Aguardando você concluir o login...',
     });
 
-    const completionDeadline = Date.now() + (options.completionTimeoutMs ?? 300_000);
+    const completionDeadline = Date.now() + completionTimeoutMs;
     let status = await this.getStatus(account);
     while (
       status.state !== 'connected' &&
@@ -280,7 +306,7 @@ export class CodexAccountManager {
       }
     }
 
-    if (!settled) await this.processManager.cancelAll(3000);
+    if (!settled) login.abort();
     await running.catch(() => undefined);
 
     if (status.state === 'connected') {
@@ -318,15 +344,35 @@ export class CodexAccountManager {
   }
 }
 
-/** First http(s) URL in some CLI output. Never logged: it can carry a code. */
-export function extractUrl(text: string): string | null {
-  const match = /https?:\/\/[^\s"'<>)\]]+/.exec(text);
-  return match ? match[0].replace(/[.,;]+$/, '') : null;
+/** Removes ANSI escape sequences (colours, cursor moves) from CLI output. */
+export function stripAnsi(text: string): string {
+  // CSI sequences (ESC [ ... final byte) and the odd lone ESC.
+  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\x1b/g, '');
 }
 
-/** The short confirmation code a device flow prints, when there is one. */
+/**
+ * The sign-in URL in some CLI output. Never logged: it can carry a code.
+ *
+ * An https URL is preferred over an http one: the browser flow announces its
+ * local callback server (`http://localhost:1455`) before the address the
+ * person must actually visit, and opening the callback is not signing in.
+ */
+export function extractUrl(text: string): string | null {
+  const clean = stripAnsi(text);
+  const all = clean.match(/https?:\/\/[^\s"'<>)\]\x00-\x1f]+/g) ?? [];
+  const chosen = all.find((u) => u.startsWith('https://')) ?? all[0];
+  return chosen ? chosen.replace(/[.,;]+$/, '') : null;
+}
+
+/**
+ * The one-time code a device flow prints, when there is one.
+ *
+ * Read from the text with its colour codes removed: the CLI wraps the code in
+ * them, and the escape sequence ends in a letter, so on the raw text there is
+ * no word boundary in front of the code and nothing would match.
+ */
 export function extractDeviceCode(text: string): string | null {
-  const match = /\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/.exec(text);
+  const match = /\b([A-Z0-9]{4,8}-[A-Z0-9]{4,8})\b/.exec(stripAnsi(text));
   return match ? match[1]! : null;
 }
 
