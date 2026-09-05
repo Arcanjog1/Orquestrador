@@ -650,9 +650,27 @@ test('the commands the documentation tells a person to paste are the tested ones
   // accounts: it says to paste these two lines into the dialog. If the screen,
   // the tokeniser or the expected text ever changes, the failure belongs here
   // and not in front of somebody halfway through the proof.
+  //
+  // The line endings are normalised first: a Windows checkout stores this file
+  // with CRLF, and a reader that assumes LF finds no commands at all - which is
+  // indistinguishable from a roteiro that lost them.
+  const commandsIn = (markdown: string): string[] =>
+    [...markdown.replace(/\r\n/g, '\n').matchAll(/```\n(node -e[\s\S]*?)\n```/g)].map((m) =>
+      m[1]!.trim(),
+    );
+
   const roteiro = readFileSync(join(process.cwd(), 'docs', 'PROVA_LOOP_REAL.md'), 'utf8');
-  const fenced = [...roteiro.matchAll(/```\n(node -e[\s\S]*?)\n```/g)].map((m) => m[1]!.trim());
-  assert.deepEqual(fenced, [HELLO_EXACT, HELLO_THEN_BYE], 'the roteiro is out of step with the tests');
+  assert.deepEqual(
+    commandsIn(roteiro),
+    [HELLO_EXACT, HELLO_THEN_BYE],
+    'the roteiro is out of step with the tests',
+  );
+  // The same file as a Windows checkout hands it over.
+  assert.deepEqual(
+    commandsIn(roteiro.replace(/\r?\n/g, '\r\n')),
+    [HELLO_EXACT, HELLO_THEN_BYE],
+    'the roteiro must be readable with CRLF line endings too',
+  );
 });
 
 test('a verification typed straight into the interface needs no file in the project', async () => {
