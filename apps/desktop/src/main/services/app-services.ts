@@ -30,6 +30,7 @@ import {
   type RunnerPair,
 } from './orchestration-service.js';
 import { RuntimeService } from './runtime-service.js';
+import { VerificationService } from './verification-service.js';
 import { WorkspaceService } from './workspace-service.js';
 import { CodexAdapter } from '../adapters/codex-adapter.js';
 import { DECISION_JSON_SCHEMA } from '../core.js';
@@ -59,6 +60,8 @@ export class AppServices {
   readonly accounts: AccountService;
   readonly agents: AgentService;
   readonly workspaces: WorkspaceService;
+  /** The project's registered verifications, as the interface configures them. */
+  readonly verifications: VerificationService;
   readonly orchestration: OrchestrationService;
   readonly chat: ChatService;
 
@@ -90,6 +93,7 @@ export class AppServices {
     );
     this.agents = new AgentService(this.database);
     this.workspaces = new WorkspaceService(this.database, this.runtimes, this.processManager);
+    this.verifications = new VerificationService(this.database);
     this.orchestration = new OrchestrationService(
       this.database,
       this.processManager,

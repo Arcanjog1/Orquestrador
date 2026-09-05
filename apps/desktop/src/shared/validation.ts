@@ -114,6 +114,30 @@ export const repositoryUrl: Validator<string> = (value, path) => {
   return s;
 };
 
+/** True/false that really is a boolean, not "true" or 1. */
+export const bool: Validator<boolean> = (value, path) => {
+  if (typeof value !== 'boolean') fail(path, 'must be a boolean');
+  return value;
+};
+
+/**
+ * A verification command line, as a *shape*.
+ *
+ * This is the cheap half of the check: one line, bounded, no NUL, no control
+ * characters that would not survive a round trip. The real rule is
+ * `screenCommand` in the core - the same screen the Verifier applies before
+ * running anything - which the service calls before saving. Neither is a
+ * licence to run arbitrary text at run time: a stored command is configuration
+ * a person wrote, and an agent can only name it by id.
+ */
+export const verificationCommand: Validator<string> = (value, path) => {
+  const s = str({ min: 1, max: 1000 })(value, path);
+  if (/[\r\n]/.test(s)) fail(path, 'must be a single line');
+  if (/[\u0000-\u001f\u007f]/.test(s)) fail(path, 'must not contain control characters');
+  if (s.trim().length === 0) fail(path, 'must not be blank');
+  return s;
+};
+
 export interface Shape {
   readonly [key: string]: Validator<unknown>;
 }
@@ -220,6 +244,27 @@ export const REQUEST_VALIDATORS: {
     orchestratorAgentId: id,
     workerAgentId: id,
   }),
+
+  'verifications.list': obj({ workspaceId: id }),
+  'verifications.create': obj({
+    workspaceId: id,
+    // The same identifier rule as everywhere else: never a path, never a
+    // command. This is the name an orchestrator will ask for.
+    id,
+    label: str({ min: 1, max: 200 }),
+    command: verificationCommand,
+  }),
+  'verifications.update': obj(
+    {
+      workspaceId: id,
+      id,
+      label: str({ min: 1, max: 200 }),
+      command: verificationCommand,
+      enabled: bool,
+    },
+    { optional: ['label', 'command', 'enabled'] },
+  ),
+  'verifications.remove': obj({ workspaceId: id, id }),
 
   'chat.listSessions': obj({ workspaceId: id }),
   'chat.createSession': obj({ workspaceId: id, title: str({ min: 1, max: 200 }) }),

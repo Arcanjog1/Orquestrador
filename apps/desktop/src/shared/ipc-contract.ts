@@ -44,6 +44,11 @@ export const REQUEST_CHANNELS = [
   'workspace.clone',
   'workspace.setAgents',
 
+  'verifications.list',
+  'verifications.create',
+  'verifications.update',
+  'verifications.remove',
+
   'chat.listSessions',
   'chat.createSession',
   'chat.listMessages',
@@ -156,6 +161,23 @@ export interface AgentView {
   readonly accountId: string | null;
 }
 
+/**
+ * One verification a project owner has registered.
+ *
+ * `command` is shown so a person can see and edit what will run; it is never
+ * something the interface executes, and never something an agent supplies. The
+ * loop asks for a verification by `id` and runs the stored command.
+ */
+export interface VerificationView {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly label: string;
+  readonly command: string;
+  /** A disabled verification is invisible to the loop and refused if asked for. */
+  readonly enabled: boolean;
+  readonly createdAt: string;
+}
+
 export interface WorkspaceView {
   readonly id: string;
   readonly name: string;
@@ -265,6 +287,36 @@ export interface IpcMap {
   'workspace.setAgents': {
     request: { workspaceId: string; orchestratorAgentId: string; workerAgentId: string };
     response: WorkspaceView;
+  };
+
+  /**
+   * The verifications of one project: read, add, change, remove.
+   *
+   * Domain operations over `verification_definitions`, not a way to run
+   * anything. Nothing here executes a command: the loop resolves an id to the
+   * stored command when a run asks for it.
+   */
+  'verifications.list': {
+    request: { workspaceId: string };
+    response: readonly VerificationView[];
+  };
+  'verifications.create': {
+    request: { workspaceId: string; id: string; label: string; command: string };
+    response: VerificationView;
+  };
+  'verifications.update': {
+    request: {
+      workspaceId: string;
+      id: string;
+      label?: string;
+      command?: string;
+      enabled?: boolean;
+    };
+    response: VerificationView;
+  };
+  'verifications.remove': {
+    request: { workspaceId: string; id: string };
+    response: { removed: boolean };
   };
 
   'chat.listSessions': { request: { workspaceId: string }; response: readonly ChatSessionView[] };

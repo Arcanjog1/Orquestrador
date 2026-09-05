@@ -32,6 +32,7 @@ export type {
   MessageRecord,
   RunRecord,
   RunStatus,
+  VerificationDefinitionRecord,
   WorkspaceWithAgents,
 } from '../../../../src/database/repositories.js';
 

@@ -134,6 +134,32 @@ export class IpcRouter {
       return s.workspaces.setAgents(input.workspaceId, input.orchestratorAgentId, input.workerAgentId);
     });
 
+    // The project's own verifications: configuration a person writes, which the
+    // loop then resolves by id. Four domain operations over the existing
+    // `verification_definitions` table - nothing here runs a command.
+    this.handlers.set('verifications.list', (p) =>
+      s.verifications.list((p as { workspaceId: string }).workspaceId),
+    );
+    this.handlers.set('verifications.create', (p) =>
+      s.verifications.create(
+        p as { workspaceId: string; id: string; label: string; command: string },
+      ),
+    );
+    this.handlers.set('verifications.update', (p) =>
+      s.verifications.update(
+        p as {
+          workspaceId: string;
+          id: string;
+          label?: string;
+          command?: string;
+          enabled?: boolean;
+        },
+      ),
+    );
+    this.handlers.set('verifications.remove', (p) => ({
+      removed: s.verifications.remove(p as { workspaceId: string; id: string }),
+    }));
+
     this.handlers.set('chat.listSessions', (p) =>
       s.chat.listSessions((p as { workspaceId: string }).workspaceId),
     );
