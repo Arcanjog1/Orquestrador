@@ -166,6 +166,44 @@ jobs:
       # visible only to people who already have access; it is marked
       # pre-release and uses a rolling tag, so it is never mistaken for a
       # stable release.
+      # This branch publishes under its own per-commit tag instead of the
+      # rolling one above, so the build being offered is never in doubt and the
+      # older `desktop-dev` release keeps pointing at the commit that produced
+      # it. The file comes straight from the job that built it: no artifact
+      # upload and download in between, because that store is what is out of
+      # quota. No `continue-on-error` here on purpose - if the installer cannot
+      # be published there is nothing to download, and that should be visible.
+      - name: Name this build
+        if: github.ref_name == 'claude/lovable-on-latest-core'
+        id: build
+        shell: pwsh
+        run: |
+          $short = "${{ github.sha }}".Substring(0, 7)
+          "tag=desktop-dev-$short" >> $env:GITHUB_OUTPUT
+          "short=$short" >> $env:GITHUB_OUTPUT
+
+      - name: Publish this build as a pre-release
+        if: github.ref_name == 'claude/lovable-on-latest-core'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.build.outputs.tag }}
+          name: AI Orchestrator - build de desenvolvimento (${{ steps.build.outputs.short }})
+          prerelease: true
+          draft: false
+          fail_on_unmatched_files: true
+          files: apps/desktop/release/AI-Orchestrator-Setup.exe
+          body: |
+            Build de desenvolvimento, para validacao do MVP com os provedores
+            reais. Nao e uma versao estavel e nao esta assinado, entao o Windows
+            mostra o aviso do SmartScreen.
+
+            Repositorio: ${{ github.repository }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Build: Windows x64 (NSIS, por usuario, sem elevacao)
+            Arquivo: AI-Orchestrator-Setup.exe
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
       - name: Publish the installer as a pre-release
         if: github.ref_name == 'claude/ai-orchestrator-continuation-grblen'
         continue-on-error: true
