@@ -8,12 +8,21 @@
  * CodexAdapter and ClaudeCodeAdapter reading the accounts the GUI signed in.
  *
  *   node scripts/real-loop-smoke.mjs                # one file, one iteration
- *   node scripts/real-loop-smoke.mjs --two-step     # forces a correction pass
+ *   node scripts/real-loop-smoke.mjs --two-step     # a second iteration by construction
+ *
+ * `--two-step` registers a verification in two stages (scripts/lib/
+ * two-stage-check.mjs): the objective asks for hello.txt only; the check also
+ * requires bye.txt, and says so only once hello.txt is right. The script sits
+ * outside the workspace and the orchestrator is shown a verification's id and
+ * label, never its command, so a first attempt that follows the objective
+ * perfectly still fails verification - and the second worker prompt can only
+ * come from the orchestrator reading that failure. Nothing here composes it.
  *
  * It works in a scratch git repository under the system temp directory and
  * never touches a real project. Once a workspace has been registered for it,
- * the directory is kept, so the run stays reviewable in the application's
- * history instead of pointing at a folder that no longer exists.
+ * the directory (and the check next to it) is kept, so the run stays
+ * reviewable in the application's history instead of pointing at a folder
+ * that no longer exists.
  * Run `npm run desktop:build` first.
  *
  * No credential is read, written or printed here; the accounts already exist in
@@ -26,9 +35,12 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { collectLoopEvidence, printLoopEvidence } from './lib/loop-evidence.mjs';
+import { writeTwoStageCheck } from './lib/two-stage-check.mjs';
 
 const twoStep = process.argv.includes('--two-step');
 const EXPECTED = 'Olá AI Orchestrator';
+/** The second stage. Known to the check script and to nothing the agents see. */
+const SECOND_STAGE = { file: 'bye.txt', content: 'Tchau' };
 
 const built = new URL('../apps/desktop/dist/apps/desktop/src/main/services/app-services.js', import.meta.url);
 if (!existsSync(built)) {
@@ -37,35 +49,22 @@ if (!existsSync(built)) {
 }
 const { AppServices } = await import(pathToFileURL(built.pathname).href);
 
-/* A scratch repository with one registered verification. ------------------ */
+/* A scratch repository, and a verification kept outside it. ---------------- */
 
 const dir = mkdtempSync(join(tmpdir(), 'lao-real-loop-'));
 const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
 git('init', '-q');
 git('config', 'user.email', 'smoke@local');
 git('config', 'user.name', 'smoke');
-
-const checks = [
-  "import { readFileSync } from 'node:fs';",
-  'const want = ' + JSON.stringify(EXPECTED) + ';',
-  'const read = (f) => { try { return readFileSync(f, "utf8").trim(); } catch { return null; } };',
-  'const problems = [];',
-  'const hello = read("hello.txt");',
-  'if (hello !== want) problems.push(`hello.txt is ${JSON.stringify(hello)}, expected ${JSON.stringify(want)}`);',
-];
-if (twoStep) {
-  checks.push(
-    'const bye = read("bye.txt");',
-    'if (bye !== "Tchau") problems.push(`bye.txt is ${JSON.stringify(bye)}, expected "Tchau"`);',
-  );
-}
-checks.push(
-  'if (problems.length) { for (const p of problems) console.error(p); process.exit(1); }',
-  'console.log("ok");',
-);
-writeFileSync(join(dir, 'check.mjs'), checks.join('\n'));
+writeFileSync(join(dir, 'README.md'), '# scratch workspace for the real-loop smoke\n');
 git('add', '-A');
 git('commit', '-q', '-m', 'baseline');
+
+const check = writeTwoStageCheck({
+  hello: EXPECTED,
+  then: twoStep ? SECOND_STAGE : null,
+  prefix: 'lao-real-loop-check-',
+});
 
 /* Drive the real services. ------------------------------------------------ */
 
@@ -73,6 +72,17 @@ const services = new AppServices();
 let failed = false;
 /** Set once the application knows this directory; from then on it is kept. */
 let registered = false;
+/**
+ * Leaving early has to go through the cleanup below, which `process.exit`
+ * inside the `try` would skip - and leave the scratch directories behind.
+ */
+class EarlyExit extends Error {
+  constructor(code) {
+    super(`exit ${code}`);
+    this.code = code;
+  }
+}
+let exitCode = 0;
 const say = (ok, name, detail) => {
   if (!ok) failed = true;
   console.log(`${ok ? 'ok' : 'not ok'} - ${name}: ${detail}`);
@@ -87,23 +97,23 @@ try {
     console.log('# no connected account for both providers on this machine.');
     console.log('# Connect OpenAI and Anthropic in the application, then run this again.');
     console.log(`# found: ${accounts.map((a) => `${a.provider}=${a.state}`).join(', ') || '(none)'}`);
-    process.exit(2);
+    throw new EarlyExit(2);
   }
   say(true, 'accounts', `${openai.name} (openai), ${anthropic.name} (anthropic)`);
 
   const workspace = services.workspaces.create({ name: 'Real loop smoke', localPath: dir });
   services.database.verifications.upsert({
-    id: 'content-exact',
+    id: 'registered-check',
     workspaceId: workspace.id,
-    label: 'os arquivos combinados têm o conteúdo exato',
-    command: 'node check.mjs',
+    label: 'o workspace passa na verificação registrada',
+    command: check.command,
   });
   const agents = services.agents.list();
   const orchestrator = agents.find((a) => a.role === 'ORCHESTRATOR' && a.accountId === openai.id);
   const worker = agents.find((a) => a.role === 'CODING_WORKER' && a.accountId === anthropic.id);
   if (!orchestrator || !worker) {
     say(false, 'agents', 'no agent bound to each connected account');
-    process.exit(1);
+    throw new EarlyExit(1);
   }
   services.workspaces.setAgents(workspace.id, orchestrator.id, worker.id);
   registered = true;
@@ -111,8 +121,16 @@ try {
 
   const session = services.chat.createSession(workspace.id, 'Smoke');
   const objective = twoStep
-    ? `Crie hello.txt contendo exatamente: ${EXPECTED}. Depois use a verificação registrada para confirmar que está tudo certo.`
-    : `Crie um arquivo chamado hello.txt contendo exatamente: ${EXPECTED}. Depois verifique que o arquivo contém exatamente esse texto.`;
+    ? `Crie um arquivo chamado hello.txt contendo exatamente: ${EXPECTED}. ` +
+      'A verificação registrada neste workspace é o critério de aceitação completo: peça-a por id ' +
+      'em toda iteração e, se ela falhar, delegue exatamente a correção que ela reportar. ' +
+      'Só responda done quando ela passar.'
+    : `Crie um arquivo chamado hello.txt contendo exatamente: ${EXPECTED}. Depois verifique se o arquivo existe e contém exatamente esse texto.`;
+  if (twoStep) {
+    const leaks = new RegExp(`${SECOND_STAGE.file}|${SECOND_STAGE.content}`).test(objective);
+    say(!leaks, 'objective-omits-second-stage', leaks ? 'the objective reveals it' : 'the user message names hello.txt only');
+    say(!existsSync(join(dir, 'check.mjs')), 'check-outside-workspace', check.command);
+  }
 
   // One message. Everything after this is the loop's own doing.
   const sent = services.chat.sendMessage(session.id, objective);
@@ -136,15 +154,28 @@ try {
   say(seen.includes('evidence'), 'evidence-collected', seen.includes('evidence') ? 'yes' : 'never reached');
   say(verifications.length > 0, 'verification-ran', `${verifications.length} result(s)`);
   if (twoStep) {
-    // A real orchestrator may read check.mjs and get both files right first
-    // time. That is a one-pass success, not a broken loop - but it also does
-    // not prove the automatic second prompt, so it is reported as partial
-    // rather than folded into either PASS or FAIL.
+    const first = verifications.find((v) => v.iteration === 1);
+    say(first !== undefined && first.passed === 0, 'first-verification-failed', first ? `it1 exit=${first.exit_code}` : 'no verification on iteration 1');
+
+    // The second stage cannot be satisfied by an attempt that only knows the
+    // objective, so one worker turn means the loop never reached a review of
+    // a failure - reported as partial rather than folded into PASS or FAIL.
     if (workerTurns >= 2) {
       say(true, 'second-prompt-was-automatic', `${workerTurns} worker turns from one user message`);
     } else {
       say(false, 'second-prompt-was-automatic', `only ${workerTurns} worker turn; two-step not exercised (PARTIAL, run again)`);
     }
+
+    // The proof itself: the second prompt the loop handed the worker is the
+    // orchestrator's decision.task, and it names the file the objective never
+    // mentioned - which it can only have read from the verification's output.
+    const prompts = invocations.filter((i) => i.role === 'CODING_WORKER').map((i) => i.task);
+    const second = prompts[1] ?? null;
+    const fromReview =
+      second !== null && second !== objective && new RegExp(`${SECOND_STAGE.file}|${SECOND_STAGE.content}`).test(second);
+    say(fromReview, 'second-prompt-from-review', second ? JSON.stringify(second.slice(0, 300)) : 'no second prompt');
+    const bye = existsSync(join(dir, SECOND_STAGE.file)) ? readFileSync(join(dir, SECOND_STAGE.file), 'utf8').trim() : null;
+    say(bye === SECOND_STAGE.content, 'second-stage-file', JSON.stringify(bye));
   }
   say(run.status === 'DONE', 'done-gate', `${run.status}${run.summary ? ` - ${run.summary}` : ''}`);
 
@@ -157,15 +188,20 @@ try {
   // agents said: every turn, every prompt the loop handed the worker, every
   // verdict, and the gate. This is what makes the run reviewable afterwards.
   printLoopEvidence(collectLoopEvidence(services.database, sent.run.id, session.id));
+} catch (err) {
+  if (!(err instanceof EarlyExit)) throw err;
+  exitCode = err.code;
 } finally {
   services.database.close();
   await services.processManager.cancelAll();
   if (registered) {
     console.log(`# scratch workspace kept at ${dir} so the run stays reviewable in the app`);
+    console.log(`# its verification kept at ${check.path}`);
   } else {
     rmSync(dir, { recursive: true, force: true });
+    rmSync(check.dir, { recursive: true, force: true });
   }
 }
 
-console.log(failed ? '# fail' : '# pass');
-process.exit(failed ? 1 : 0);
+if (exitCode === 0) console.log(failed ? '# fail' : '# pass');
+process.exit(failed ? 1 : exitCode);
