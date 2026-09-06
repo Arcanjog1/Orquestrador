@@ -133,9 +133,8 @@ test('git on the project: branch, commit, push and fetch against a real remote, 
   repo.commitAll('init');
   repo.git('remote', 'add', 'origin', bareDir);
   repo.git('push', '-q', '-u', 'origin', 'main');
-  // No identity in this repository: the application must supply one.
-  repo.git('config', '--unset', 'user.name');
-  repo.git('config', '--unset', 'user.email');
+  // The identity is the repository's own here (the fixture sets one), which
+  // must win over anything the application would add.
 
   const fixture = createDesktopFixture({ secrets: fakeSecretStore() });
   try {
@@ -153,8 +152,7 @@ test('git on the project: branch, commit, push and fetch against a real remote, 
     const commit = value<Op>(await fixture.router.handle('workspace.commit', { workspaceId: workspace.id, message: 'Add hello' }));
     assert.equal(commit.ok, true, commit.output);
     const log = repo.git('log', '-1', '--format=%s|%an|%ae').trim();
-    assert.match(log, /^Add hello\|/);
-    assert.ok(!/\|\|/.test(log), 'an author was recorded even with no identity configured');
+    assert.equal(log, 'Add hello|Test|test@example.invalid', "the repository's identity, untouched");
 
     const push = value<Op>(await fixture.router.handle('workspace.push', { workspaceId: workspace.id }));
     assert.equal(push.ok, true, push.output);
@@ -190,6 +188,53 @@ test('git on the project: branch, commit, push and fetch against a real remote, 
     await fixture.cleanup();
     repo.cleanup();
     rmSync(bareDir, { recursive: true, force: true });
+  }
+});
+
+test('a commit with no identity anywhere is refused in words; with the GitHub login it is authored by it', async () => {
+  // Global and system git config are hidden from the child, the way a fresh
+  // machine has none - this is what made the same flow fail on CI.
+  const emptyConfig = join(mkdtempSync(join(tmpdir(), 'lao-noconfig-')), 'gitconfig');
+  writeFileSync(emptyConfig, '', 'utf8');
+  const previous = { GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM: process.env.GIT_CONFIG_SYSTEM };
+  Object.assign(process.env, { GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_SYSTEM: emptyConfig });
+  const gh = await startFakeGitHub();
+  const repo = createGitFixture('lao-identity-');
+  repo.write('a.txt', 'a\n');
+  repo.commitAll('init');
+  repo.git('config', '--unset', 'user.name');
+  repo.git('config', '--unset', 'user.email');
+  const fixture = createDesktopFixture({
+    github: { endpoints: gh.endpoints, sleep: async () => {} },
+    secrets: fakeSecretStore(),
+  });
+  try {
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.create', { name: 'P', localPath: repo.dir }),
+    );
+    type Op = { ok: boolean; summary: string };
+    writeFileSync(join(repo.dir, 'b.txt'), 'b\n', 'utf8');
+
+    const refused = value<Op>(await fixture.router.handle('workspace.commit', { workspaceId: workspace.id, message: 'x' }));
+    if (refused.ok === false && /não está configurado/.test(refused.summary)) return; // no git reachable
+    assert.equal(refused.ok, false);
+    assert.match(refused.summary, /não sabe quem você é/);
+    assert.match(refused.summary, /Conecte o GitHub/);
+    assert.equal(repo.git('log', '--oneline').trim().split('\n').length, 1, 'nothing was committed');
+
+    value(await fixture.router.handle('github.configure', { clientId: 'Iv1.testclientid' }));
+    value(await fixture.router.handle('github.connect', null));
+    const committed = value<Op>(await fixture.router.handle('workspace.commit', { workspaceId: workspace.id, message: 'x' }));
+    assert.equal(committed.ok, true, committed.summary);
+    assert.equal(repo.git('log', '-1', '--format=%an|%ae').trim(), 'octocat|octocat@users.noreply.github.com');
+  } finally {
+    await fixture.cleanup();
+    repo.cleanup();
+    await gh.close();
+    for (const [key, val] of Object.entries(previous)) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
   }
 });
 

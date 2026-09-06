@@ -476,6 +476,20 @@ export class WorkspaceService {
     const staged = await this.runGit(workspaceId, ['add', '--all'], 'Alterações preparadas.', 'Não foi possível preparar as alterações.');
     if (!staged.ok) return staged;
     const login = this.github?.status().login ?? null;
+    // The repository's own identity wins when it has one: the environment
+    // is only consulted by git when config has nothing.
+    const configured = await this.hasIdentity(workspaceId);
+    if (!configured && !login) {
+      // Git would refuse too, in its own words. Saying it first keeps the
+      // person from staging and then reading "Please tell me who you are".
+      return {
+        ok: false,
+        summary:
+          'O git não sabe quem você é. Conecte o GitHub em Contas e integrações, ou configure user.name e user.email no git.',
+        output: '',
+        workspace: staged.workspace,
+      };
+    }
     const identity: Record<string, string> = login
       ? {
           GIT_AUTHOR_NAME: login,
@@ -484,9 +498,6 @@ export class WorkspaceService {
           GIT_COMMITTER_EMAIL: `${login}@users.noreply.github.com`,
         }
       : {};
-    // The repository's own identity wins when it has one: the environment
-    // is only consulted by git when config has nothing.
-    const configured = await this.hasIdentity(workspaceId);
     return this.runGit(
       workspaceId,
       ['commit', '--message', message],
