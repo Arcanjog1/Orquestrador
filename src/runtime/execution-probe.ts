@@ -487,9 +487,10 @@ function runFromResult(
     firstOutputAfterMs: firstAt.length ? Math.min(...firstAt) - spawnMs : null,
     error: result.error ?? null,
     errorCode: trace.errorCode,
-    termination: trace.termination
-      ? trace.termination.attempts.map((a) => `${a.method} → ${a.exited ? 'saiu' : 'não saiu'}`).join(', ')
-      : null,
+    termination:
+      trace.termination && trace.termination.attempts.length > 0
+        ? trace.termination.attempts.map((a) => `${a.method} → ${a.exited ? 'saiu' : 'não saiu'}`).join(', ')
+        : null,
     notes,
   };
 }
@@ -588,42 +589,48 @@ export async function rawSpawn(options: {
     let settled = false;
     let outcome: ProcessResult['outcome'] = 'completed';
     let error: string | undefined;
+    let killMethod: string | null = null;
+    // The one kill attempt goes on record whichever comes first: the child's
+    // exit, or the wait for it running out.
+    const recordKill = (): void => {
+      if (!killMethod || !trace.termination || trace.termination.attempts.length > 0) return;
+      trace.termination.attempts.push({
+        method: killMethod,
+        at: new Date().toISOString(),
+        exited: child.exitCode !== null || child.signalCode !== null,
+      });
+    };
     const done = (code: number | null, signal: NodeJS.Signals | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      recordKill();
       resolve(base({ outcome, exitCode: code, signal, stdout: stdout.join(''), stderr: stderr.join(''), ...(error ? { error } : {}) }));
+    };
+    const giveUp = (): void => {
+      recordKill();
+      if (!settled) {
+        trace.survivedTermination = true;
+        done(null, null);
+      }
     };
     const timer = setTimeout(() => {
       outcome = 'timeout';
       error = `Process exceeded its ${Math.round(options.timeoutMs / 1000)}s timeout.`;
-      const attempts = [] as { method: string; at: string; exited: boolean }[];
-      trace.termination = { reason: 'timeout', attempts };
+      trace.termination = { reason: 'timeout', attempts: [] };
       if (process.platform === 'win32' && child.pid) {
+        killMethod = `taskkill /pid ${child.pid} /T /F`;
         const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
         killer.on('error', () => {});
-        killer.on('close', () => {
-          setTimeout(() => {
-            attempts.push({ method: `taskkill /pid ${child.pid} /T /F`, at: new Date().toISOString(), exited: child.exitCode !== null || child.signalCode !== null });
-            if (!settled) {
-              trace.survivedTermination = true;
-              done(null, null);
-            }
-          }, 2000);
-        });
+        killer.on('close', () => setTimeout(giveUp, 2000));
       } else {
+        killMethod = 'SIGKILL';
         try {
           child.kill('SIGKILL');
         } catch {
           /* already gone */
         }
-        setTimeout(() => {
-          attempts.push({ method: 'SIGKILL', at: new Date().toISOString(), exited: child.exitCode !== null || child.signalCode !== null });
-          if (!settled) {
-            trace.survivedTermination = true;
-            done(null, null);
-          }
-        }, 2000);
+        setTimeout(giveUp, 2000);
       }
     }, options.timeoutMs);
     child.on('error', (e: NodeJS.ErrnoException) => {
