@@ -99,11 +99,39 @@ export class GitHubError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    readonly kind: 'auth' | 'network' | 'denied' | 'expired' | 'api' = 'api',
+    readonly kind: 'auth' | 'network' | 'denied' | 'expired' | 'api' | 'config' = 'api',
+    /**
+     * What came back, for "Detalhes": HTTP status, content type, the error
+     * code and description, a short excerpt of the body. Never a device
+     * code or a token - `safeExcerpt` strips them before anything is kept.
+     */
+    readonly detail: string | null = null,
   ) {
     super(message);
     this.name = 'GitHubError';
   }
+}
+
+/** What one device-flow request answered, before it is judged. */
+interface Answer {
+  readonly status: number;
+  readonly contentType: string;
+  readonly body: Record<string, unknown>;
+  /** A short, redacted excerpt of the raw body, for the record. */
+  readonly excerpt: string;
+}
+
+/**
+ * Removes anything secret from a body before it is kept for the record:
+ * device codes, access and refresh tokens, whatever their spelling.
+ */
+export function safeExcerpt(raw: string, max = 240): string {
+  const scrubbed = raw
+    .replace(/("?(?:device_code|access_token|refresh_token|id_token)"?\s*[:=]\s*"?)([^"&,\s}]+)/gi, '$1[redacted]')
+    .replace(/\b(gh[pousr]_[A-Za-z0-9_]{6,})/g, '[redacted]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return scrubbed.length > max ? `${scrubbed.slice(0, max)}…` : scrubbed;
 }
 
 export interface GitHubClientOptions {
@@ -133,23 +161,35 @@ export class GitHubClient {
 
   // -- Device flow -----------------------------------------------------------
 
+  /**
+   * Step one of the device flow, as documented: `POST /login/device/code`
+   * with `client_id` (and `scope`, which a GitHub App ignores), `Accept:
+   * application/json`. A good answer carries `device_code` and `user_code`.
+   *
+   * Everything else is named for what it is. GitHub answers a Client ID it
+   * does not know with HTTP 404 `{"error":"Not Found"}` - no description, so
+   * the old "resposta inesperada" was the whole story a person got for a
+   * pasted App ID. An app whose device flow is off answers
+   * `device_flow_disabled`. Each case has its own sentence, and the raw
+   * answer - status, content type, a redacted excerpt - travels along for
+   * "Detalhes".
+   */
   async requestDeviceCode(clientId: string): Promise<DeviceCode> {
-    const body = await this.form(`${this.endpoints.oauthBase}/login/device/code`, {
+    const answer = await this.form(`${this.endpoints.oauthBase}/login/device/code`, {
       client_id: clientId,
       scope: DEVICE_FLOW_SCOPE,
     });
-    const code = body as Record<string, unknown>;
-    if (typeof code.device_code !== 'string' || typeof code.user_code !== 'string') {
-      const error = typeof code.error_description === 'string' ? code.error_description : 'resposta inesperada';
-      throw new GitHubError(`O GitHub não iniciou o login: ${error}`, 400, 'auth');
+    const code = answer.body;
+    if (typeof code.device_code === 'string' && typeof code.user_code === 'string') {
+      return {
+        deviceCode: code.device_code,
+        userCode: code.user_code,
+        verificationUri: String(code.verification_uri ?? `${this.endpoints.oauthBase}/login/device`),
+        expiresInSeconds: Number(code.expires_in ?? 900),
+        intervalSeconds: Number(code.interval ?? 5),
+      };
     }
-    return {
-      deviceCode: code.device_code,
-      userCode: code.user_code,
-      verificationUri: String(code.verification_uri ?? `${this.endpoints.oauthBase}/login/device`),
-      expiresInSeconds: Number(code.expires_in ?? 900),
-      intervalSeconds: Number(code.interval ?? 5),
-    };
+    throw classifyDeviceStart(answer);
   }
 
   /**
@@ -167,28 +207,51 @@ export class GitHubClient {
       await this.sleep(interval);
       if (signal?.aborted) throw new GitHubError('cancelled', 0, 'auth');
 
-      const body = (await this.form(`${this.endpoints.oauthBase}/login/oauth/access_token`, {
+      const answer = await this.form(`${this.endpoints.oauthBase}/login/oauth/access_token`, {
         client_id: clientId,
         device_code: code.deviceCode,
         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-      })) as Record<string, unknown>;
+      });
+      const body = answer.body;
 
       if (typeof body.access_token === 'string') return tokenOf(body);
+      const detail = describeAnswer(answer);
       switch (body.error) {
         case 'authorization_pending':
           continue;
         case 'slow_down':
-          interval += 5000;
+          // The documented rule: the interval grows by five seconds, or to
+          // what GitHub says when it says.
+          interval = Math.max(interval + 5000, Number(body.interval ?? 0) * 1000);
           continue;
         case 'expired_token':
-          throw new GitHubError('O código expirou antes de o login ser concluído.', 400, 'expired');
+          throw new GitHubError('O código expirou antes de o login ser concluído.', 400, 'expired', detail);
         case 'access_denied':
-          throw new GitHubError('O login foi recusado no GitHub.', 403, 'denied');
+          throw new GitHubError('O login foi recusado no GitHub.', 403, 'denied', detail);
+        case 'incorrect_client_credentials':
+          throw new GitHubError(
+            'O GitHub não aceitou o Client ID durante o login. Confira o Client ID do GitHub App.',
+            401,
+            'config',
+            detail,
+          );
+        case 'incorrect_device_code':
+          throw new GitHubError('O GitHub não reconheceu o código deste login. Tente conectar de novo.', 400, 'auth', detail);
+        case 'unsupported_grant_type':
+          throw new GitHubError('O GitHub não aceitou o tipo de login pedido (grant_type).', 400, 'api', detail);
+        case 'device_flow_disabled':
+          throw new GitHubError(
+            'O fluxo de dispositivo está desligado neste GitHub App. Ative "Enable Device Flow" na página do app.',
+            400,
+            'config',
+            detail,
+          );
         default:
           throw new GitHubError(
-            `O GitHub recusou o login: ${String(body.error_description ?? body.error ?? 'erro desconhecido')}`,
-            400,
+            `O GitHub recusou o login: ${String(body.error_description ?? body.error ?? `HTTP ${answer.status}`)}`,
+            answer.status || 400,
             'auth',
+            detail,
           );
       }
     }
@@ -197,13 +260,14 @@ export class GitHubClient {
 
   /** GitHub Apps with expiring tokens: exchanges the refresh token for a new pair. */
   async refresh(clientId: string, refreshToken: string): Promise<GitHubToken> {
-    const body = (await this.form(`${this.endpoints.oauthBase}/login/oauth/access_token`, {
+    const answer = await this.form(`${this.endpoints.oauthBase}/login/oauth/access_token`, {
       client_id: clientId,
       grant_type: 'refresh_token',
       refresh_token: refreshToken,
-    })) as Record<string, unknown>;
+    });
+    const body = answer.body;
     if (typeof body.access_token !== 'string') {
-      throw new GitHubError('O GitHub não renovou o login. Conecte novamente.', 401, 'auth');
+      throw new GitHubError('O GitHub não renovou o login. Conecte novamente.', 401, 'auth', describeAnswer(answer));
     }
     return tokenOf(body);
   }
@@ -224,9 +288,9 @@ export class GitHubClient {
    * Every repository the person can reach - own, collaborator, organisation -
    * private ones included, newest activity first.
    */
-  async repositories(token: string): Promise<GitHubRepository[]> {
+  async repositories(token: string, maxPages = REPOS_MAX_PAGES): Promise<GitHubRepository[]> {
     const out: GitHubRepository[] = [];
-    for (let page = 1; page <= REPOS_MAX_PAGES; page += 1) {
+    for (let page = 1; page <= maxPages; page += 1) {
       const rows = (await this.api(
         token,
         `/user/repos?affiliation=owner,collaborator,organization_member&sort=updated&per_page=${REPOS_PAGE_SIZE}&page=${page}`,
@@ -293,7 +357,15 @@ export class GitHubClient {
 
   // -- transport ---------------------------------------------------------------
 
-  private async form(url: string, fields: Record<string, string>): Promise<unknown> {
+  /**
+   * One device-flow request. The body is sent form-encoded and the answer is
+   * asked for as JSON, both as documented; the answer is still read by its
+   * own content type, because GitHub answers form-encoded when the Accept
+   * header is missing and a proxy can answer HTML. Whatever comes back is
+   * returned with its status for the caller to judge - never thrown away
+   * as "unexpected".
+   */
+  private async form(url: string, fields: Record<string, string>): Promise<Answer> {
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
@@ -304,22 +376,17 @@ export class GitHubClient {
           'User-Agent': this.userAgent,
         },
         body: new URLSearchParams(fields).toString(),
+        signal: AbortSignal.timeout(30_000),
       });
     } catch (error) {
-      throw new GitHubError(`Sem conexão com o GitHub: ${(error as Error).message}`, 0, 'network');
+      const reason = (error as { name?: string; message?: string }).name === 'TimeoutError'
+        ? 'a resposta demorou mais de 30 s'
+        : (error as Error).message;
+      throw new GitHubError(`Sem conexão com o GitHub: ${reason}`, 0, 'network', `POST ${url}: ${reason}`);
     }
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      throw new GitHubError(`O GitHub respondeu ${response.status} sem um corpo legível.`, response.status);
-    }
-    // The device endpoints answer 200 with an `error` field for the expected
-    // cases; a non-2xx here is a real refusal (a wrong client id, say).
-    if (!response.ok && !(body && typeof body === 'object' && 'error' in body)) {
-      throw new GitHubError(`O GitHub respondeu ${response.status}.`, response.status, 'auth');
-    }
-    return body;
+    const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
+    const raw = await response.text();
+    return { status: response.status, contentType, body: parseAnswerBody(raw, contentType), excerpt: safeExcerpt(raw) };
   }
 
   private async api(token: string, path: string, init: RequestInit = {}): Promise<unknown> {
@@ -354,6 +421,83 @@ export class GitHubClient {
     if (response.status === 204) return null;
     return response.json();
   }
+}
+
+/** Reads a device-flow body by its content type: JSON, form-encoded, or nothing. */
+export function parseAnswerBody(raw: string, contentType: string): Record<string, unknown> {
+  const text = raw.trim();
+  if (text.length === 0) return {};
+  if (contentType.includes('json') || text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    } catch {
+      /* fall through: not JSON after all */
+    }
+  }
+  if (contentType.includes('x-www-form-urlencoded') || /^[A-Za-z0-9_]+=[^\s]*(&[A-Za-z0-9_]+=[^\s]*)*$/.test(text)) {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of new URLSearchParams(text)) out[key] = value;
+    return out;
+  }
+  return {};
+}
+
+/** The record line for an answer: status, content type, error code, excerpt. */
+function describeAnswer(answer: Answer): string {
+  const parts = [`HTTP ${answer.status}`, `content-type: ${answer.contentType || '(none)'}`];
+  if (typeof answer.body.error === 'string') parts.push(`error: ${answer.body.error}`);
+  if (typeof answer.body.error_description === 'string') parts.push(`error_description: ${answer.body.error_description}`);
+  if (answer.excerpt) parts.push(`body: ${answer.excerpt}`);
+  return parts.join(' · ');
+}
+
+/**
+ * Names the reason a device flow did not start, in the person's words, from
+ * what GitHub answered.
+ */
+function classifyDeviceStart(answer: Answer): GitHubError {
+  const detail = describeAnswer(answer);
+  const error = typeof answer.body.error === 'string' ? answer.body.error : '';
+  const description = typeof answer.body.error_description === 'string' ? answer.body.error_description : '';
+
+  if (answer.status === 404 || /^not found$/i.test(error) || error === 'unauthorized_client' || error === 'incorrect_client_credentials') {
+    return new GitHubError(
+      'O GitHub não reconhece este Client ID. Confira em GitHub → Settings → Developer settings → GitHub Apps → seu app: ' +
+        'o Client ID começa com "Iv1." ou "Iv23li" — não é o App ID (número) nem o Client secret.',
+      answer.status || 404,
+      'config',
+      detail,
+    );
+  }
+  if (error === 'device_flow_disabled') {
+    return new GitHubError(
+      'O fluxo de dispositivo está desligado neste GitHub App. Na página do app no GitHub, marque "Enable Device Flow" e salve.',
+      answer.status || 400,
+      'config',
+      detail,
+    );
+  }
+  if (answer.status === 429 || (answer.status === 403 && /rate limit/i.test(answer.excerpt))) {
+    return new GitHubError('O GitHub limitou as tentativas de login por enquanto. Aguarde alguns minutos e tente de novo.', answer.status, 'api', detail);
+  }
+  if (answer.contentType.includes('text/html')) {
+    return new GitHubError(
+      `O GitHub devolveu uma página em vez da resposta do login (HTTP ${answer.status}). Um proxy, firewall ou antivírus pode estar interferindo na conexão.`,
+      answer.status,
+      'network',
+      detail,
+    );
+  }
+  if (description || error) {
+    return new GitHubError(`O GitHub não iniciou o login: ${description || error}.`, answer.status || 400, 'auth', detail);
+  }
+  return new GitHubError(
+    `O GitHub não iniciou o login: a resposta não trouxe o código do dispositivo (HTTP ${answer.status}).`,
+    answer.status || 400,
+    'api',
+    detail,
+  );
 }
 
 function tokenOf(body: Record<string, unknown>): GitHubToken {

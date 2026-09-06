@@ -210,3 +210,127 @@ test('remotes are recognised and the git environment carries the token as a head
   assert.equal(env.GIT_TERMINAL_PROMPT, '0');
   assert.ok(!Object.values(env).some((v) => v.includes('gho_secret')), 'the token is not in the clear');
 });
+
+/* ------------------------------------------------------------------ *
+ * The Windows incident: "O GitHub não iniciou o login: resposta inesperada".
+ * Every answer the device endpoint can give now has its own sentence and a
+ * scrubbed record, and the body is read by its content type.
+ * ------------------------------------------------------------------ */
+
+import { parseAnswerBody, safeExcerpt } from '../src/github/github-client.js';
+
+test('a Client ID GitHub does not know (404 Not Found) is named as such, with the answer on record', async () => {
+  const gh = await startFakeGitHub();
+  try {
+    const client = new GitHubClient({ endpoints: gh.endpoints, ...fast });
+    await assert.rejects(client.requestDeviceCode('Iv1.wrong'), (error: unknown) => {
+      assert.ok(error instanceof GitHubError);
+      assert.equal(error.kind, 'config');
+      assert.equal(error.status, 404);
+      assert.match(error.message, /não reconhece este Client ID/);
+      assert.match(error.message, /não é o App ID/);
+      assert.doesNotMatch(error.message, /resposta inesperada/);
+      assert.match(error.detail ?? '', /HTTP 404 · content-type: application\/json · error: Not Found/);
+      return true;
+    });
+  } finally {
+    await gh.close();
+  }
+});
+
+test('a GitHub App with the device flow switched off is told to switch it on', async () => {
+  const gh = await startFakeGitHub({
+    deviceStart: {
+      status: 400,
+      body: { error: 'device_flow_disabled', error_description: 'Device Flow must be explicitly enabled for this App', error_uri: 'https://docs.github.com/x' },
+    },
+  });
+  try {
+    const client = new GitHubClient({ endpoints: gh.endpoints, ...fast });
+    await assert.rejects(client.requestDeviceCode('Iv1.testclientid'), (error: unknown) => {
+      assert.ok(error instanceof GitHubError);
+      assert.equal(error.kind, 'config');
+      assert.match(error.message, /Enable Device Flow/);
+      assert.match(error.detail ?? '', /error: device_flow_disabled · error_description: Device Flow must be explicitly enabled/);
+      return true;
+    });
+  } finally {
+    await gh.close();
+  }
+});
+
+test('a form-encoded answer (GitHub without Accept: application/json) is read all the same', async () => {
+  const gh = await startFakeGitHub({ deviceCodeAsForm: true });
+  try {
+    const client = new GitHubClient({ endpoints: gh.endpoints, ...fast });
+    const code = await client.requestDeviceCode('Iv1.testclientid');
+    assert.equal(code.userCode, 'WDJB-MJHT');
+    assert.equal(code.deviceCode, 'device-code-xyz');
+    assert.equal(code.intervalSeconds, 1);
+    // And the request itself still asks for JSON, as documented.
+    const start = gh.requests.find((r) => r.path === '/login/device/code')!;
+    assert.equal(start.headers.accept, 'application/json');
+    assert.equal(start.headers['content-type'], 'application/x-www-form-urlencoded');
+    assert.match(start.body, /client_id=Iv1\.testclientid/);
+  } finally {
+    await gh.close();
+  }
+});
+
+test('an HTML page, a rate limit and an empty body each get their own sentence, never "resposta inesperada"', async () => {
+  for (const [start, pattern, kind] of [
+    [{ status: 503, text: '<html><body>Service unavailable</body></html>' }, /devolveu uma página .*HTTP 503.*proxy, firewall ou antivírus/, 'network'],
+    [{ status: 429, body: { message: 'API rate limit exceeded' } }, /limitou as tentativas/, 'api'],
+    [{ status: 200, body: {} }, /não trouxe o código do dispositivo \(HTTP 200\)/, 'api'],
+    [{ status: 400, body: { error: 'unauthorized_client' } }, /não reconhece este Client ID/, 'config'],
+  ] as const) {
+    const gh = await startFakeGitHub({ deviceStart: start as { status: number; body?: unknown; text?: string } });
+    try {
+      const client = new GitHubClient({ endpoints: gh.endpoints, ...fast });
+      await assert.rejects(client.requestDeviceCode('Iv1.testclientid'), (error: unknown) => {
+        assert.ok(error instanceof GitHubError);
+        assert.match(error.message, pattern);
+        assert.equal(error.kind, kind);
+        assert.doesNotMatch(error.message, /resposta inesperada/);
+        assert.ok(error.detail && error.detail.startsWith(`HTTP ${start.status}`), error.detail ?? '');
+        return true;
+      });
+    } finally {
+      await gh.close();
+    }
+  }
+});
+
+test('during polling, a refused client id and a disabled flow end with their own reasons', async () => {
+  for (const [finalError, pattern] of [
+    ['incorrect_client_credentials', /não aceitou o Client ID/],
+    ['device_flow_disabled', /Enable Device Flow/],
+  ] as const) {
+    const gh = await startFakeGitHub({ finalError });
+    try {
+      const client = new GitHubClient({ endpoints: gh.endpoints, ...fast });
+      const code = await client.requestDeviceCode('Iv1.testclientid');
+      await assert.rejects(client.pollForToken('Iv1.testclientid', code), (error: unknown) => {
+        assert.ok(error instanceof GitHubError);
+        assert.match(error.message, pattern);
+        assert.equal(error.kind, 'config');
+        return true;
+      });
+    } finally {
+      await gh.close();
+    }
+  }
+});
+
+test('the record never carries a device code or a token, and bodies are read by content type', () => {
+  assert.equal(
+    safeExcerpt('{"device_code":"dc-secret-123","user_code":"WDJB-MJHT","access_token":"gho_abcdef123456"}'),
+    '{"device_code":"[redacted]","user_code":"WDJB-MJHT","access_token":"[redacted]"}',
+  );
+  assert.equal(safeExcerpt('device_code=dc-secret&user_code=ABCD&refresh_token=ghr_xyz123456'), 'device_code=[redacted]&user_code=ABCD&refresh_token=[redacted]');
+  assert.deepEqual(parseAnswerBody('{"a":1}', 'application/json; charset=utf-8'), { a: 1 });
+  assert.deepEqual(parseAnswerBody('a=1&b=x%20y', 'application/x-www-form-urlencoded'), { a: '1', b: 'x y' });
+  assert.deepEqual(parseAnswerBody('error=Not+Found', ''), { error: 'Not Found' }, 'form shape without a content type');
+  assert.deepEqual(parseAnswerBody('<html>oops</html>', 'text/html'), {});
+  assert.deepEqual(parseAnswerBody('', 'application/json'), {});
+});

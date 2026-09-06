@@ -264,7 +264,9 @@ export const REQUEST_VALIDATORS: {
   'accounts.remove': obj({ accountId: id }),
 
   'github.status': noArgs,
-  'github.configure': obj({ clientId: str({ min: 4, max: 100, pattern: /^[A-Za-z0-9._-]+$/, what: 'a client id' }) }),
+  // Shape only: the service says, case by case, what is wrong with a value
+  // (an App ID, the help example, a token), which a pattern here cannot.
+  'github.configure': obj({ clientId: str({ min: 0, max: 200 }) }),
   'github.connect': noArgs,
   'github.cancelConnect': noArgs,
   'github.disconnect': noArgs,

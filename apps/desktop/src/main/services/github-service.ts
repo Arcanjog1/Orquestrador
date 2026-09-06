@@ -94,9 +94,29 @@ export class GitHubService {
     };
   }
 
-  /** The Client ID of the person's own GitHub App or OAuth App. Not a secret. */
+  /**
+   * The Client ID of the person's own GitHub App or OAuth App. Not a secret.
+   *
+   * The mistakes a person makes on that page get their own sentence: the
+   * App ID (a number), the example from the help text, the client secret.
+   * Each of them would otherwise reach GitHub and come back as 404.
+   */
   configure(clientId: string): GitHubStatusView {
     const trimmed = clientId.trim();
+    if (trimmed.length === 0) {
+      throw new GitHubServiceError('Informe o Client ID do seu GitHub App.');
+    }
+    if (/^\d+$/.test(trimmed)) {
+      throw new GitHubServiceError(
+        'Isso parece o App ID (um número). O Client ID é o texto que começa com "Iv1." ou "Iv23li", na mesma página do app.',
+      );
+    }
+    if (/abc123|example|exemplo|your[-_ ]?client|xxx|<|>/i.test(trimmed)) {
+      throw new GitHubServiceError('Isso é o exemplo da ajuda, não o seu Client ID. Copie o Client ID da página do seu GitHub App.');
+    }
+    if (/^ghp_|^gho_|^github_pat_/.test(trimmed) || trimmed.length > 60) {
+      throw new GitHubServiceError('Isso parece um token ou um Client secret. Aqui vai só o Client ID (curto, começa com "Iv1." ou "Iv23li").');
+    }
     if (!/^[A-Za-z0-9._-]{4,100}$/.test(trimmed)) {
       throw new GitHubServiceError('Esse não parece um Client ID do GitHub.');
     }
@@ -122,12 +142,13 @@ export class GitHubService {
 
     const controller = new AbortController();
     this.connecting = controller;
-    const report = (stage: string, label: string, code?: DeviceCode) =>
+    const report = (stage: string, label: string, code?: DeviceCode, detail?: string | null) =>
       this.events.emit('account:progress', {
         accountId: GITHUB_ACCOUNT_ID,
         stage,
         label,
         ...(code ? { url: code.verificationUri, code: code.userCode } : {}),
+        ...(detail ? { detail } : {}),
       });
 
     try {
@@ -138,18 +159,26 @@ export class GitHubService {
       report('waiting-for-completion', 'Aguardando você concluir no navegador...', code);
 
       const token = await this.client.pollForToken(clientId, code, controller.signal);
+      // A token is not a login: the account behind it must answer, and the
+      // repositories must be reachable, before anything is stored.
+      report('validating', 'Confirmando a conta no GitHub...');
       const user = await this.client.user(token.accessToken);
+      const sample = await this.client.repositories(token.accessToken, 1);
       this.storeToken(token);
       this.database.settings.set(KEYS.login, user.login);
       this.database.settings.set(KEYS.name, user.name ?? '');
       this.database.settings.set(KEYS.avatarUrl, user.avatarUrl);
-      report('connected', `GitHub conectado como ${user.login}.`);
+      report(
+        'connected',
+        `GitHub conectado como ${user.login}` +
+          (sample.length > 0 ? ` (${sample.length}${sample.length >= 100 ? '+' : ''} repositórios visíveis).` : '. Nenhum repositório visível: instale o GitHub App na sua conta.'),
+      );
       return this.status();
     } catch (error) {
       if (controller.signal.aborted) {
         report('cancelled', 'Conexão cancelada.');
       } else {
-        report('failed', describe(error));
+        report('failed', describe(error), undefined, detailOf(error));
       }
       return this.status();
     } finally {
@@ -264,4 +293,10 @@ export class GitHubService {
 function describe(error: unknown): string {
   if (error instanceof GitHubError) return error.message;
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The answer behind a failure, already scrubbed of codes and tokens. */
+function detailOf(error: unknown): string | null {
+  if (error instanceof GitHubError) return error.detail ?? (error.status ? `HTTP ${error.status}` : null);
+  return error instanceof Error ? `${error.name}: ${error.message}` : null;
 }

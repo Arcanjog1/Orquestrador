@@ -43,7 +43,9 @@ test('the GitHub login: client id, device code shown, token kept encrypted, stat
 
     // Without a Client ID there is nothing to connect with, and it says so.
     assert.match(failure(await fixture.router.handle('github.connect', null)).message, /Client ID/);
-    assert.equal(failure(await fixture.router.handle('github.configure', { clientId: 'no spaces here' })).code, 'INVALID_ARGUMENT');
+    const odd = failure(await fixture.router.handle('github.configure', { clientId: 'no spaces here' }));
+    assert.equal(odd.code, 'GITHUB_ERROR');
+    assert.match(odd.message, /não parece um Client ID/);
 
     status = value<Status>(await fixture.router.handle('github.configure', { clientId: 'Iv1.testclientid' }));
     assert.equal(status.configured, true);
@@ -289,6 +291,48 @@ test('a github.com remote gets the login as a header in the environment, and not
     } finally {
       repo.cleanup();
     }
+  } finally {
+    await fixture.cleanup();
+    await gh.close();
+  }
+});
+
+test('the Client ID field refuses the App ID, the help example and a token, each in its own words', async () => {
+  const fixture = createDesktopFixture({ secrets: fakeSecretStore() });
+  try {
+    for (const [input, pattern] of [
+      ['123456', /parece o App ID/],
+      ['Iv1.abc123', /exemplo da ajuda/],
+      ['ghp_abcdefghijklmnopqrstuvwxyz0123456789', /parece um token/],
+      ['', /Informe o Client ID/],
+    ] as const) {
+      const refused = await fixture.router.handle('github.configure', { clientId: input });
+      assert.equal(refused.ok, false, `"${input}" must be refused`);
+      assert.match((refused as { ok: false; error: { message: string } }).error.message, pattern);
+    }
+    const accepted = await fixture.router.handle('github.configure', { clientId: 'Iv1.0123456789abcdef' });
+    assert.equal(accepted.ok, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('a login GitHub refuses at the first step reports the reason and a scrubbed record, and stores nothing', async () => {
+  const gh = await startFakeGitHub({ clientId: 'Iv1.known' });
+  const fixture = createDesktopFixture({ github: { endpoints: gh.endpoints }, secrets: fakeSecretStore() });
+  try {
+    value(await fixture.router.handle('github.configure', { clientId: 'Iv1.unknownclient' }));
+    value(await fixture.router.handle('github.connect', null));
+    const failed = fixture.events
+      .filter((e) => e.channel === 'account:progress')
+      .map((e) => e.payload as { accountId: string; stage: string; label: string; detail?: string | null })
+      .find((p) => p.accountId === 'github' && p.stage === 'failed');
+    assert.ok(failed, 'the dialog is told');
+    assert.match(failed!.label, /não reconhece este Client ID/);
+    assert.match(failed!.detail ?? '', /^HTTP 404/);
+    assert.doesNotMatch(failed!.detail ?? '', /device_code|gho_/);
+    const status = value<{ connected: boolean }>(await fixture.router.handle('github.status', null));
+    assert.equal(status.connected, false);
   } finally {
     await fixture.cleanup();
     await gh.close();

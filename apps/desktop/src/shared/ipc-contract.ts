@@ -187,6 +187,8 @@ export interface AccountProgressEvent {
   readonly url?: string;
   /** Short confirmation code shown by a device-code sign-in, when there is one. */
   readonly code?: string;
+  /** On `failed`: what the provider answered (status, content type, error code), scrubbed. */
+  readonly detail?: string | null;
 }
 
 export interface AgentView {

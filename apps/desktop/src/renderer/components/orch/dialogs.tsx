@@ -384,11 +384,13 @@ export function LoginDialog({
 }) {
   const [progress, setProgress] = useState<AccountProgressEvent | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showDetail, setShowDetail] = useState(false);
 
   useEffect(() => {
     if (!open) {
       setProgress(null);
       setCopied(false);
+      setShowDetail(false);
       return;
     }
     return api.events.accountProgress((event) => {
@@ -497,10 +499,32 @@ export function LoginDialog({
 
         {failed && (
           <div className="space-y-3">
-            <div className="flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/[0.07] p-3 text-sm text-danger">
+            <div
+              className="flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/[0.07] p-3 text-sm text-danger"
+              data-testid="login-failure"
+            >
               <X className="mt-0.5 size-4 shrink-0" />
-              {progress?.label ?? "O login não foi concluído."}
+              <span>{progress?.label ?? "O login não foi concluído."}</span>
             </div>
+            {progress?.detail && (
+              <div>
+                <button
+                  className="text-xs text-muted-foreground underline"
+                  onClick={() => setShowDetail((v) => !v)}
+                  data-testid="login-failure-details"
+                >
+                  {showDetail ? "Ocultar detalhes" : "Detalhes"}
+                </button>
+                {showDetail && (
+                  <pre
+                    className="mt-2 max-h-40 overflow-auto rounded-md border border-border bg-surface p-2 text-[11px] whitespace-pre-wrap break-all text-muted-foreground"
+                    data-testid="login-failure-detail"
+                  >
+                    {progress.detail}
+                  </pre>
+                )}
+              </div>
+            )}
             <Button size="sm" onClick={onRetry}>
               Tentar novamente
             </Button>

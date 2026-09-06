@@ -26,7 +26,11 @@ export interface FakeGitHubOptions {
   /** Answer `slow_down` on the first poll. */
   slowDownFirst?: boolean;
   /** End the flow with this error instead of a token. */
-  finalError?: 'access_denied' | 'expired_token';
+  finalError?: 'access_denied' | 'expired_token' | 'incorrect_client_credentials' | 'device_flow_disabled';
+  /** Answer the device-code request with exactly this, whatever the client id. */
+  deviceStart?: { status: number; body?: unknown; text?: string; contentType?: string };
+  /** Answer the device-code request form-encoded, as GitHub does without Accept: application/json. */
+  deviceCodeAsForm?: boolean;
   accessToken?: string;
   refreshToken?: string;
   expiresIn?: number;
@@ -71,16 +75,32 @@ export async function startFakeGitHub(options: FakeGitHubOptions = {}): Promise<
     const form = new URLSearchParams(body);
 
     if (req.method === 'POST' && url.pathname === '/login/device/code') {
+      if (options.deviceStart) {
+        const start = options.deviceStart;
+        if (start.text !== undefined) {
+          res.writeHead(start.status, { 'Content-Type': start.contentType ?? 'text/html; charset=utf-8' });
+          res.end(start.text);
+          return;
+        }
+        return json(res, start.status, start.body ?? {});
+      }
       if (form.get('client_id') !== clientId) {
         return json(res, 404, { error: 'Not Found' });
       }
-      return json(res, 200, {
+      const payload = {
         device_code: 'device-code-xyz',
         user_code: 'WDJB-MJHT',
         verification_uri: `${endpoints.oauthBase}/login/device`,
         expires_in: 900,
         interval: 1,
-      });
+      };
+      if (options.deviceCodeAsForm) {
+        res.writeHead(200, { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8' });
+        const pairs: Array<[string, string]> = Object.entries(payload).map(([k, v]) => [k, String(v)]);
+        res.end(new URLSearchParams(pairs).toString());
+        return;
+      }
+      return json(res, 200, payload);
     }
 
     if (req.method === 'POST' && url.pathname === '/login/oauth/access_token') {
