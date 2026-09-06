@@ -445,3 +445,121 @@ test('giving up on a sign-in stops only that sign-in, and the manager keeps work
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/* ------------------------------------------------------------------------ *
+ * The code that never reached the screen.
+ *
+ * Second thing observed on the installed build, after the URL was fixed: the
+ * browser opened the right page, which asked for the nine-character code, and
+ * the dialog showed a spinner and no code. Two reasons, both in this file's
+ * reach: the code was read only at the instant the URL first appeared - so if
+ * the pipe delivered it a moment later it was never read at all - and it was
+ * reported once, on the one event that the next event replaced.
+ * ------------------------------------------------------------------------ */
+
+/** A stand-in codex whose `--device-auth` writes the prompt in the given pieces. */
+function standInCodex(root: string, chunks: readonly string[], intervalMs = 250): void {
+  writeFileSync(
+    join(root, 'login'),
+    [
+      "const args = process.argv.slice(2).join(' ');",
+      "if (args === '--help') { console.log('  --device-auth'); process.exit(0); }",
+      "if (args === 'status') { console.log('Not logged in'); process.exit(1); }",
+      "if (args === '--device-auth') {",
+      `  const chunks = ${JSON.stringify(chunks)}; let i = 0;`,
+      `  const tick = () => { if (i < chunks.length) { process.stdout.write(chunks[i++]); setTimeout(tick, ${intervalMs}); } };`,
+      '  tick(); setTimeout(() => {}, 60_000);',
+      '}',
+    ].join('\n'),
+    'utf8',
+  );
+}
+
+async function connectAgainst(chunks: readonly string[]): Promise<{
+  progress: Array<{ phase: string; url?: string; code?: string }>;
+  opened: string[];
+}> {
+  const root = mkdtempSync(join(tmpdir(), 'lao-codex-chunks-'));
+  const paths = ensureAppPaths({
+    root,
+    runtimes: join(root, 'runtimes'),
+    profiles: join(root, 'profiles'),
+    data: join(root, 'data'),
+    logs: join(root, 'logs'),
+    artifacts: join(root, 'artifacts'),
+    updates: join(root, 'updates'),
+    staging: join(root, 'staging'),
+  });
+  standInCodex(root, chunks);
+  const processManager = new RealProcessManager();
+  const runtimeManager = {
+    async getExecutablePath() {
+      return process.execPath;
+    },
+  } as unknown as RuntimeManager;
+  const manager = new CodexAccountManager({ runtimeManager, paths, processManager });
+  const progress: Array<{ phase: string; url?: string; code?: string }> = [];
+  const opened: string[] = [];
+  try {
+    manager.createAccount(ACCOUNT);
+    await manager.connect(ACCOUNT, {
+      openUrl: (url) => {
+        opened.push(url);
+      },
+      onProgress: (p) =>
+        progress.push({ phase: p.phase, ...(p.url ? { url: p.url } : {}), ...(p.code ? { code: p.code } : {}) }),
+      urlTimeoutMs: 15_000,
+      completionTimeoutMs: 3_000,
+    });
+    return { progress, opened };
+  } finally {
+    await processManager.cancelAll(1000);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** The real prompt cut where a pipe might cut it: after the URL, inside its reset sequence. */
+const SPLIT_PROMPT: readonly string[] = [
+  DEVICE_PROMPT.slice(0, DEVICE_PROMPT.indexOf('https://')) + 'https://auth.openai.com/codex/device\x1b[',
+  `0m\n\n2. Enter this one-time code ${ANSI_GRAY}(expires in 15 minutes)${ANSI_RESET}\n   ${ANSI_BLUE}`,
+  `ABCD-EFGH${ANSI_RESET}\n\n${ANSI_GRAY}Continue only if you started this login in Codex.${ANSI_RESET}\n`,
+];
+
+test('a code that arrives after the URL, with an escape cut in half, is still reported', async () => {
+  const { progress, opened } = await connectAgainst(SPLIT_PROMPT);
+
+  assert.deepEqual(opened, ['https://auth.openai.com/codex/device'], 'the page opened as soon as it was known');
+  const withCode = progress.filter((p) => p.code === 'ABCD-EFGH');
+  assert.ok(withCode.length > 0, `the code was reported (got ${JSON.stringify(progress)})`);
+  assert.ok(
+    withCode.every((p) => p.url === 'https://auth.openai.com/codex/device'),
+    'every report that carries the code carries the page too',
+  );
+  assert.ok(
+    withCode.some((p) => p.phase === 'waiting-for-completion'),
+    'the waiting report itself carries the code, not only the one that opened the browser',
+  );
+  // And nothing with an escape sequence ever left this module.
+  for (const p of progress) {
+    assert.doesNotMatch(p.code ?? '', /\x1b/);
+    assert.doesNotMatch(p.url ?? '', /\x1b/);
+  }
+});
+
+test('the prompt with Windows line endings yields the same URL and code', async () => {
+  const { progress } = await connectAgainst([DEVICE_PROMPT.replace(/\n/g, '\r\n')]);
+  const awaiting = progress.find((p) => p.phase === 'awaiting-browser');
+  assert.equal(awaiting?.url, 'https://auth.openai.com/codex/device');
+  assert.equal(awaiting?.code, 'ABCD-EFGH');
+  const waiting = progress.find((p) => p.phase === 'waiting-for-completion');
+  assert.equal(waiting?.code, 'ABCD-EFGH', 'and the waiting report repeats it');
+  assert.equal(waiting?.url, 'https://auth.openai.com/codex/device');
+});
+
+test('a sign-in that ends carries no code on its final report', async () => {
+  const { progress } = await connectAgainst([DEVICE_PROMPT]);
+  const last = progress[progress.length - 1]!;
+  assert.equal(last.phase, 'failed');
+  assert.equal(last.code, undefined, 'the code belongs to the attempt, and the attempt is over');
+  assert.equal(last.url, undefined);
+});

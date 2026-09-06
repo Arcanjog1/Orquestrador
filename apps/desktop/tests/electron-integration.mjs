@@ -343,6 +343,125 @@ test('a verification is added, edited and switched off on the real Settings scre
   }
 });
 
+test('the login dialog shows the device code, keeps it while waiting, and drops it when done', async () => {
+  const window = await openWindow();
+
+  // Reach the dialog the way a person does: Settings, add an OpenAI account,
+  // "Criar e conectar". No Codex runtime is installed in this test's
+  // application root, so the real sign-in ends quickly; the dialog is open
+  // either way, listening for this account's progress.
+  await window.webContents.executeJavaScript(
+    `(() => { location.hash = '#/configuracoes?tab=accounts'; return true; })()`,
+  );
+  await reloadWindow(window);
+  await waitForText(window, /Adicionar conta OpenAI/, 15_000);
+  await window.webContents.executeJavaScript(`
+    [...document.querySelectorAll('button')]
+      .find((b) => b.textContent.trim() === 'Adicionar conta OpenAI').click()
+  `);
+  await waitForText(window, /Adicionar conta OpenAI/, 10_000);
+  await window.webContents.executeJavaScript(`
+    (() => {
+      const el = document.querySelector('input[placeholder="Ex.: Codex Trabalho"]');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, 'Codex Teste');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()
+  `);
+  await window.webContents.executeJavaScript(`
+    [...document.querySelectorAll('button')]
+      .find((b) => b.textContent.trim() === 'Criar e conectar').click()
+  `);
+  await waitForText(window, /Conectando OpenAI|OpenAI conectado/, 15_000);
+
+  const accounts = await window.webContents.executeJavaScript('window.api.accounts.list()');
+  const account = accounts.find((a) => a.provider === 'openai' && a.name === 'Codex Teste');
+  assert.ok(account, 'the account the dialog is for');
+
+  // From here the main process speaks, exactly as the service does: the
+  // payloads below are the shapes the fixed manager publishes.
+  const say = (payload) => services.events.emit('account:progress', { accountId: account.id, ...payload });
+
+  say({ stage: 'awaiting-browser', label: 'Abrindo o navegador para você entrar...', url: 'https://auth.openai.com/codex/device', code: 'ABCD-EFGH' });
+  let text = await waitForText(window, /ABCD-EFGH/, 10_000);
+  assert.match(text, /Código do dispositivo/);
+  assert.match(text, /Copiar código/);
+  assert.match(text, /Digite esse código na página aberta no navegador/);
+
+  // The next report says nothing about the page or the code. Both stay.
+  say({ stage: 'waiting-for-completion', label: 'Aguardando você concluir no navegador...' });
+  await new Promise((r) => setTimeout(r, 300));
+  text = await window.webContents.executeJavaScript('document.body.innerText');
+  assert.match(text, /ABCD-EFGH/, 'the code survives a report that does not mention it');
+  assert.match(text, /Aguardando você concluir no navegador/);
+  assert.match(text, /Abrir o navegador de novo/, 'and so does the page');
+
+  // The code is what was rendered, with no escape bytes and nothing else.
+  const shown = await window.webContents.executeJavaScript(
+    `document.querySelector('[data-testid="device-code"]').textContent`,
+  );
+  assert.equal(shown, 'ABCD-EFGH');
+
+  // Connected: the code goes, and the dialog closes by itself.
+  say({ stage: 'connected', label: 'Conta conectada.' });
+  await waitForText(window, /OpenAI conectado/, 10_000);
+  text = await window.webContents.executeJavaScript('document.body.innerText');
+  assert.doesNotMatch(text, /ABCD-EFGH/, 'a finished attempt keeps no code on screen');
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    text = await window.webContents.executeJavaScript('document.body.innerText');
+    if (!/Conectando OpenAI|OpenAI conectado/.test(text)) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.doesNotMatch(text, /OpenAI conectado/, 'the dialog closed on its own');
+});
+
+test('a dialog that missed the first report still gets the code from the next one', async () => {
+  const window = await openWindow();
+
+  // Open a fresh dialog the plain way: a second OpenAI account, then
+  // "Criar e conectar". Whatever the real sign-in reported before this
+  // dialog existed is gone - nothing was listening.
+  await window.webContents.executeJavaScript(
+    `(() => { location.hash = '#/configuracoes?tab=accounts'; return true; })()`,
+  );
+  await reloadWindow(window);
+  await waitForText(window, /Adicionar conta OpenAI/, 15_000);
+  await window.webContents.executeJavaScript(`
+    [...document.querySelectorAll('button')]
+      .find((b) => b.textContent.trim() === 'Adicionar conta OpenAI').click()
+  `);
+  await waitForText(window, /Ex\.: Codex Trabalho|Adicionar conta OpenAI/, 10_000);
+  await window.webContents.executeJavaScript(`
+    (() => {
+      const el = document.querySelector('input[placeholder="Ex.: Codex Trabalho"]');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, 'Codex Segundo');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()
+  `);
+  await window.webContents.executeJavaScript(`
+    [...document.querySelectorAll('button')]
+      .find((b) => b.textContent.trim() === 'Criar e conectar').click()
+  `);
+  await waitForText(window, /Conectando OpenAI|OpenAI conectado|Não conseguimos concluir/, 15_000);
+
+  const accounts = await window.webContents.executeJavaScript('window.api.accounts.list()');
+  const account = accounts.find((a) => a.provider === 'openai' && a.name === 'Codex Segundo');
+  assert.ok(account);
+  const say = (payload) => services.events.emit('account:progress', { accountId: account.id, ...payload });
+
+  // No `awaiting-browser` ever reaches this dialog. The manager repeats the
+  // page and the code on every waiting report, so the next one is enough.
+  say({ stage: 'waiting-for-completion', label: 'Aguardando você concluir no navegador...', url: 'https://auth.openai.com/codex/device', code: 'ABCD-EFGH' });
+  const text = await waitForText(window, /ABCD-EFGH/, 10_000);
+  assert.match(text, /Copiar código/);
+  assert.match(text, /Abrir o navegador de novo/);
+  say({ stage: 'cancelled', label: 'Conexão cancelada.' });
+});
+
 /* ------------------------------------------------------------------ helpers */
 
 let sharedWindow = null;
