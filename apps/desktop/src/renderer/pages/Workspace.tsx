@@ -18,7 +18,7 @@ import {
   RenameSessionDialog,
   ConfirmDialog,
 } from "@/components/orch/dialogs";
-import { reasoningLabel, suggestions, type Agent } from "@/lib/orchestrator-data";
+import { reasoningLabel, suggestions, type Agent, selectionLabel } from "@/lib/orchestrator-data";
 import {
   agentOfAuthor,
   buildTimeline,
@@ -387,8 +387,12 @@ export function WorkspacePage({
       orchestratorReasoning: reasoningLabel(team?.orchestrator.reasoning),
       workerName: team?.worker.agentId ? "Claude Code" : null,
       workerAccount: team?.worker.accountName ?? null,
-      workerModel: team?.worker.model ?? null,
-      workerReasoning: reasoningLabel(team?.worker.reasoning),
+      // Under automatic selection the worker has no fixed model: the badge
+      // says so, and each invocation's card carries the model that ran.
+      workerModel:
+        team?.worker.selection === "manual" ? (team.worker.model ?? null) : team?.worker.agentId ? selectionLabel(team.worker.selection) : null,
+      workerReasoning:
+        team?.worker.selection === "manual" ? reasoningLabel(team.worker.reasoning) : null,
     };
   }, [workspace]);
 

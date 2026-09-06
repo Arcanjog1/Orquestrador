@@ -40,7 +40,29 @@ export function toMessageView(record: MessageRecord): ChatMessageView {
     text: record.body,
     createdAt: record.created_at,
     runId: record.run_id,
+    routing: routingOfPayload(record.payload),
   };
+}
+
+/** The routing a worker message was stored with, if any. Never throws on an odd payload. */
+function routingOfPayload(payload: string | null): ChatMessageView['routing'] {
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(payload) as { routing?: Record<string, unknown> };
+    const routing = parsed?.routing;
+    if (!routing || typeof routing !== 'object') return null;
+    const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+    // Stored as the loop's RoutingRecord (resolvedModel / resolvedReasoning).
+    return {
+      model: str(routing.resolvedModel ?? routing.model),
+      reasoning: str(routing.resolvedReasoning ?? routing.reasoning),
+      selectionMode: str(routing.selectionMode) ?? 'auto',
+      selectionReason: redact(str(routing.selectionReason) ?? ''),
+      fallbackUsed: routing.fallbackUsed === true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function toRunView(record: RunRecord, steps: readonly RunStepRecord[]): RunView {
@@ -84,6 +106,8 @@ export function toRunDetailView(
 ): RunDetailView {
   const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
   const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+  const flag = (v: unknown): boolean | null =>
+    v === 1 || v === true ? true : v === 0 || v === false ? false : null;
   return {
     run: toRunView(record, steps),
     baseline: {
@@ -111,6 +135,13 @@ export function toRunDetailView(
       exitCode: num(row.exit_code),
       durationMs: num(row.duration_ms),
       startedAt: str(row.started_at) ?? '',
+      requestedCapability: str(row.requested_capability),
+      requestedReasoning: str(row.requested_reasoning),
+      model: str(row.resolved_model),
+      reasoning: str(row.resolved_reasoning),
+      selectionMode: str(row.selection_mode),
+      selectionReason: str(row.selection_reason) === null ? null : redact(str(row.selection_reason)!),
+      fallbackUsed: flag(row.fallback_used),
     })),
     verifications: verifications.map((row) => ({
       iteration: num(row.iteration) ?? 0,

@@ -8,13 +8,20 @@
  *  - the prompt goes over **stdin**, never on the command line, so no prompt
  *    can be mangled by quoting or picked up by another process's argv;
  *  - the non-interactive mode is *detected*, not assumed.
+ *
+ * The orchestrator's model and reasoning level are the person's fixed choice
+ * for the project. The reasoning level is still checked against the installed
+ * build before it is sent: a Codex older than rust-v0.140.0 does not know
+ * `max`, and sending it would be the incident this product just fixed, from
+ * the other direction. An unsupported level is replaced by the strongest one
+ * the build supports, and the result says so.
  */
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessManager } from './adapter-types.js';
-import { makeAgentResult } from '../core.js';
+import { codexSupportedEfforts, makeAgentResult, resolveFixedEffort, versionNumberOf } from '../core.js';
 import { readCapabilities, type CliCapabilities } from './cli-capabilities.js';
 
 export interface CodexAdapterOptions {
@@ -40,8 +47,9 @@ export interface CodexAdapterOptions {
   /** Model to run with (`-m`), when the team chose one. */
   model?: string | null;
   /**
-   * Reasoning level (`low` | `medium` | `high`), passed as the documented
-   * `model_reasoning_effort` config override when the team chose one.
+   * Reasoning level (`low` … `max`), passed as the documented
+   * `model_reasoning_effort` config override when the team chose one - after
+   * checking the installed build supports it.
    */
   reasoningEffort?: string | null;
 }
@@ -53,6 +61,8 @@ export class CodexAdapter implements AgentRunner {
   private capabilities: CliCapabilities | null = null;
   /** `codex exec --help`: a subcommand's flags are not in the top-level help. */
   private execCapabilities: CliCapabilities | null = null;
+  /** The installed version, read once, for the reasoning-level check. */
+  private version: string | null | undefined;
   private readonly controllers = new Set<AbortController>();
 
   constructor(private readonly options: CodexAdapterOptions) {}
@@ -68,7 +78,11 @@ export class CodexAdapter implements AgentRunner {
     this.controllers.add(controller);
 
     try {
-      const plan = await this.buildArgs(executable, input.workingDirectory, scratch);
+      const routing = input.routing ?? {
+        model: this.options.model ?? null,
+        reasoning: this.options.reasoningEffort ?? null,
+      };
+      const plan = await this.buildArgs(executable, input.workingDirectory, scratch, routing);
       const env = { ...(this.options.buildEnvironment?.() ?? {}), ...(input.env ?? {}) };
       const result = await this.options.processManager.run({
         command: executable,
@@ -95,6 +109,7 @@ export class CodexAdapter implements AgentRunner {
         stderr: result.stderr,
         truncated: result.truncated,
         executable,
+        applied: plan.applied,
         ...(result.error ? { error: result.error } : {}),
       });
     } finally {
@@ -130,6 +145,32 @@ export class CodexAdapter implements AgentRunner {
   }
 
   /**
+   * The reasoning levels the installed build accepts, from its version.
+   * Null when the version cannot be read: only the universal levels are
+   * then sent.
+   */
+  async supportedEfforts(cwd = process.cwd()): Promise<readonly string[] | null> {
+    const executable = await this.options.resolveExecutable();
+    return codexSupportedEfforts(await this.readVersion(executable, cwd));
+  }
+
+  private async readVersion(executable: string, cwd: string): Promise<string | null> {
+    if (this.version !== undefined) return this.version;
+    try {
+      const result = await this.options.processManager.run({
+        command: executable,
+        args: ['--version'],
+        cwd,
+        timeoutMs: 30_000,
+      });
+      this.version = result.exitCode === 0 ? versionNumberOf(result.stdout.trim()) : null;
+    } catch {
+      this.version = null;
+    }
+    return this.version;
+  }
+
+  /**
    * Picks the non-interactive invocation this Codex build actually supports.
    *
    * `codex exec` is the documented headless mode. If a build does not offer it
@@ -147,7 +188,12 @@ export class CodexAdapter implements AgentRunner {
    * `--output-schema` plus `-o/--output-last-message`, which is what this
    * builds when the installed build offers them.
    */
-  private async buildArgs(executable: string, cwd: string, scratch: string): Promise<CodexPlan> {
+  private async buildArgs(
+    executable: string,
+    cwd: string,
+    scratch: string,
+    routing: { model: string | null; reasoning: string | null },
+  ): Promise<CodexPlan> {
     this.capabilities ??= await readCapabilities(this.options.processManager, executable, cwd);
     if (!this.capabilities.subcommands.has('exec')) {
       throw new CodexCapabilityError(
@@ -182,16 +228,40 @@ export class CodexAdapter implements AgentRunner {
       args.push('--output-schema', schemaPath);
     }
 
+    const applied: CodexPlan['applied'] = { model: null, reasoning: null, fallbackUsed: false, note: null };
+    const notes: string[] = [];
+
     // The team's model and reasoning level, only on builds whose `exec` takes
     // them. codex-cli 0.153.0 offers `-m/--model` and `-c/--config key=value`,
     // and `model_reasoning_effort` is a documented config key. The value is
     // quoted so the CLI's TOML reader takes it as the string it is.
-    if (this.options.model && this.execCapabilities.flags.has('--model')) {
-      args.push('--model', this.options.model);
+    if (routing.model) {
+      if (this.execCapabilities.flags.has('--model')) {
+        args.push('--model', routing.model);
+        applied.model = routing.model;
+      } else {
+        applied.fallbackUsed = true;
+        notes.push('esta versão do Codex não aceita --model');
+      }
     }
-    if (this.options.reasoningEffort && this.execCapabilities.flags.has('--config')) {
-      args.push('--config', `model_reasoning_effort="${this.options.reasoningEffort}"`);
+    if (routing.reasoning) {
+      if (this.execCapabilities.flags.has('--config')) {
+        const supported = codexSupportedEfforts(await this.readVersion(executable, cwd));
+        const resolved = resolveFixedEffort(routing.reasoning, supported);
+        if (resolved.value) {
+          args.push('--config', `model_reasoning_effort="${resolved.value}"`);
+          applied.reasoning = resolved.value;
+        }
+        if (resolved.fallbackUsed) {
+          applied.fallbackUsed = true;
+          if (resolved.note) notes.push(resolved.note);
+        }
+      } else {
+        applied.fallbackUsed = true;
+        notes.push('esta versão do Codex não aceita --config');
+      }
     }
+    applied.note = notes.length > 0 ? notes.join('; ') : null;
 
     let lastMessagePath: string | null = null;
     if (this.execCapabilities.flags.has('--output-last-message')) {
@@ -199,7 +269,7 @@ export class CodexAdapter implements AgentRunner {
       args.push('--output-last-message', lastMessagePath);
     }
 
-    return { args, lastMessagePath };
+    return { args, lastMessagePath, applied };
   }
 }
 
@@ -207,6 +277,7 @@ interface CodexPlan {
   readonly args: string[];
   /** Where Codex was asked to write its final message, when it can. */
   readonly lastMessagePath: string | null;
+  readonly applied: { model: string | null; reasoning: string | null; fallbackUsed: boolean; note: string | null };
 }
 
 /** Reads a file the CLI may or may not have written. Absence is not an error. */

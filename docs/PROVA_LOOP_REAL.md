@@ -47,9 +47,12 @@ registrada no fim do documento.
    Na barra superior, **Orquestrador → Editar equipe**: escolha a conta
    OpenAI em *Orchestrator* e a conta Anthropic em *Coding worker* (as contas
    aparecem pelo nome que você deu, por exemplo *Codex Trabalho* e *Claude
-   Trabalho*; modelo e raciocínio são opcionais) e clique em **Salvar equipe**.
-   O envio é recusado, dizendo qual conta falta, enquanto a equipe não estiver
-   completa.
+   Trabalho*). No orquestrador, modelo e raciocínio são opcionais. No worker,
+   deixe **Seleção: Automático** e **Estratégia: Balanceado** — o aplicativo
+   escolhe o modelo e o raciocínio do Claude para cada tarefa
+   (`docs/ROTEAMENTO_WORKER.md`); *Configuração avançada* só se você quiser
+   fixar um modelo à mão. Clique em **Salvar equipe**. O envio é recusado,
+   dizendo qual conta falta, enquanto a equipe não estiver completa.
 4. **Settings → Verificações do projeto → Adicionar verificação**, e preencha:
 
    | campo | valor |
@@ -116,6 +119,22 @@ reprompt automático real está provado.
 Na própria interface: a timeline deve mostrar as fases reais — análise,
 orquestrador, trabalhador, evidência, verificação, revisão, concluído — e o
 contador de iterações do run.
+
+Sobre o runtime e o roteamento, três provas que só a máquina real dá:
+
+1. **Nenhum `unknown variant \`max\``.** Se o Codex falhar, o cartão diz
+   *"O Codex CLI falhou"* e **Detalhes** mostra a linha `ERROR` e o campo
+   `executable`. Com o 0.153.4 gerenciado, isso não acontece; se acontecer,
+   `executable` diz qual binário rodou.
+2. **Decisão do Codex → invocação do Claude.** Em **Detalhes → Invocações**, a
+   linha do Codex vem antes da linha do Claude Code, na mesma iteração, e a
+   do Claude traz *Pedido FAST/LOW* (ou o que o Codex pediu) — o pedido veio
+   da decisão, não da tela.
+3. **Modelo escolhido automaticamente.** O cartão do worker na timeline mostra
+   o modelo (por exemplo `haiku` para o `hello.txt`), o raciocínio e *"Seleção
+   automática: Codex pediu …; modelo …; raciocínio …"*; **Detalhes** repete
+   Modelo · Raciocínio · Seleção · Motivo. O chip da equipe mostra
+   *Automático* no worker, porque não há modelo fixo.
 
 Se quiser o registro completo lido do banco (turnos, prompts, veredictos,
 gate), `scripts/lib/loop-evidence.mjs` imprime tudo; é ferramenta de

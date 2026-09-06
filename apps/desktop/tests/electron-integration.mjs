@@ -515,6 +515,14 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
     assert.match(dialog, /Provider/i);
     assert.match(dialog, /Model/i);
     assert.match(dialog, /Reasoning/i);
+    // The worker's model is chosen per task: the dialog says so, offers the
+    // strategy, and keeps the manual choice behind "Configuração avançada".
+    assert.match(dialog, /O AI Orchestrator escolhe o modelo e o nível de raciocínio para cada tarefa\./);
+    assert.match(dialog, /Configuração avançada/);
+    const selection = await window.webContents.executeJavaScript(
+      `document.querySelector('[data-testid="team-worker-selection"]').textContent`,
+    );
+    assert.equal(selection.trim(), 'Automático');
 
     // Choose a model for the orchestrator and save.
     await type(window, 'team-orchestrator-model', 'gpt-5.1-codex');
@@ -537,6 +545,7 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
     assert.equal(saved.team.orchestrator.model, 'gpt-5.1-codex');
     assert.equal(saved.team.worker.accountName, 'Claude Trabalho');
     assert.equal(saved.team.worker.provider, 'anthropic');
+    assert.equal(saved.team.worker.selection, 'auto', 'automatic unless the person opened the advanced settings');
     assert.equal(saved.workerAgentId, `agent-worker-${saved.team.worker.accountId}`);
 
     // And the header shows the team by account after a restart of the page.

@@ -10,27 +10,29 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api, messageOf } from "@/lib/api";
-import { reasoningLabel } from "@/lib/orchestrator-data";
+import { reasoningLabel, selectionLabel } from "@/lib/orchestrator-data";
 import { ProviderIcon, SectionLabel } from "./primitives";
 import type {
   AccountView,
   ProviderName,
   ReasoningLevel,
   TeamMemberView,
+  WorkerSelection,
   WorkspaceView,
 } from "@shared/ipc-contract";
 
 /**
- * The team of one project: who supervises, who executes, with which account,
- * model and reasoning level.
+ * The team of one project: who supervises, who executes, with which account -
+ * and how each one's model is chosen.
  *
- * Four things that used to be blurred are kept apart on purpose:
- *
- *   Provider  - fixed by the role. Codex supervises, Claude Code executes.
- *   Account   - one of the person's *persisted* accounts of that provider,
- *               shown by its own name ("Codex Trabalho"), never the provider's.
- *   Model     - optional; blank means the CLI's own default.
- *   Reasoning - optional; blank means the CLI's own default.
+ *   Orchestrator  Provider fixed (OpenAI · Codex); account by name; model and
+ *                 reasoning are the person's fixed choice, blank meaning the
+ *                 CLI's default.
+ *   Worker        Provider fixed (Anthropic · Claude Code); account by name;
+ *                 the model and reasoning are chosen by the AI Orchestrator
+ *                 for each task ("Automático"), with a strategy to lean on.
+ *                 "Configuração avançada" opens the manual override: a model
+ *                 and a level typed by the person, sent exactly.
  *
  * Saving is `workspace.setTeam`, which is what the loop reads on its next run
  * and what a restart shows again.
@@ -62,7 +64,15 @@ const ROLES: ReadonlyArray<{
   },
 ];
 
-const LEVELS: ReasoningLevel[] = ["low", "medium", "high"];
+/**
+ * Levels a person can pick by name. Each is checked against the installed
+ * CLI before it is sent; one the CLI does not support is replaced by the
+ * strongest it does, and the run says so.
+ */
+const LEVELS: ReasoningLevel[] = ["low", "medium", "high", "xhigh", "max"];
+
+/** The automatic strategies, in the order the picker shows them. */
+const STRATEGIES: WorkerSelection[] = ["auto", "speed", "quality"];
 
 /** Radix Select cannot hold an empty string, so "default" stands in for it. */
 const DEFAULT = "__default__";
@@ -71,6 +81,7 @@ interface MemberDraft {
   accountId: string;
   model: string;
   reasoning: string;
+  selection: WorkerSelection;
 }
 
 function draftOf(member: TeamMemberView | undefined, fallback: AccountView | undefined): MemberDraft {
@@ -78,6 +89,7 @@ function draftOf(member: TeamMemberView | undefined, fallback: AccountView | und
     accountId: member?.accountId ?? fallback?.id ?? "",
     model: member?.model ?? "",
     reasoning: member?.reasoning ?? DEFAULT,
+    selection: member?.selection ?? "auto",
   };
 }
 
@@ -129,10 +141,11 @@ export function TeamForm({
   const update = (role: TeamMemberView["role"], patch: Partial<MemberDraft>) =>
     setDrafts((prev) => ({ ...prev, [role]: { ...prev[role], ...patch } }));
 
-  const toInput = (draft: MemberDraft) => ({
+  const toInput = (role: TeamMemberView["role"], draft: MemberDraft) => ({
     accountId: draft.accountId,
     ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
     ...(draft.reasoning !== DEFAULT ? { reasoning: draft.reasoning as ReasoningLevel } : {}),
+    ...(role === "CODING_WORKER" ? { selection: draft.selection } : {}),
   });
 
   const save = async () => {
@@ -142,8 +155,8 @@ export function TeamForm({
     try {
       await api.workspace.setTeam({
         workspaceId: workspace.id,
-        orchestrator: toInput(drafts.ORCHESTRATOR),
-        worker: toInput(drafts.CODING_WORKER),
+        orchestrator: toInput("ORCHESTRATOR", drafts.ORCHESTRATOR),
+        worker: toInput("CODING_WORKER", drafts.CODING_WORKER),
       });
       onSaved();
     } catch (e) {
@@ -159,6 +172,8 @@ export function TeamForm({
         const options = byProvider[spec.provider];
         const draft = drafts[spec.role];
         const prefix = spec.role === "ORCHESTRATOR" ? "orchestrator" : "worker";
+        const isWorker = spec.role === "CODING_WORKER";
+        const manual = isWorker && draft.selection === "manual";
         return (
           <div
             key={spec.role}
@@ -210,37 +225,112 @@ export function TeamForm({
                   </Select>
                 )}
               </Labeled>
-              <Labeled label="Model">
-                <Input
-                  className="mt-1 h-8 font-mono text-xs"
-                  placeholder={`padrão do CLI (${spec.modelHint})`}
-                  value={draft.model}
-                  onChange={(e) => update(spec.role, { model: e.target.value })}
-                  data-testid={`team-${prefix}-model`}
-                />
-              </Labeled>
-              <Labeled label="Reasoning">
-                <Select
-                  value={draft.reasoning}
-                  onValueChange={(reasoning) => update(spec.role, { reasoning })}
-                >
-                  <SelectTrigger
-                    className="mt-1 h-8 text-xs"
-                    data-testid={`team-${prefix}-reasoning`}
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={DEFAULT}>Padrão do CLI</SelectItem>
-                    {LEVELS.map((level) => (
-                      <SelectItem key={level} value={level}>
-                        {reasoningLabel(level)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Labeled>
+
+              {isWorker && !manual && (
+                <>
+                  <Labeled label="Seleção">
+                    <div
+                      className="mt-1 rounded-md border border-border bg-surface px-2 py-1.5 text-xs"
+                      data-testid="team-worker-selection"
+                    >
+                      Automático
+                    </div>
+                  </Labeled>
+                  <Labeled label="Estratégia">
+                    <Select
+                      value={draft.selection}
+                      onValueChange={(selection) =>
+                        update(spec.role, { selection: selection as WorkerSelection })
+                      }
+                    >
+                      <SelectTrigger className="mt-1 h-8 text-xs" data-testid="team-worker-strategy">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {STRATEGIES.map((strategy) => (
+                          <SelectItem key={strategy} value={strategy}>
+                            {strategy === "auto" ? "Balanceado" : selectionLabel(strategy)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Labeled>
+                </>
+              )}
+
+              {(!isWorker || manual) && (
+                <>
+                  <Labeled label="Model">
+                    <Input
+                      className="mt-1 h-8 font-mono text-xs"
+                      placeholder={`padrão do CLI (${spec.modelHint})`}
+                      value={draft.model}
+                      onChange={(e) => update(spec.role, { model: e.target.value })}
+                      data-testid={`team-${prefix}-model`}
+                    />
+                  </Labeled>
+                  <Labeled label="Reasoning">
+                    <Select
+                      value={draft.reasoning}
+                      onValueChange={(reasoning) => update(spec.role, { reasoning })}
+                    >
+                      <SelectTrigger
+                        className="mt-1 h-8 text-xs"
+                        data-testid={`team-${prefix}-reasoning`}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={DEFAULT}>Padrão do CLI</SelectItem>
+                        {LEVELS.map((level) => (
+                          <SelectItem key={level} value={level}>
+                            {reasoningLabel(level)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Labeled>
+                </>
+              )}
             </div>
+
+            {isWorker && (
+              <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+                {manual ? (
+                  <>
+                    <span data-testid="team-worker-manual-hint">
+                      Seleção manual: o modelo e o nível acima são enviados exatamente como
+                      digitados. Um nível que a versão instalada não suporta é substituído, e a
+                      execução avisa.
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-auto h-6 shrink-0 text-[11px]"
+                      onClick={() => update(spec.role, { selection: "auto" })}
+                      data-testid="team-worker-automatic"
+                    >
+                      Voltar para automático
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <span data-testid="team-worker-auto-hint">
+                      O AI Orchestrator escolhe o modelo e o nível de raciocínio para cada tarefa.
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-auto h-6 shrink-0 text-[11px]"
+                      onClick={() => update(spec.role, { selection: "manual" })}
+                      data-testid="team-worker-advanced"
+                    >
+                      Configuração avançada
+                    </Button>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         );
       })}

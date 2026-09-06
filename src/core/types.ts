@@ -27,6 +27,8 @@ export interface AcceptanceCriterion {
   note?: string;
 }
 
+import type { CapabilityTier, ReasoningTier, WorkerRequirements } from '../routing/tiers.js';
+
 /** A decision returned by the orchestrator agent, after validation. */
 export interface Decision {
   action: DecisionAction;
@@ -42,6 +44,33 @@ export interface Decision {
   reason?: string;
   /** Files the orchestrator considers relevant for the worker. */
   relevantFiles?: string[];
+  /**
+   * What the coding worker needs for this task, in capability tiers - never
+   * a model name. Absent on decisions from before this field existed; the
+   * router then falls back to BALANCED/MEDIUM.
+   */
+  workerRequirements?: WorkerRequirements;
+}
+
+/** The model and reasoning resolved for one invocation, as the CLI takes them. */
+export interface InvocationRouting {
+  model: string | null;
+  reasoning: string | null;
+}
+
+/**
+ * How an invocation's model and reasoning were chosen. Persisted with the
+ * invocation, shown in the timeline and the run's details.
+ */
+export interface RoutingRecord {
+  requestedCapability: CapabilityTier | null;
+  requestedReasoning: ReasoningTier | null;
+  resolvedModel: string | null;
+  resolvedReasoning: string | null;
+  /** `auto` (router), `manual` (the person's override), `fixed` (the orchestrator's own config). */
+  selectionMode: 'auto' | 'manual' | 'fixed';
+  selectionReason: string;
+  fallbackUsed: boolean;
 }
 
 /** Input handed to an `AgentRunner`. */
@@ -60,6 +89,8 @@ export interface AgentInput {
   iteration: number;
   /** Extra environment for the child process (e.g. CLAUDE_CONFIG_DIR). */
   env?: Record<string, string | undefined>;
+  /** Model and reasoning for this invocation; absent means the adapter's defaults. */
+  routing?: InvocationRouting;
 }
 
 /** How an agent invocation ended. */
@@ -81,6 +112,11 @@ export interface AgentResult {
   error?: string;
   /** The executable that ran, so a failure names the binary it came from. */
   executable?: string;
+  /**
+   * What the adapter actually sent for model and reasoning, after checking
+   * them against the CLI - with a note when it had to change something.
+   */
+  applied?: InvocationRouting & { fallbackUsed: boolean; note: string | null };
 }
 
 /** Health of an agent CLI, produced by `AgentRunner.healthCheck`. */
@@ -173,6 +209,14 @@ export interface WorkerRecord {
   exitCode: number | null;
   outcome: AgentOutcome;
   durationMs: number;
+  /** How the model was chosen for this attempt. */
+  routing?: RoutingRecord;
+  /** The tree changed relative to the previous attempt's evidence. */
+  progressed?: boolean;
+  /** A failure a better model would not fix (missing binary, login, quota). */
+  mechanical?: boolean;
+  /** The CLI refused the model by name. */
+  modelUnavailable?: boolean;
 }
 
 /** Outcome of the independent DONE validation (spec 15). */

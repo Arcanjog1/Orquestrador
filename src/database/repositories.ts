@@ -217,6 +217,8 @@ export interface WorkspaceWithAgents extends WorkspaceRecord {
   orchestrator_reasoning: string | null;
   worker_model: string | null;
   worker_reasoning: string | null;
+  /** `auto` | `speed` | `quality` | `manual`; null is auto. */
+  worker_selection: string | null;
 }
 
 /** One role's binding, as `setTeam` takes it. */
@@ -224,6 +226,7 @@ export interface TeamMemberInput {
   agentId: string;
   model?: string | null;
   reasoning?: string | null;
+  selection?: string | null;
 }
 
 export class WorkspaceRepository extends Repository {
@@ -299,8 +302,15 @@ export class WorkspaceRepository extends Repository {
         ['CODING_WORKER', worker],
       ] as const) {
         this.db.run(
-          'INSERT INTO workspace_agents (workspace_id, agent_id, role, model, reasoning) VALUES (?,?,?,?,?)',
-          [workspaceId, member.agentId, role, blankToNull(member.model), blankToNull(member.reasoning)],
+          'INSERT INTO workspace_agents (workspace_id, agent_id, role, model, reasoning, selection) VALUES (?,?,?,?,?,?)',
+          [
+            workspaceId,
+            member.agentId,
+            role,
+            blankToNull(member.model),
+            blankToNull(member.reasoning),
+            blankToNull(member.selection),
+          ],
         );
       }
       this.touch(workspaceId);
@@ -337,7 +347,8 @@ export class WorkspaceRepository extends Repository {
       role: string;
       model: string | null;
       reasoning: string | null;
-    }>('SELECT agent_id, role, model, reasoning FROM workspace_agents WHERE workspace_id = ?', [
+      selection: string | null;
+    }>('SELECT agent_id, role, model, reasoning, selection FROM workspace_agents WHERE workspace_id = ?', [
       row.id,
     ]);
     const orchestrator = bindings.find((b) => b.role === 'ORCHESTRATOR');
@@ -350,6 +361,7 @@ export class WorkspaceRepository extends Repository {
       orchestrator_reasoning: orchestrator?.reasoning ?? null,
       worker_model: worker?.model ?? null,
       worker_reasoning: worker?.reasoning ?? null,
+      worker_selection: worker?.selection ?? null,
     };
   }
 }
@@ -649,10 +661,21 @@ export class RunRepository extends Repository {
     exitCode: number | null;
     durationMs: number | null;
     startedAt: string;
+    /** How the model was chosen; absent for an invocation that was not routed. */
+    routing?: {
+      requestedCapability: string | null;
+      requestedReasoning: string | null;
+      resolvedModel: string | null;
+      resolvedReasoning: string | null;
+      selectionMode: string;
+      selectionReason: string;
+      fallbackUsed: boolean;
+    } | null;
   }): string {
     const id = newId('inv');
+    const routing = input.routing ?? null;
     this.db.run(
-      'INSERT INTO agent_invocations (id, run_id, iteration, agent_id, account_id, role, task, outcome, exit_code, duration_ms, started_at, finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO agent_invocations (id, run_id, iteration, agent_id, account_id, role, task, outcome, exit_code, duration_ms, started_at, finished_at, requested_capability, requested_reasoning, resolved_model, resolved_reasoning, selection_mode, selection_reason, fallback_used) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [
         id,
         input.runId,
@@ -666,6 +689,13 @@ export class RunRepository extends Repository {
         input.durationMs,
         input.startedAt,
         now(),
+        routing?.requestedCapability ?? null,
+        routing?.requestedReasoning ?? null,
+        routing?.resolvedModel ?? null,
+        routing?.resolvedReasoning ?? null,
+        routing?.selectionMode ?? null,
+        routing ? routing.selectionReason.slice(0, 1000) : null,
+        routing ? (routing.fallbackUsed ? 1 : 0) : null,
       ] as SqlValue[],
     );
     return id;

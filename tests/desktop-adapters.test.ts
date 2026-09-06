@@ -594,3 +594,137 @@ test('Claude Code is told the team\'s model and effort, only when its help offer
     assert.equal(run.stdin, 'p', 'the prompt still goes over stdin');
   }
 });
+
+
+/* ------------------------------------------------- per-invocation routing */
+
+/** Claude Code 2.1.263: the option lines the router reads, verbatim in shape. */
+const CLAUDE_HELP_ROUTED = `Usage: claude [options] [command] [prompt]
+
+Options:
+  -p, --print                       Print response and exit (useful for pipes).
+      --permission-mode <mode>      Permission mode to use for the session
+      --model <model>               Model for the current session. Provide an alias for the latest
+                                    model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name
+                                    (e.g. 'claude-fable-5').
+      --effort <level>              Effort level for the session (low, medium, high, xhigh, max)
+  -v, --version                     Output the version number
+  -h, --help                        Display help for command
+`;
+
+test('the help parser reads the values and aliases an option lists, and nothing else', async () => {
+  const { optionValues, modelAliases, optionDescription } = await import(
+    '../apps/desktop/src/main/adapters/cli-capabilities.js'
+  );
+  assert.deepEqual(optionValues(CLAUDE_HELP_ROUTED, '--effort'), ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(modelAliases(CLAUDE_HELP_ROUTED), ['fable', 'opus', 'sonnet']);
+  assert.match(optionDescription(CLAUDE_HELP_ROUTED, '--model') ?? '', /full name/);
+  assert.equal(optionValues(CLAUDE_HELP_ROUTED, '--permission-mode'), null, 'no list means unknown, not empty');
+  assert.equal(optionValues(CLAUDE_HELP_ROUTED, '--nope'), null);
+  assert.deepEqual(optionValues(CODEX_EXEC_HELP, '--sandbox'), ['read-only', 'workspace-write', 'danger-full-access']);
+  assert.equal(modelAliases(CLAUDE_HELP), null);
+});
+
+test('Claude Code takes the model and effort of each invocation, and only values its help declares', async () => {
+  const { manager, calls } = fakeProcessManager({ '--help': CLAUDE_HELP_ROUTED });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude',
+    buildEnvironment: () => ({ CLAUDE_CONFIG_DIR: '/profiles/a' }),
+    // The team's manual choice is only a default for invocations without routing.
+    model: 'claude-opus-5',
+    effort: 'high',
+  });
+
+  const capabilities = await adapter.describeCapabilities('/work');
+  assert.deepEqual(capabilities, {
+    modelFlag: true,
+    effortFlag: true,
+    declaredModels: ['fable', 'opus', 'sonnet'],
+    declaredEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  });
+  // The help was read in the account's environment.
+  assert.equal(calls[0]!.env?.CLAUDE_CONFIG_DIR, '/profiles/a');
+
+  const routed = await adapter.run({
+    prompt: 'p',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'r',
+    iteration: 1,
+    routing: { model: 'sonnet', reasoning: 'max' },
+  });
+  let args = calls.at(-1)!.args ?? [];
+  assert.equal(args[args.indexOf('--model') + 1], 'sonnet');
+  assert.equal(args[args.indexOf('--effort') + 1], 'max', 'declared, so sent');
+  assert.deepEqual(routed.applied, { model: 'sonnet', reasoning: 'max', fallbackUsed: false, note: null });
+
+  // Another invocation, another model: nothing sticks from the first.
+  await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 2, routing: { model: 'haiku', reasoning: 'low' } });
+  args = calls.at(-1)!.args ?? [];
+  assert.equal(args[args.indexOf('--model') + 1], 'haiku');
+  assert.equal(args[args.indexOf('--effort') + 1], 'low');
+
+  // No routing: the defaults.
+  await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 3 });
+  args = calls.at(-1)!.args ?? [];
+  assert.equal(args[args.indexOf('--model') + 1], 'claude-opus-5');
+  assert.equal(args[args.indexOf('--effort') + 1], 'high');
+});
+
+test('Claude Code never receives an effort its help did not name - "max" on a build without it becomes "high"', async () => {
+  const help = CLAUDE_HELP_ROUTED.replace('(low, medium, high, xhigh, max)', '(low, medium, high)');
+  const { manager, calls } = fakeProcessManager({ '--help': help });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude',
+    buildEnvironment: () => ({}),
+  });
+  const result = await adapter.run({
+    prompt: 'p',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'r',
+    iteration: 1,
+    routing: { model: 'opus', reasoning: 'max' },
+  });
+  const args = calls.at(-1)!.args ?? [];
+  assert.equal(args[args.indexOf('--effort') + 1], 'high');
+  assert.ok(!args.includes('max'));
+  assert.equal(result.applied?.reasoning, 'high');
+  assert.equal(result.applied?.fallbackUsed, true);
+  assert.match(result.applied?.note ?? '', /^Este nível não é suportado pela versão atual\./);
+});
+
+test('Codex: a saved "max" is sent only to a build that knows it; older builds get "xhigh" and a note', async () => {
+  for (const [version, expected, fallback] of [
+    ['codex-cli 0.130.0', 'xhigh', true],
+    ['codex-cli 0.153.4', 'max', false],
+  ] as const) {
+    const { manager, calls } = fakeProcessManager({
+      '--help': CODEX_HELP,
+      'exec --help': CODEX_EXEC_HELP_WITH_MODEL,
+      '--version': version,
+    });
+    const adapter = new CodexAdapter({
+      processManager: manager,
+      resolveExecutable: async () => '/managed/codex.exe',
+      model: 'gpt-5.1-codex',
+      reasoningEffort: 'max',
+    });
+    const result = await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 1 });
+    const args = calls.at(-1)!.args ?? [];
+    assert.ok(args.includes(`model_reasoning_effort="${expected}"`), `${version}: ${args.join(' ')}`);
+    assert.ok(!args.includes('model_reasoning_effort="max"') || expected === 'max');
+    assert.equal(result.applied?.reasoning, expected);
+    assert.equal(result.applied?.model, 'gpt-5.1-codex');
+    assert.equal(result.applied?.fallbackUsed, fallback);
+    if (fallback) assert.match(result.applied?.note ?? '', /^Este nível não é suportado pela versão atual\./);
+    else assert.equal(result.applied?.note, null);
+    // The version is read once, not per invocation.
+    await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 2 });
+    assert.equal(calls.filter((c) => (c.args ?? [])[0] === '--version').length, 1);
+    const supported = await adapter.supportedEfforts('/work');
+    assert.equal(supported?.includes('max'), expected === 'max');
+  }
+});

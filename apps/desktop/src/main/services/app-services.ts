@@ -19,6 +19,7 @@ import {
   isUsable,
 } from '../core.js';
 import type { AppPaths, WorkspaceWithAgents } from '../core.js';
+import { isWorkerSelection } from '../core.js';
 import { EventBus } from '../events.js';
 import { AccountService, type UrlOpener } from './account-service.js';
 import { AgentService, workerAgentIdFor } from './agent-service.js';
@@ -264,15 +265,35 @@ export class AppServices {
       model: workspace.orchestrator_model,
       reasoningEffort: workspace.orchestrator_reasoning,
     });
+    // The worker's model and reasoning are chosen per delegation by the
+    // loop's router, from what the orchestrator asks and what this account's
+    // Claude Code declares. The person's own model and level apply only
+    // under manual selection; they are still the adapter's defaults so a
+    // direct invocation behaves the same way.
+    const selection = isWorkerSelection(workspace.worker_selection)
+      ? workspace.worker_selection
+      : 'auto';
     const worker = new ClaudeCodeAdapter({
       processManager: this.processManager,
       resolveExecutable: () => this.runtimeManager.getExecutablePath('claude-code'),
       buildEnvironment: () =>
         accountId ? this.accountManager.buildEnvironment(accountId) : {},
-      model: workspace.worker_model,
-      effort: workspace.worker_reasoning,
+      model: selection === 'manual' ? workspace.worker_model : null,
+      effort: selection === 'manual' ? workspace.worker_reasoning : null,
     });
-    return { orchestrator, worker, workerAccountId: accountId };
+    return {
+      orchestrator,
+      worker,
+      workerAccountId: accountId,
+      workerRouting: {
+        provider: 'anthropic',
+        selection,
+        manual: { model: workspace.worker_model, reasoning: workspace.worker_reasoning },
+        // Read from the binary in this account's environment, once per run:
+        // a changed account or an updated Claude Code is read again.
+        capabilities: () => worker.describeCapabilities(workspace.local_path),
+      },
+    };
   }
 
   /** Stops everything still running. Called on quit and on test teardown. */

@@ -16,7 +16,7 @@
  *    by sending a gigabyte of text.
  */
 
-import { REASONING_LEVELS, type IpcMap, type RequestChannel } from './ipc-contract.js';
+import { REASONING_LEVELS, WORKER_SELECTIONS, type IpcMap, type RequestChannel } from './ipc-contract.js';
 
 export class IpcValidationError extends Error {
   readonly code = 'INVALID_ARGUMENT';
@@ -209,9 +209,9 @@ export const branchName: Validator<string> = (value, path) => {
 };
 
 /** One role of a workspace team: the account, and how it should run. */
-export const teamMember = obj<{ accountId: string; model?: string; reasoning?: string }>(
-  { accountId: id, model: modelName, reasoning: oneOf(REASONING_LEVELS) },
-  { optional: ['model', 'reasoning'] },
+export const teamMember = obj<{ accountId: string; model?: string; reasoning?: string; selection?: string }>(
+  { accountId: id, model: modelName, reasoning: oneOf(REASONING_LEVELS), selection: oneOf(WORKER_SELECTIONS) },
+  { optional: ['model', 'reasoning', 'selection'] },
 );
 
 /**

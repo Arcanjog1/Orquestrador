@@ -21,8 +21,13 @@
  */
 
 import { ALLOWED_ACTIONS } from './decision-parser.js';
+import { CAPABILITY_TIERS, REASONING_TIERS } from '../routing/tiers.js';
 
-export const DECISION_SCHEMA_VERSION = 2;
+export const DECISION_SCHEMA_VERSION = 3;
+
+/** The tiers as the decision JSON spells them (lowercase). */
+export const WIRE_CAPABILITIES = CAPABILITY_TIERS.map((tier) => tier.toLowerCase());
+export const WIRE_REASONING = REASONING_TIERS.map((tier) => tier.toLowerCase());
 
 export const DECISION_JSON_SCHEMA = {
   title: 'OrchestratorDecision',
@@ -36,6 +41,7 @@ export const DECISION_JSON_SCHEMA = {
     'summary',
     'reason',
     'relevantFiles',
+    'workerRequirements',
   ],
   properties: {
     action: {
@@ -71,6 +77,26 @@ export const DECISION_JSON_SCHEMA = {
       type: 'array',
       items: { type: 'string' },
       description: 'Files the coding agent should look at first. Empty when there are none.',
+    },
+    workerRequirements: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['capability', 'reasoning', 'rationale'],
+      description:
+        'What the coding agent needs for THIS task, as tiers - never a model name. ' +
+        'capability: fast = trivial or mechanical edits, a single file, git chores; ' +
+        'balanced = ordinary feature or fix within one module; strong = debugging across ' +
+        'modules, subtle bugs, larger refactors; max = critical architecture, data, ' +
+        'security or irreversible changes. reasoning: how much deliberation the task ' +
+        'deserves, on the same scale.',
+      properties: {
+        capability: { type: 'string', enum: WIRE_CAPABILITIES },
+        reasoning: { type: 'string', enum: WIRE_REASONING },
+        rationale: {
+          type: ['string', 'null'],
+          description: 'One short line on why these tiers. Not reasoning.',
+        },
+      },
     },
   },
 } as const;

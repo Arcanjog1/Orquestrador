@@ -23,6 +23,7 @@ mudou, o que continua fora, e o roteiro humano que fecha a prova.
 | Cancelar login Claude | `cancelAll` no ProcessManager compartilhado (mesmo defeito do Codex) | Sinal próprio do processo de login; teste com ProcessManager real |
 | Projetos | Só adicionar | Renomear, abrir pasta, remover da lista (pasta intacta); branches reais; `git switch` com pergunta se a árvore estiver suja |
 | GitHub | "Sem login próprio" | Login por device flow com GitHub App próprio; token cifrado por `safeStorage` (DPAPI); nunca no renderer, em URL, em `.git/config` ou em log; lista de repositórios (privados inclusive) no seletor de projeto; clone/fetch/branch/commit/push com o login; abrir PR e ler checks |
+| Worker: modelo | Modelo e raciocínio do Claude fixos por projeto | **Automático por tarefa**: o Codex pede camadas (`workerRequirements`), o roteador central resolve modelo e raciocínio por invocação, com piso de sanidade, escalada por falta de progresso, fallback de modelo recusado e registro completo (`docs/ROTEAMENTO_WORKER.md`); *Configuração avançada* mantém a escolha manual |
 | Settings | Idioma, auto-run, auto-retry, motivos de revisão, densidade, handoff — sem efeito; tema não aplicado | Só controles reais: iterações e tempos lidos pelo loop, tema aplicado e lembrado, iniciar com o sistema via item de login do SO, confirmar antes de push |
 | Onboarding GitHub | Texto estático | O mesmo card de login do GitHub; pular é explícito |
 
@@ -58,8 +59,10 @@ vê todos os repositórios do usuário sem instalação por organização.
    navegador; o card deve mostrar avatar e login.
 4. Projeto: **Adicionar projeto** → lista de repositórios inclui um privado →
    clonar numa pasta; conferir que `.git/config` tem só a URL do remoto.
-5. Equipe: **Orquestrador → Editar equipe** → contas pelo nome → Salvar;
-   fechar e reabrir o aplicativo; a equipe continua.
+5. Equipe: **Orquestrador → Editar equipe** → contas pelo nome; worker em
+   *Seleção: Automático* → Salvar; fechar e reabrir o aplicativo; a equipe
+   continua. Depois de um run, o cartão do worker na timeline diz qual modelo
+   rodou e por quê.
 6. Branch: chip da branch lista as branches; trocar com a árvore limpa; trocar
    com um arquivo alterado deve perguntar.
 7. Loop real: seguir `docs/PROVA_LOOP_REAL.md` (verificação de uma etapa e de
@@ -81,6 +84,11 @@ vê todos os repositórios do usuário sem instalação por organização.
 - **Runtime Codex**: a versão testada é 0.153.4; um Codex antigo no `PATH`
   é recusado e o gerenciado é instalado/atualizado sozinho. Registro do
   incidente em `docs/INCIDENTE_CODEX_MAX.md`.
+- **Modelos do worker**: a política central (`src/routing/provider-policy.ts`)
+  usa os aliases do Claude Code (`haiku`, `sonnet`, `opus`, `fable`); um alias
+  que a conta não tenha é recusado pelo CLI e substituído pelo próximo
+  candidato na mesma iteração, com registro. Não há consulta à API do
+  provedor para listar modelos.
 
 - **Verificações** só chamam executáveis no `PATH` ou por caminho absoluto; os
   runtimes gerenciados (Codex, Claude Code, MinGit) não são alcançáveis pelo

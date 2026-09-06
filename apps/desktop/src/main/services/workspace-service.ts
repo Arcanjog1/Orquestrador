@@ -9,9 +9,11 @@
 import { mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import type { Database, ProcessManager, WorkspaceWithAgents } from '../core.js';
+import { isWorkerSelection } from '../core.js';
 import { GitEvidenceCollector, newId, parseStatusShort } from '../core.js';
 import {
   REASONING_LEVELS,
+  type WorkerSelection,
   type ProviderName,
   type ReasoningLevel,
   type TeamMemberInput,
@@ -326,6 +328,8 @@ export class WorkspaceService {
         agentId: workerAgentIdFor(workerAccount.id),
         model: worker.model ?? null,
         reasoning: reasoningOrNull(worker.reasoning),
+        // Absent means automatic; the orchestrator's row never carries one.
+        selection: isWorkerSelection(worker.selection) ? worker.selection : 'auto',
       },
     );
     return this.toView(record);
@@ -618,6 +622,7 @@ export class WorkspaceService {
           record.worker_agent_id,
           record.worker_model,
           record.worker_reasoning,
+          isWorkerSelection(record.worker_selection) ? record.worker_selection : 'auto',
         ),
       },
       createdAt: record.created_at,
@@ -630,6 +635,7 @@ export class WorkspaceService {
     agentId: string | null,
     model: string | null,
     reasoning: string | null,
+    selection: WorkerSelection | null = null,
   ): TeamMemberView {
     const agent = agentId ? this.database.agents.find(agentId) : undefined;
     const account = agent?.account_id ? this.database.accounts.find(agent.account_id) : undefined;
@@ -641,6 +647,7 @@ export class WorkspaceService {
       accountName: account?.display_name ?? null,
       model,
       reasoning: reasoningOrNull(reasoning),
+      selection,
     };
   }
 }

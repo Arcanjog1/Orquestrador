@@ -14,6 +14,7 @@
 
 import type { ChatMessageView, RunView } from '@shared/ipc-contract';
 import type { Agent, Provider, RunState } from './orchestrator-data';
+import { reasoningLabel, selectionModeLabel } from './orchestrator-data';
 
 export type Check = { label: string; passed: boolean };
 
@@ -173,7 +174,11 @@ export function elapsedSeconds(startIso: string, endIso: string | null): number 
  * uses; model and reasoning stay null because a chat message does not carry
  * them, and the card omits a badge it has no value for.
  */
-export function agentOfAuthor(author: string, agents: AgentIdentitySource): Agent | null {
+export function agentOfAuthor(
+  author: string,
+  agents: AgentIdentitySource,
+  routing?: ChatMessageView['routing'],
+): Agent | null {
   if (author === 'orchestrator') {
     return {
       role: 'ORCHESTRATOR',
@@ -185,6 +190,18 @@ export function agentOfAuthor(author: string, agents: AgentIdentitySource): Agen
     };
   }
   if (author === 'worker') {
+    // A routed invocation carries its own model and level: what this
+    // message's worker actually ran as, not the project's setting.
+    if (routing) {
+      return {
+        role: 'CODING WORKER',
+        provider: 'anthropic' as Provider,
+        agent: agents.workerName ?? 'Claude Code',
+        account: agents.workerAccount,
+        model: routing.model ?? 'padrão do CLI',
+        reasoning: reasoningLabel(routing.reasoning) ?? null,
+      };
+    }
     return {
       role: 'CODING WORKER',
       provider: 'anthropic' as Provider,
@@ -248,16 +265,24 @@ export function buildTimeline(input: TimelineInput): TimelineEntry[] {
       continue;
     }
 
-    const agent = agentOfAuthor(message.author, agents);
+    const agent = agentOfAuthor(message.author, agents, message.routing);
     if (agent) {
       const [headline, ...rest] = message.text.split('\n');
+      const lines = rest.filter((l) => l.trim().length > 0);
+      // Why this model: the router's one line, on the card, never hidden.
+      if (message.routing) {
+        lines.push(
+          `Seleção ${selectionModeLabel(message.routing.selectionMode)?.toLowerCase() ?? message.routing.selectionMode}` +
+            `${message.routing.fallbackUsed ? ' (com fallback)' : ''}: ${message.routing.selectionReason}`,
+        );
+      }
       entries.push({
         kind: 'agent',
         id: message.id,
         agent,
         duration: '—',
         headline: headline ?? message.text,
-        lines: rest.filter((l) => l.trim().length > 0),
+        lines,
         detail: true,
       });
       continue;

@@ -261,6 +261,25 @@ ALTER TABLE workspace_agents ADD COLUMN reasoning TEXT;
 ALTER TABLE chat_sessions ADD COLUMN archived_at TEXT;
 `,
   },
+  {
+    id: 4,
+    name: 'worker-routing',
+    sql: `
+-- How the worker's model is chosen for a project: auto (the router, per
+-- delegation), speed, quality, or manual (the model and reasoning columns,
+-- exactly). NULL means auto. The orchestrator's row ignores it.
+ALTER TABLE workspace_agents ADD COLUMN selection TEXT;
+-- What each invocation asked for and what it ran with, so "why this model?"
+-- is on the record. NULL on rows from before routing existed.
+ALTER TABLE agent_invocations ADD COLUMN requested_capability TEXT;
+ALTER TABLE agent_invocations ADD COLUMN requested_reasoning TEXT;
+ALTER TABLE agent_invocations ADD COLUMN resolved_model TEXT;
+ALTER TABLE agent_invocations ADD COLUMN resolved_reasoning TEXT;
+ALTER TABLE agent_invocations ADD COLUMN selection_mode TEXT;
+ALTER TABLE agent_invocations ADD COLUMN selection_reason TEXT;
+ALTER TABLE agent_invocations ADD COLUMN fallback_used INTEGER;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

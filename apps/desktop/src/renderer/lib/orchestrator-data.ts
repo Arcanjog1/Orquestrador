@@ -78,6 +78,38 @@ export function reasoningLabel(level: string | null | undefined): string | null 
       return "Médio";
     case "high":
       return "Alto";
+    case "xhigh":
+      return "Extra alto";
+    case "max":
+      return "Máximo";
+    default:
+      return null;
+  }
+}
+
+/** How the worker's model is chosen, as the interface names it. */
+export function selectionLabel(selection: string | null | undefined): string {
+  switch (selection) {
+    case "speed":
+      return "Priorizar velocidade";
+    case "quality":
+      return "Priorizar qualidade";
+    case "manual":
+      return "Manual";
+    default:
+      return "Automático";
+  }
+}
+
+/** The selection mode recorded on one invocation (`auto` | `manual` | `fixed`). */
+export function selectionModeLabel(mode: string | null | undefined): string | null {
+  switch (mode) {
+    case "auto":
+      return "Automático";
+    case "manual":
+      return "Manual";
+    case "fixed":
+      return "Fixo";
     default:
       return null;
   }

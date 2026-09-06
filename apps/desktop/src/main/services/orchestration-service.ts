@@ -20,6 +20,7 @@
  */
 
 import type {
+  AgentResult,
   AgentRunner,
   Baseline,
   CommandResult,
@@ -27,7 +28,13 @@ import type {
   Decision,
   GitEvidence,
   IterationRecord,
+  PreviousAttempt,
   ProcessManager,
+  RouterOutput,
+  RoutingProvider,
+  RoutingRecord,
+  WorkerRuntimeCapabilities,
+  WorkerSelection,
   WorkspaceWithAgents,
 } from '../core.js';
 import {
@@ -37,9 +44,12 @@ import {
   commandPassed,
   evaluateDone,
   formatDoneRejection,
+  isMechanicalFailure,
+  modelUnavailableIn,
   newId,
   parseDecision,
   redact,
+  routeWorkerModel,
 } from '../core.js';
 import type { ChatMessageView, RunDetailView, RunView } from '../../shared/ipc-contract.js';
 import type { EventBus } from '../events.js';
@@ -51,7 +61,33 @@ export interface RunnerPair {
   worker: AgentRunner;
   /** Account backing the worker, recorded on each invocation. */
   workerAccountId: string | null;
+  /**
+   * How the worker's model is chosen, per delegation. Absent means the
+   * worker runs with its own defaults and nothing is routed (the test
+   * fixture's scripted agents, for one).
+   */
+  workerRouting?: WorkerRoutingSource;
 }
+
+export interface WorkerRoutingSource {
+  provider: RoutingProvider;
+  selection: WorkerSelection;
+  /** The person's own choice; used only under `manual`. */
+  manual: { model: string | null; reasoning: string | null };
+  /** What this account's worker CLI declares. Read once per run. */
+  capabilities: () => Promise<WorkerRuntimeCapabilities>;
+}
+
+/** A worker CLI whose help could not be read: nothing is sent it may not take. */
+const NO_CAPABILITIES: WorkerRuntimeCapabilities = {
+  modelFlag: false,
+  effortFlag: false,
+  declaredModels: null,
+  declaredEfforts: null,
+};
+
+/** Refused models are retried on the next candidate at most this many times per delegation. */
+const MODEL_RETRIES = 2;
 
 export interface OrchestrationOptions {
   maxIterations?: number;
@@ -292,6 +328,18 @@ export class OrchestrationService {
     /** Every command actually resolved from an id, deduplicated. */
     const resolvedCommands = new Set<string>();
     let feedback: string | null = null;
+
+    // Routing state for this run: what the worker's CLI can take (read once,
+    // for this account), the attempts so far as the router reads them, the
+    // models the CLI refused, and the tree as the last attempt left it.
+    const routing = runners.workerRouting ?? null;
+    const capabilities = routing
+      ? await routing.capabilities().catch(() => NO_CAPABILITIES)
+      : NO_CAPABILITIES;
+    const attempts: PreviousAttempt[] = [];
+    const unavailableModels: string[] = [];
+    let previousTree = treeKey(baseline.statusShort, baseline.unstagedDiff + baseline.stagedDiff);
+    let warnedOrchestratorLevel = false;
     // What was said in this conversation before this run, so a follow-up
     // ("continue", "now also do X") is read against what came before it.
     const history = this.conversationBefore(sessionId, runId);
@@ -326,6 +374,14 @@ export class OrchestrationService {
         prompt,
         iteration,
         signal,
+        onApplied: (applied) => {
+          // The orchestrator's fixed level was not what its CLI supports:
+          // said once per run, in the words the interface promises.
+          if (applied.note && !warnedOrchestratorLevel) {
+            warnedOrchestratorLevel = true;
+            this.say(sessionId, runId, 'system', applied.note);
+          }
+        },
       });
       if (signal.aborted) return this.finishCancelled(runId, sessionId);
       if (!asked.decision) {
@@ -357,39 +413,20 @@ export class OrchestrationService {
       if (decision.action === 'delegate') {
         const task = decision.task ?? objective;
         this.progress(runId, sessionId, 'worker', 'Claude executando...', 'RUNNING');
-        this.say(sessionId, runId, 'worker', `Executando: ${task}`);
-
-        const startedAt = new Date().toISOString();
-        const result = await runners.worker.run({
-          prompt: task,
-          workingDirectory: workspace.local_path,
-          timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
+        record.worker = await this.delegate({
           runId,
+          sessionId,
+          workspace,
+          runners,
           iteration,
-        });
-        record.worker = {
-          agent: 'claude-code',
-          profile: runners.workerAccountId,
           task,
-          startedAt,
-          finishedAt: result.finishedAt,
-          exitCode: result.exitCode,
-          outcome: result.outcome,
-          durationMs: result.durationMs,
-        };
-        this.database.runs.recordInvocation({
-          runId,
-          iteration,
-          agentId: workspace.worker_agent_id,
-          accountId: runners.workerAccountId,
-          role: 'CODING_WORKER',
-          task,
-          outcome: result.outcome,
-          exitCode: result.exitCode,
-          durationMs: result.durationMs,
-          startedAt,
+          decision,
+          routing,
+          capabilities,
+          attempts,
+          unavailableModels,
+          signal,
         });
-        this.step(runId, iteration, 'worker', result.outcome, task.slice(0, 200));
         if (signal.aborted) return this.finishCancelled(runId, sessionId);
       }
 
@@ -397,6 +434,25 @@ export class OrchestrationService {
       this.progress(runId, sessionId, 'evidence', 'Coletando alterações...', 'RUNNING');
       const evidence: GitEvidence = await collector.collectEvidence(baseline);
       record.evidence = evidence;
+      // Progress is measured against the tree the previous attempt left,
+      // not against the baseline: an iteration that changes nothing after
+      // one that did is "no progress", and the router must hear that.
+      const tree = treeKey(evidence.statusShort, evidence.diff);
+      if (record.worker) {
+        record.worker.progressed = tree !== previousTree;
+        attempts.push({
+          iteration,
+          capability: record.worker.routing?.requestedCapability ?? 'BALANCED',
+          reasoning: record.worker.routing?.requestedReasoning ?? 'MEDIUM',
+          model: record.worker.routing?.resolvedModel ?? null,
+          outcome: record.worker.outcome,
+          exitCode: record.worker.exitCode,
+          progressed: record.worker.progressed,
+          mechanical: record.worker.mechanical ?? false,
+          modelUnavailable: record.worker.modelUnavailable ?? false,
+        });
+      }
+      previousTree = tree;
       this.step(
         runId,
         iteration,
@@ -480,7 +536,7 @@ export class OrchestrationService {
       }
 
       // 6. Otherwise, feed the results back and go round again.
-      feedback = this.buildFeedback(evidence, verification, unknownIds);
+      feedback = this.buildFeedback(evidence, verification, unknownIds, record);
     }
 
     this.database.runs.setStatus(runId, 'FAILED', `Limite de ${maxIterations} iterações atingido.`);
@@ -526,6 +582,8 @@ export class OrchestrationService {
     prompt: string;
     iteration: number;
     signal: AbortSignal;
+    /** Told what the adapter actually sent for model and level, once per attempt. */
+    onApplied?: (applied: NonNullable<AgentResult['applied']>) => void;
   }): Promise<{ decision: Decision | null; failure?: string }> {
     const { runId, workspace, runners, iteration, signal } = input;
     let currentPrompt = input.prompt;
@@ -551,7 +609,25 @@ export class OrchestrationService {
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         startedAt,
+        // The orchestrator's model and level are the person's fixed choice;
+        // what is recorded is what the adapter really sent, after checking
+        // the level against the installed build.
+        routing: result.applied
+          ? {
+              requestedCapability: null,
+              requestedReasoning: null,
+              resolvedModel: result.applied.model,
+              resolvedReasoning: result.applied.reasoning,
+              selectionMode: 'fixed',
+              selectionReason: result.applied.note
+                ? result.applied.note
+                : 'configuração fixa do orquestrador' +
+                  (workspace.orchestrator_model || workspace.orchestrator_reasoning ? '' : ' (padrão do CLI)'),
+              fallbackUsed: result.applied.fallbackUsed,
+            }
+          : null,
       });
+      if (result.applied) input.onApplied?.(result.applied);
       if (signal.aborted) return { decision: null };
 
       const diagnostics = {
@@ -674,12 +750,27 @@ export class OrchestrationService {
       '  "acceptanceCriteria": ["objective, checkable statements"],',
       '  "verificationCommands": ["verification ids from the list above"],',
       '  "summary": "one line for the user",',
-      '  "reason": "required for blocked"',
+      '  "reason": "required for blocked",',
+      '  "workerRequirements": {',
+      '    "capability": "fast" | "balanced" | "strong" | "max",',
+      '    "reasoning": "low" | "medium" | "high" | "max",',
+      '    "rationale": "one line, or null"',
+      '  }',
       '}',
       '',
       'Rules: "done" is a request, not a conclusion - it is re-validated against',
       'freshly collected git evidence and by re-running every verification. An',
       'unknown verification id is reported as a failure and never executed.',
+      '',
+      'workerRequirements says what THIS delegation needs from the coding agent, as',
+      'tiers - never a model name; the system maps tiers to models. capability:',
+      '  fast     - trivial or mechanical edits, one file, git chores, renames',
+      '  balanced - an ordinary feature or fix within one module',
+      '  strong   - debugging across modules, subtle or intermittent bugs, larger refactors',
+      '  max      - critical architecture, data, security or irreversible changes',
+      'reasoning is the deliberation the task deserves, on the same scale. Judge each',
+      'delegation on its own: a simple task after a hard one is fast again. If a',
+      'previous attempt made no progress, ask for more than last time.',
     ];
 
     if (input.history) {
@@ -699,8 +790,27 @@ export class OrchestrationService {
     evidence: GitEvidence,
     verification: readonly CommandResult[],
     unknownIds: readonly string[],
+    record?: IterationRecord,
   ): string {
-    const lines: string[] = ['GIT EVIDENCE (collected by the orchestrator, not reported by the agent):'];
+    const lines: string[] = [];
+    // What the worker ran as, so the orchestrator's next request is informed
+    // by the last one: the tiers it asked, the model that ran, the outcome.
+    const worker = record?.worker;
+    if (worker) {
+      const routing = worker.routing;
+      lines.push(
+        'WORKER OF THIS ITERATION:',
+        `  requested: ${routing ? `${routing.requestedCapability ?? 'default'}/${routing.requestedReasoning ?? 'default'}` : '(not routed)'}`,
+        `  ran as: model ${routing?.resolvedModel ?? '(CLI default)'}, reasoning ${routing?.resolvedReasoning ?? '(CLI default)'}` +
+          (routing ? ` [${routing.selectionMode}${routing.fallbackUsed ? ', fallback' : ''}]` : ''),
+        `  outcome: ${worker.outcome}${worker.exitCode !== null ? ` (exit ${worker.exitCode})` : ''}` +
+          (worker.mechanical ? ' - a mechanical failure (binary, login, quota, network), not the model' : '') +
+          (worker.modelUnavailable ? ' - the CLI refused the model' : ''),
+        `  progressed: ${worker.progressed ? 'yes' : 'no'}`,
+        '',
+      );
+    }
+    lines.push('GIT EVIDENCE (collected by the orchestrator, not reported by the agent):');
     lines.push(`  branch: ${evidence.branch ?? '(none)'}`);
     lines.push(`  changed since baseline: ${evidence.changedSinceBaseline ? 'yes' : 'no'}`);
     lines.push(`  changed files: ${evidence.changedFiles.join(', ') || '(none)'}`);
@@ -734,6 +844,147 @@ export class OrchestrationService {
     return lines.join('\n');
   }
 
+  /**
+   * One delegation: route the model, run the worker, record the invocation.
+   *
+   * The model is chosen here, for this task, from what the orchestrator asked
+   * and what happened before - and fixed for the invocation. A CLI that
+   * refuses the model by name is given the next candidate, at most twice;
+   * every attempt is on the record with its own routing.
+   */
+  private async delegate(input: {
+    runId: string;
+    sessionId: string;
+    workspace: WorkspaceWithAgents;
+    runners: RunnerPair;
+    iteration: number;
+    task: string;
+    decision: Decision;
+    routing: WorkerRoutingSource | null;
+    capabilities: WorkerRuntimeCapabilities;
+    attempts: readonly PreviousAttempt[];
+    unavailableModels: string[];
+    signal: AbortSignal;
+  }): Promise<NonNullable<IterationRecord['worker']>> {
+    const { runId, sessionId, workspace, runners, iteration, task } = input;
+    let last: NonNullable<IterationRecord['worker']> | null = null;
+
+    for (let attempt = 0; attempt <= MODEL_RETRIES; attempt += 1) {
+      const routed: RouterOutput | null = input.routing
+        ? routeWorkerModel({
+            provider: input.routing.provider,
+            accountId: runners.workerAccountId,
+            task,
+            requested: input.decision.workerRequirements ?? null,
+            previousAttempts: input.attempts,
+            capabilities: input.capabilities,
+            selection: input.routing.selection,
+            manual: input.routing.manual,
+            unavailableModels: input.unavailableModels,
+          })
+        : null;
+
+      const planned: RoutingRecord | null = routed
+        ? {
+            requestedCapability: routed.requestedCapability,
+            requestedReasoning: routed.requestedReasoning,
+            resolvedModel: routed.resolvedModel,
+            resolvedReasoning: routed.resolvedReasoning,
+            selectionMode: routed.selectionMode,
+            selectionReason: routed.selectionReason,
+            fallbackUsed: routed.fallbackUsed,
+          }
+        : null;
+
+      this.say(
+        sessionId,
+        runId,
+        'worker',
+        attempt === 0 ? `Executando: ${task}` : `Tentando outro modelo: ${task}`,
+        planned ? { routing: planned } : undefined,
+      );
+
+      const startedAt = new Date().toISOString();
+      const result = await runners.worker.run({
+        prompt: task,
+        workingDirectory: workspace.local_path,
+        timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
+        runId,
+        iteration,
+        ...(routed ? { routing: { model: routed.resolvedModel, reasoning: routed.resolvedReasoning } } : {}),
+      });
+
+      // What was actually sent wins over what was planned: the adapter may
+      // have dropped a flag its build does not take.
+      const recorded: RoutingRecord | null = planned
+        ? {
+            ...planned,
+            resolvedModel: result.applied ? result.applied.model : planned.resolvedModel,
+            resolvedReasoning: result.applied ? result.applied.reasoning : planned.resolvedReasoning,
+            fallbackUsed: planned.fallbackUsed || (result.applied?.fallbackUsed ?? false),
+            selectionReason: result.applied?.note
+              ? `${planned.selectionReason}; ${result.applied.note}`
+              : planned.selectionReason,
+          }
+        : null;
+
+      const modelUnavailable =
+        routed?.resolvedModel !== null && routed?.resolvedModel !== undefined && modelUnavailableIn(result);
+      const mechanical = !modelUnavailable && isMechanicalFailure(result);
+
+      last = {
+        agent: 'claude-code',
+        profile: runners.workerAccountId,
+        task,
+        startedAt,
+        finishedAt: result.finishedAt,
+        exitCode: result.exitCode,
+        outcome: result.outcome,
+        durationMs: result.durationMs,
+        ...(recorded ? { routing: recorded } : {}),
+        mechanical,
+        modelUnavailable,
+      };
+      this.database.runs.recordInvocation({
+        runId,
+        iteration,
+        agentId: workspace.worker_agent_id,
+        accountId: runners.workerAccountId,
+        role: 'CODING_WORKER',
+        task,
+        outcome: result.outcome,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        startedAt,
+        routing: recorded,
+      });
+      this.step(runId, iteration, 'worker', result.outcome, task.slice(0, 200), {
+        attempt: attempt + 1,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        ...(result.executable ? { executable: result.executable } : {}),
+        ...(recorded ? { routing: recorded } : {}),
+        ...(modelUnavailable ? { modelUnavailable: true } : {}),
+        ...(mechanical ? { mechanical: true } : {}),
+        stderrExcerpt: excerpt(result.stderr),
+      });
+
+      if (input.signal.aborted || !modelUnavailable || !routed?.resolvedModel) return last;
+      if (attempt === MODEL_RETRIES || routed.alternatives.length === 0) return last;
+
+      // The CLI refused the model by name: remember it for the whole run
+      // and try the next candidate, with the router saying why.
+      input.unavailableModels.push(routed.resolvedModel);
+      this.say(
+        sessionId,
+        runId,
+        'system',
+        `O modelo ${routed.resolvedModel} não está disponível nesta conta; tentando ${routed.alternatives[0]}.`,
+      );
+    }
+    return last!;
+  }
+
   private finishCancelled(runId: string, sessionId: string): void {
     this.database.runs.setStatus(runId, 'CANCELLED', 'Cancelado pelo usuário.');
     this.say(sessionId, runId, 'system', 'Execução cancelada.');
@@ -759,8 +1010,20 @@ export class OrchestrationService {
     });
   }
 
-  private say(sessionId: string, runId: string, author: string, body: string): ChatMessageView {
-    const record = this.database.chat.addMessage({ sessionId, runId, author, body });
+  private say(
+    sessionId: string,
+    runId: string,
+    author: string,
+    body: string,
+    payload?: Record<string, unknown>,
+  ): ChatMessageView {
+    const record = this.database.chat.addMessage({
+      sessionId,
+      runId,
+      author,
+      body,
+      ...(payload ? { payload } : {}),
+    });
     const view = toMessageView(record);
     this.events.emit('run:progress', {
       runId,
@@ -776,6 +1039,11 @@ export class OrchestrationService {
   private progress(runId: string, sessionId: string, stage: string, label: string, status: string): void {
     this.events.emit('run:progress', { runId, sessionId, stage, label, status });
   }
+}
+
+/** A cheap fingerprint of the working tree, to tell one attempt's outcome from the next. */
+function treeKey(statusShort: string, diff: string): string {
+  return `${statusShort.trim()}\n${diff.length}:${diff.slice(0, 4000)}`;
 }
 
 function verificationNote(results: readonly CommandResult[]): string {

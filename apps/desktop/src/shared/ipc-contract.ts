@@ -209,9 +209,26 @@ export interface VerificationView {
 
 export type TeamRole = 'ORCHESTRATOR' | 'CODING_WORKER';
 
-/** The reasoning levels both CLIs accept by that name. */
-export const REASONING_LEVELS = ['low', 'medium', 'high'] as const;
+/**
+ * The reasoning levels a person can pick by name. Each is validated against
+ * the installed CLI before it is sent: a level the CLI does not declare is
+ * replaced by the strongest one it does, and the run says so.
+ */
+export const REASONING_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
+
+/**
+ * How the worker's model is chosen for a project. Mirrors the core's
+ * `WORKER_SELECTIONS` (a test keeps them equal); spelled here so the renderer
+ * needs nothing from the core.
+ *
+ *  - `auto`     the router decides per delegation (default)
+ *  - `speed`    auto, leaning one tier down when the task is plainly safe
+ *  - `quality`  auto, leaning one tier up
+ *  - `manual`   the model and reasoning the person typed, exactly
+ */
+export const WORKER_SELECTIONS = ['auto', 'speed', 'quality', 'manual'] as const;
+export type WorkerSelection = (typeof WORKER_SELECTIONS)[number];
 
 /**
  * One role of a workspace's team, resolved for display.
@@ -230,12 +247,20 @@ export interface TeamMemberView {
   /** Null means the CLI's own default. */
   readonly model: string | null;
   readonly reasoning: ReasoningLevel | null;
+  /**
+   * How the model is chosen. For the worker: `auto` unless the person chose
+   * otherwise; `model` and `reasoning` above apply only under `manual`. Null
+   * for the orchestrator, whose model and reasoning are fixed by the person.
+   */
+  readonly selection: WorkerSelection | null;
 }
 
 export interface TeamMemberInput {
   readonly accountId: string;
   readonly model?: string;
   readonly reasoning?: ReasoningLevel;
+  /** Worker only; ignored for the orchestrator. Absent means `auto`. */
+  readonly selection?: WorkerSelection;
 }
 
 export interface WorkspaceView {
@@ -275,6 +300,16 @@ export interface ChatSessionView {
   readonly lastRun: { readonly id: string; readonly status: string } | null;
 }
 
+/** How a worker message's invocation was routed; shown on its agent card. */
+export interface MessageRoutingView {
+  readonly model: string | null;
+  readonly reasoning: string | null;
+  /** `auto` | `manual` | `fixed`. */
+  readonly selectionMode: string;
+  readonly selectionReason: string;
+  readonly fallbackUsed: boolean;
+}
+
 export interface ChatMessageView {
   readonly id: string;
   readonly sessionId: string;
@@ -283,6 +318,8 @@ export interface ChatMessageView {
   readonly text: string;
   readonly createdAt: string;
   readonly runId: string | null;
+  /** Present on a worker message whose invocation was routed. */
+  readonly routing: MessageRoutingView | null;
 }
 
 export interface RunView {
@@ -345,6 +382,16 @@ export interface RunInvocationView {
   readonly exitCode: number | null;
   readonly durationMs: number | null;
   readonly startedAt: string;
+  /** What the orchestrator asked for, as tiers; null before routing existed. */
+  readonly requestedCapability: string | null;
+  readonly requestedReasoning: string | null;
+  /** What the CLI was given. Null means its own default. */
+  readonly model: string | null;
+  readonly reasoning: string | null;
+  /** `auto` | `manual` | `fixed`; null before routing existed. */
+  readonly selectionMode: string | null;
+  readonly selectionReason: string | null;
+  readonly fallbackUsed: boolean | null;
 }
 
 export interface RunVerificationView {

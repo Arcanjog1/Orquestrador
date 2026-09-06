@@ -10,6 +10,7 @@ import {
 import { cn } from "@/lib/utils";
 import { api, messageOf } from "@/lib/api";
 import { SectionLabel, StatBlock } from "./primitives";
+import { reasoningLabel, selectionModeLabel } from "@/lib/orchestrator-data";
 import type {
   RunDetailView,
   RunStepView,
@@ -405,6 +406,22 @@ export function RunDetailDialog({
                       {inv.durationMs !== null ? ` · ${(inv.durationMs / 1000).toFixed(1)}s` : ""}
                     </span>
                     {inv.task && <p className="mt-0.5 truncate text-muted-foreground">{inv.task}</p>}
+                    {inv.selectionMode && (
+                      <p className="mt-0.5 text-muted-foreground" data-testid="invocation-routing">
+                        Modelo <span className="font-mono">{inv.model ?? "padrão do CLI"}</span>
+                        {" · "}Raciocínio {reasoningLabel(inv.reasoning) ?? inv.reasoning ?? "padrão do CLI"}
+                        {" · "}Seleção {selectionModeLabel(inv.selectionMode) ?? inv.selectionMode}
+                        {inv.fallbackUsed ? " (com fallback)" : ""}
+                        {inv.requestedCapability
+                          ? ` · Pedido ${inv.requestedCapability}/${inv.requestedReasoning ?? "-"}`
+                          : ""}
+                        {inv.selectionReason && (
+                          <span className="block truncate" title={inv.selectionReason}>
+                            Motivo: {inv.selectionReason}
+                          </span>
+                        )}
+                      </p>
+                    )}
                   </li>
                 ))}
               </ul>

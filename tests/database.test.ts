@@ -319,3 +319,102 @@ test('a database written before the team columns existed upgrades in place, rows
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('a database from before worker routing upgrades in place: old rows read as "not routed"', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lao-db-upgrade4-'));
+  try {
+    const file = join(dir, 'data', 'old.db');
+    const older = new NodeSqliteDriver(file);
+    older.exec(
+      'CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)',
+    );
+    for (const migration of MIGRATIONS.filter((m) => m.id < 4)) {
+      older.exec(migration.sql);
+      older.run('INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)', [
+        migration.id,
+        migration.name,
+        '2026-01-01T00:00:00.000Z',
+      ]);
+    }
+    const t = '2026-01-01T00:00:00.000Z';
+    older.run("INSERT INTO providers (id, display_name, created_at) VALUES ('anthropic','Anthropic',?)", [t]);
+    older.run(
+      "INSERT INTO accounts (id, provider_id, display_name, profile_directory, auth_state, created_at) VALUES ('acc-1','anthropic','Claude Trabalho','/p','connected',?)",
+      [t],
+    );
+    older.run(
+      "INSERT INTO agents (id, display_name, provider_id, account_id, adapter_id, role, created_at) VALUES ('agent-worker-acc-1','Claude Trabalho','anthropic','acc-1','claude-code','CODING_WORKER',?)",
+      [t],
+    );
+    older.run(
+      "INSERT INTO workspaces (id, display_name, local_path, created_at, updated_at) VALUES ('ws-1','Projeto','/w',?,?)",
+      [t, t],
+    );
+    older.run(
+      "INSERT INTO workspace_agents (workspace_id, agent_id, role, model, reasoning) VALUES ('ws-1','agent-worker-acc-1','CODING_WORKER','claude-opus-5','high')",
+    );
+    older.run(
+      "INSERT INTO runs (id, workspace_id, objective, status, max_iterations, started_at) VALUES ('run-1','ws-1','x','DONE',8,?)",
+      [t],
+    );
+    older.run(
+      "INSERT INTO agent_invocations (id, run_id, iteration, agent_id, account_id, role, task, outcome, exit_code, duration_ms, started_at) VALUES ('inv-1','run-1',1,'agent-worker-acc-1','acc-1','CODING_WORKER','antigo','completed',0,10,?)",
+      [t],
+    );
+    older.close();
+
+    const upgraded = new Database({ filePath: file });
+    try {
+      assert.equal(upgraded.schemaVersion, SCHEMA_VERSION);
+      const workspace = upgraded.workspaces.require('ws-1');
+      assert.equal(workspace.worker_model, 'claude-opus-5', 'the old choice survived');
+      assert.equal(workspace.worker_selection, null, 'no selection was ever made: automatic');
+
+      const [old] = upgraded.runs.invocations('run-1');
+      assert.equal(old!.task, 'antigo');
+      assert.equal(old!.resolved_model, null, 'an old invocation was not routed');
+      assert.equal(old!.selection_mode, null);
+
+      // The new columns are writable and read back.
+      upgraded.runs.recordInvocation({
+        runId: 'run-1',
+        iteration: 2,
+        agentId: 'agent-worker-acc-1',
+        accountId: 'acc-1',
+        role: 'CODING_WORKER',
+        task: 'novo',
+        outcome: 'completed',
+        exitCode: 0,
+        durationMs: 5,
+        startedAt: t,
+        routing: {
+          requestedCapability: 'STRONG',
+          requestedReasoning: 'HIGH',
+          resolvedModel: 'opus',
+          resolvedReasoning: 'high',
+          selectionMode: 'auto',
+          selectionReason: 'Codex pediu STRONG/HIGH; modelo opus',
+          fallbackUsed: false,
+        },
+      });
+      const rows = upgraded.runs.invocations('run-1');
+      const routed = rows.find((r) => r.task === 'novo')!;
+      assert.equal(routed.resolved_model, 'opus');
+      assert.equal(routed.requested_capability, 'STRONG');
+      assert.equal(routed.selection_mode, 'auto');
+      assert.equal(routed.fallback_used, 0);
+
+      upgraded.workspaces.setTeam(
+        'ws-1',
+        { agentId: 'agent-worker-acc-1' },
+        { agentId: 'agent-worker-acc-1', model: 'claude-opus-5', reasoning: 'high', selection: 'manual' },
+      );
+      assert.equal(upgraded.workspaces.require('ws-1').worker_selection, 'manual');
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

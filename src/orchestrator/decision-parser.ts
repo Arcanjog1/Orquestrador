@@ -8,6 +8,7 @@
  */
 
 import type { Decision, DecisionAction } from '../core/types.js';
+import { capabilityFromWire, reasoningFromWire } from '../routing/tiers.js';
 
 export const ALLOWED_ACTIONS: readonly DecisionAction[] = ['delegate', 'verify', 'done', 'blocked'];
 
@@ -94,7 +95,23 @@ export function parseDecision(raw: string): ParseResult {
     return fail('"verify" requires at least one entry in "verificationCommands".', raw);
   }
 
+  // Advisory, so lenient: a well-formed object is taken, anything else is
+  // ignored and the router falls back to its default. A decision is never
+  // refused over the tiers it suggested for the worker.
+  const requirements = readWorkerRequirements(obj.workerRequirements);
+  if (requirements) decision.workerRequirements = requirements;
+
   return { ok: true, decision };
+}
+
+function readWorkerRequirements(value: unknown): Decision['workerRequirements'] | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const obj = value as Record<string, unknown>;
+  const capability = capabilityFromWire(obj.capability);
+  const reasoning = reasoningFromWire(obj.reasoning);
+  if (!capability || !reasoning) return undefined;
+  const rationale = typeof obj.rationale === 'string' ? obj.rationale.trim() : '';
+  return rationale ? { capability, reasoning, rationale } : { capability, reasoning };
 }
 
 function readStringArray(
@@ -141,7 +158,8 @@ export function buildRepairPrompt(error: string, raw: string): string {
     '  "acceptanceCriteria": ["string", ...],',
     '  "verificationCommands": ["string", ...],',
     '  "relevantFiles": ["string", ...],',
-    '  "summary": "one short line, or null"',
+    '  "summary": "one short line, or null",',
+    '  "workerRequirements": {"capability": "fast" | "balanced" | "strong" | "max", "reasoning": "low" | "medium" | "high" | "max", "rationale": "one line or null"}',
     '}',
     '',
     'Do not change your decision. Repeat the same decision in the correct format.',

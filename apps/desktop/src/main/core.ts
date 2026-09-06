@@ -20,6 +20,7 @@ export type {
   RuntimeManifest,
 } from '../../../../src/runtime/types.js';
 export { appPaths, ensureAppPaths } from '../../../../src/runtime/paths.js';
+export { versionNumberOf } from '../../../../src/runtime/managed-runtime.js';
 export type { AppPaths } from '../../../../src/runtime/paths.js';
 
 export { Database } from '../../../../src/database/database.js';
@@ -85,6 +86,29 @@ export { AcceptanceCriteriaLedger } from '../../../../src/orchestrator/acceptanc
 export { parseDecision, buildRepairPrompt } from '../../../../src/orchestrator/decision-parser.js';
 export { evaluateDone, formatDoneRejection } from '../../../../src/orchestrator/done-gate.js';
 export { DECISION_JSON_SCHEMA } from '../../../../src/orchestrator/decision-schema.js';
+
+export { routeWorkerModel, noProgressStreak } from '../../../../src/routing/model-router.js';
+export type { PreviousAttempt, RouterInput, RouterOutput } from '../../../../src/routing/model-router.js';
+export {
+  codexSupportedEfforts,
+  resolveFixedEffort,
+  ROUTING_POLICY_VERSION,
+} from '../../../../src/routing/provider-policy.js';
+export type { RoutingProvider, WorkerRuntimeCapabilities } from '../../../../src/routing/provider-policy.js';
+export { isMechanicalFailure, modelUnavailableIn } from '../../../../src/routing/task-assessment.js';
+export {
+  CAPABILITY_TIERS,
+  DEFAULT_REQUIREMENTS,
+  REASONING_TIERS,
+  WORKER_SELECTIONS,
+  isWorkerSelection,
+} from '../../../../src/routing/tiers.js';
+export type {
+  CapabilityTier,
+  ReasoningTier,
+  WorkerRequirements,
+  WorkerSelection,
+} from '../../../../src/routing/tiers.js';
 export { Verifier, commandPassed } from '../../../../src/orchestrator/verifier.js';
 
 export type {
@@ -95,7 +119,9 @@ export type {
   Decision,
   DoneGateResult,
   GitEvidence,
+  InvocationRouting,
   IterationRecord,
+  RoutingRecord,
 } from '../../../../src/core/types.js';
 export type { AgentRunner } from '../../../../src/agents/agent-runner.js';
 export { makeAgentResult } from '../../../../src/agents/agent-runner.js';
