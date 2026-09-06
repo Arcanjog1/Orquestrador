@@ -93,9 +93,17 @@ export function OnboardingPage({
     }
   }
 
+  // Progress comes from the button's install and from the one the
+  // application starts by itself at launch (an old Codex on the PATH): both
+  // are shown, and a finished one re-reads the diagnostic.
   useEffect(
-    () => api.events.runtimeProgress((p) => setProgress((prev) => ({ ...prev, [p.runtimeId]: p }))),
-    [],
+    () =>
+      api.events.runtimeProgress((p) => {
+        setProgress((prev) => ({ ...prev, [p.runtimeId]: p }));
+        if (p.phase === "done" || p.phase === "failed" || p.phase === "cancelled") reload();
+        if (p.phase === "failed" && p.detail) setErrorDetail(p.detail);
+      }),
+    [reload],
   );
 
   const runtimes = diagnostics?.runtimes ?? [];
@@ -200,7 +208,10 @@ export function OnboardingPage({
               <div className="mt-4 space-y-2">
                 {runtimes.map((r) => {
                   const live = progress[r.runtimeId];
-                  const installing = busy === r.runtimeId;
+                  // Busy from the button, or from the launch-time install still going.
+                  const installing =
+                    busy === r.runtimeId ||
+                    (live !== undefined && !["done", "failed", "cancelled"].includes(live.phase) && !r.ready);
                   return (
                     <div
                       key={r.runtimeId}
