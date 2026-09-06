@@ -28,9 +28,10 @@ import {
 import { cn } from "@/lib/utils";
 import type { Agent } from "@/lib/orchestrator-data";
 import type { TimelineEntry } from "@/lib/timeline";
-import type { AccountProgressEvent, AgentView, WorkspaceView } from "@shared/ipc-contract";
+import type { AccountProgressEvent, AccountView, WorkspaceView } from "@shared/ipc-contract";
 import { api } from "@/lib/api";
 import { AgentIdentity, ProviderIcon, SectionLabel, StatBlock } from "./primitives";
+import { TeamForm } from "./TeamForm";
 
 /**
  * The dialogs, exactly as approved.
@@ -204,173 +205,45 @@ export function CancelDialog({
 /**
  * The team dialog.
  *
- * Assigns the ORCHESTRATOR and CODING_WORKER roles for this workspace, which is
- * a real operation - `workspace.setAgents` - and the one the run refuses to
- * start without.
+ * Provider, account, model and reasoning per role, saved with
+ * `workspace.setTeam` - the binding the run refuses to start without.
  */
 export function TeamDialog({
   open,
   onOpenChange,
-  team,
-  agents,
+  accounts,
   workspace,
   onSaved,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  team: Agent[];
-  agents: readonly AgentView[];
+  accounts: readonly AccountView[];
   workspace: WorkspaceView | null;
   onSaved: () => void;
 }) {
-  const orchestrators = agents.filter((a) => a.role === "ORCHESTRATOR");
-  const workers = agents.filter((a) => a.role === "CODING_WORKER");
-  const [orchestratorId, setOrchestratorId] = useState<string>("");
-  const [workerId, setWorkerId] = useState<string>("");
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    setError(null);
-    setOrchestratorId(workspace?.orchestratorAgentId ?? orchestrators[0]?.id ?? "");
-    setWorkerId(workspace?.workerAgentId ?? workers[0]?.id ?? "");
-  }, [open, workspace, agents]);
-
-  const save = async () => {
-    if (!workspace || !orchestratorId || !workerId) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await api.workspace.setAgents({
-        workspaceId: workspace.id,
-        orchestratorAgentId: orchestratorId,
-        workerAgentId: workerId,
-      });
-      onOpenChange(false);
-      onSaved();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Não foi possível salvar a equipe.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="text-sm">Equipe deste projeto</DialogTitle>
           <DialogDescription className="text-xs">
-            Cada função tem provider, conta, modelo e nível de raciocínio próprios.
+            Cada função tem provider, conta, modelo e nível de raciocínio próprios. As
+            escolhas ficam salvas neste projeto.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-3">
-          {team.map((agent) => (
-            <div
-              key={agent.role}
-              className="rounded-lg border border-border bg-surface-raised p-3"
-            >
-              <div className="flex items-center gap-2">
-                <ProviderIcon provider={agent.provider} />
-                <SectionLabel>{agent.role}</SectionLabel>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-3">
-                <Field
-                  label="Provider"
-                  value={agent.provider === "openai" ? "OpenAI" : "Anthropic"}
-                />
-                <Field label="Account" value={agent.account ?? "—"} />
-              </div>
-            </div>
-          ))}
-
-          <div className="rounded-lg border border-border bg-surface-raised p-3">
-            <SectionLabel>Atribuir funções</SectionLabel>
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <Picker
-                label="Orchestrator"
-                value={orchestratorId}
-                options={orchestrators}
-                onChange={setOrchestratorId}
-              />
-              <Picker
-                label="Coding worker"
-                value={workerId}
-                options={workers}
-                onChange={setWorkerId}
-              />
-            </div>
-            {agents.length === 0 && (
-              <p className="mt-3 text-xs text-muted-foreground">
-                Nenhum agente disponível. Conecte uma conta OpenAI e uma Anthropic em
-                Contas e integrações.
-              </p>
-            )}
-          </div>
-
-          {error && <p className="text-xs text-danger">{error}</p>}
-
-          <div className="rounded-lg border border-dashed border-border p-3 text-xs text-muted-foreground">
-            Preparado para Reviewer dedicado, Test Agent, Research Agent e Gemini (Image
-            Generator).
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancelar
-          </Button>
-          <Button onClick={() => void save()} disabled={saving || !orchestratorId || !workerId}>
-            {saving && <Loader2 className="size-3.5 animate-spin" />} Salvar equipe
-          </Button>
-        </DialogFooter>
+        {open && (
+          <TeamForm
+            workspace={workspace}
+            accounts={accounts}
+            onCancel={() => onOpenChange(false)}
+            onSaved={() => {
+              onOpenChange(false);
+              onSaved();
+            }}
+          />
+        )}
       </DialogContent>
     </Dialog>
-  );
-}
-
-function Picker({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: readonly AgentView[];
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div>
-      <div className="text-[11px] tracking-[0.1em] text-muted-foreground uppercase">
-        {label}
-      </div>
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger className="mt-1 h-8 text-xs">
-          <SelectValue placeholder="—" />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((o) => (
-            <SelectItem key={o.id} value={o.id}>
-              {o.name}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
-}
-
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="text-[11px] tracking-[0.1em] text-muted-foreground uppercase">
-        {label}
-      </div>
-      <div className="mt-1 rounded-md border border-border bg-surface px-2 py-1.5 text-xs">
-        {value}
-      </div>
-    </div>
   );
 }
 

@@ -249,3 +249,73 @@ test('migrations are ordered and uniquely numbered', () => {
   assert.deepEqual(ids, [...ids].sort((a, b) => a - b));
   assert.equal(new Set(ids).size, ids.length);
 });
+
+test('a database written before the team columns existed upgrades in place, rows intact', () => {
+  // Migration 3 (`team-and-conversations`) is the first one to add columns to
+  // tables that already carry a person's data. So: build a database exactly
+  // as the previous release left it - the migrations before this one, applied
+  // by hand - fill it, then open it with the current Database and check that
+  // nothing was lost and the new columns read as "not set".
+  const dir = mkdtempSync(join(tmpdir(), 'lao-db-upgrade-'));
+  try {
+    const file = join(dir, 'data', 'old.db');
+    const older = new NodeSqliteDriver(file);
+    older.exec(
+      'CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)',
+    );
+    for (const migration of MIGRATIONS.filter((m) => m.id < 3)) {
+      older.exec(migration.sql);
+      older.run('INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)', [
+        migration.id,
+        migration.name,
+        '2026-01-01T00:00:00.000Z',
+      ]);
+    }
+    const t = '2026-01-01T00:00:00.000Z';
+    older.run("INSERT INTO providers (id, display_name, created_at) VALUES ('openai','OpenAI',?)", [t]);
+    older.run(
+      "INSERT INTO accounts (id, provider_id, display_name, profile_directory, auth_state, created_at) VALUES ('acc-1','openai','Codex Trabalho','/p','connected',?)",
+      [t],
+    );
+    older.run(
+      "INSERT INTO agents (id, display_name, provider_id, account_id, adapter_id, role, created_at) VALUES ('agent-orchestrator-acc-1','Codex Trabalho','openai','acc-1','codex-cli','ORCHESTRATOR',?)",
+      [t],
+    );
+    older.run(
+      "INSERT INTO workspaces (id, display_name, local_path, created_at, updated_at) VALUES ('ws-1','Projeto','/w',?,?)",
+      [t, t],
+    );
+    older.run(
+      "INSERT INTO workspace_agents (workspace_id, agent_id, role) VALUES ('ws-1','agent-orchestrator-acc-1','ORCHESTRATOR')",
+    );
+    older.run(
+      "INSERT INTO chat_sessions (id, workspace_id, title, created_at, updated_at) VALUES ('chat-1','ws-1','Primeira conversa',?,?)",
+      [t, t],
+    );
+    older.close();
+
+    const upgraded = new Database({ filePath: file });
+    try {
+      assert.equal(upgraded.schemaVersion, SCHEMA_VERSION);
+      const workspace = upgraded.workspaces.require('ws-1');
+      assert.equal(workspace.orchestrator_agent_id, 'agent-orchestrator-acc-1', 'the binding survived');
+      assert.equal(workspace.orchestrator_model, null, 'no model was ever chosen');
+      assert.equal(workspace.orchestrator_reasoning, null);
+      assert.equal(workspace.worker_agent_id, null);
+      const session = upgraded.chat.requireSession('chat-1');
+      assert.equal(session.title, 'Primeira conversa');
+      assert.equal((session as { archived_at?: string | null }).archived_at ?? null, null);
+      // And the new columns are writable on the old rows.
+      upgraded.workspaces.setTeam(
+        'ws-1',
+        { agentId: 'agent-orchestrator-acc-1', model: 'gpt-5.1-codex', reasoning: 'high' },
+        { agentId: 'agent-orchestrator-acc-1' },
+      );
+      assert.equal(upgraded.workspaces.require('ws-1').orchestrator_model, 'gpt-5.1-codex');
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

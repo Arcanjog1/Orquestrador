@@ -15,7 +15,7 @@ import {
   EvidenceDialog,
   TeamDialog,
 } from "@/components/orch/dialogs";
-import { suggestions, type Agent } from "@/lib/orchestrator-data";
+import { reasoningLabel, suggestions, type Agent } from "@/lib/orchestrator-data";
 import {
   agentOfAuthor,
   buildTimeline,
@@ -28,7 +28,6 @@ import { api, messageOf } from "@/lib/api";
 import { Link, useRouter } from "@/router";
 import type {
   AccountView,
-  AgentView,
   ChatMessageView,
   ChatSessionView,
   RunProgressEvent,
@@ -49,14 +48,12 @@ export function WorkspacePage({
   workspaces,
   workspace,
   accounts,
-  agents,
   reload,
   onSelectWorkspace,
 }: {
   workspaces: readonly WorkspaceView[];
   workspace: WorkspaceView | null;
   accounts: readonly AccountView[];
-  agents: readonly AgentView[];
   reload: () => void;
   onSelectWorkspace: (id: string) => void;
 }) {
@@ -156,22 +153,22 @@ export function WorkspacePage({
   const runState = runStateOf(run, stage);
   const iteration = run?.iterations ?? 0;
 
+  // Agent, account, model and reasoning are four different things, and the
+  // header, the timeline and the team dialog all read them from the same
+  // place: the workspace's persisted team.
   const identity = useMemo(() => {
-    const byId = new Map(agents.map((a) => [a.id, a]));
-    const accountsById = new Map(accounts.map((a) => [a.id, a]));
-    const orchestrator = workspace?.orchestratorAgentId
-      ? byId.get(workspace.orchestratorAgentId)
-      : undefined;
-    const worker = workspace?.workerAgentId ? byId.get(workspace.workerAgentId) : undefined;
+    const team = workspace?.team;
     return {
-      orchestratorName: orchestrator?.name ?? null,
-      orchestratorAccount: orchestrator?.accountId
-        ? accountsById.get(orchestrator.accountId)?.name ?? null
-        : null,
-      workerName: worker?.name ?? null,
-      workerAccount: worker?.accountId ? accountsById.get(worker.accountId)?.name ?? null : null,
+      orchestratorName: team?.orchestrator.agentId ? "Codex" : null,
+      orchestratorAccount: team?.orchestrator.accountName ?? null,
+      orchestratorModel: team?.orchestrator.model ?? null,
+      orchestratorReasoning: reasoningLabel(team?.orchestrator.reasoning),
+      workerName: team?.worker.agentId ? "Claude Code" : null,
+      workerAccount: team?.worker.accountName ?? null,
+      workerModel: team?.worker.model ?? null,
+      workerReasoning: reasoningLabel(team?.worker.reasoning),
     };
-  }, [agents, accounts, workspace]);
+  }, [workspace]);
 
   const entries = useMemo(
     () =>
@@ -402,8 +399,7 @@ export function WorkspacePage({
       <TeamDialog
         open={teamOpen}
         onOpenChange={setTeamOpen}
-        team={team}
-        agents={agents}
+        accounts={accounts}
         workspace={workspace}
         onSaved={() => {
           reload();

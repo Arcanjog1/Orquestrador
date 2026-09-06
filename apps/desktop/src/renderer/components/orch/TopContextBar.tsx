@@ -234,7 +234,7 @@ export function TopContextBar({
       {/* Orchestrator team chip */}
       <Popover>
         <PopoverTrigger asChild>
-          <button>
+          <button data-testid="team-chip">
             <Chip className="border-primary/25 bg-primary/10">
               <Users className="size-3.5 text-primary" />
               Orquestrador
@@ -262,11 +262,7 @@ export function TopContextBar({
               </p>
             )}
           </div>
-          <div className="rounded-lg border border-dashed border-border p-2.5 text-xs text-muted-foreground">
-            Em breve: Reviewer dedicado, Test Agent, Research Agent e Gemini (Image
-            Generator).
-          </div>
-          <Button size="sm" className="w-full" onClick={onEditTeam}>
+          <Button size="sm" className="w-full" onClick={onEditTeam} data-testid="edit-team">
             Editar equipe
           </Button>
         </PopoverContent>

@@ -92,7 +92,12 @@ export class AppServices {
       options.openUrl ?? (() => {}),
     );
     this.agents = new AgentService(this.database);
-    this.workspaces = new WorkspaceService(this.database, this.runtimes, this.processManager);
+    this.workspaces = new WorkspaceService(
+      this.database,
+      this.runtimes,
+      this.processManager,
+      this.agents,
+    );
     this.verifications = new VerificationService(this.database);
     this.orchestration = new OrchestrationService(
       this.database,
@@ -118,13 +123,21 @@ export class AppServices {
    * silent minutes.
    */
   private async checkAgentsReady(workspace: WorkspaceWithAgents): Promise<string | null> {
-    for (const [agentId, what] of [
-      [workspace.orchestrator_agent_id, 'que supervisiona'],
-      [workspace.worker_agent_id, 'que executa'],
+    for (const [agentId, what, provider] of [
+      [workspace.orchestrator_agent_id, 'que supervisiona', 'OpenAI (Codex)'],
+      [workspace.worker_agent_id, 'que executa', 'Anthropic (Claude)'],
     ] as const) {
-      if (!agentId) return `Escolha o agente ${what} neste projeto.`;
+      if (!agentId) return `Escolha a conta ${what} este projeto em Equipe.`;
       const agent = this.database.agents.find(agentId);
-      if (!agent) return `O agente ${what} neste projeto não existe mais.`;
+      if (!agent) return `O agente ${what} este projeto não existe mais. Escolha a conta em Equipe.`;
+
+      // Every role runs on one of the user's own accounts, in that account's
+      // isolated profile. A credential the machine happens to have is never
+      // used, so an unbound agent is a configuration gap, not a fallback.
+      const record = agent.account_id ? this.database.accounts.find(agent.account_id) : undefined;
+      if (!record) {
+        return `Escolha a conta ${provider} ${what} este projeto em Equipe.`;
+      }
 
       const runtimeId = agent.adapter_id === 'codex-cli' ? 'codex' : 'claude-code';
       try {
@@ -133,11 +146,6 @@ export class AppServices {
         return `${agent.display_name} ainda não está configurado. Configure os runtimes primeiro.`;
       }
 
-      // An agent with no account runs on whatever the machine already has,
-      // which is a choice the user made; only a bound account is checked.
-      if (!agent.account_id) continue;
-      const record = this.database.accounts.find(agent.account_id);
-      if (!record) continue;
       const managers = { anthropic: this.accountManager, openai: this.codexAccountManager };
       const manager = managers[record.provider_id as 'anthropic' | 'openai'];
       if (!manager) continue;
@@ -149,7 +157,7 @@ export class AppServices {
         createdAt: record.created_at,
       });
       if (!isUsable(status.state)) {
-        return `Conecte a conta "${record.display_name}" antes de enviar uma tarefa.`;
+        return `A conta "${record.display_name}" não está conectada. Conecte a conta em Contas e integrações antes de enviar.`;
       }
     }
     return null;
@@ -180,12 +188,17 @@ export class AppServices {
         orchestratorAccountId
           ? this.codexAccountManager.buildEnvironment(orchestratorAccountId)
           : {},
+      // The team's choices for this role; null leaves the CLI's default alone.
+      model: workspace.orchestrator_model,
+      reasoningEffort: workspace.orchestrator_reasoning,
     });
     const worker = new ClaudeCodeAdapter({
       processManager: this.processManager,
       resolveExecutable: () => this.runtimeManager.getExecutablePath('claude-code'),
       buildEnvironment: () =>
         accountId ? this.accountManager.buildEnvironment(accountId) : {},
+      model: workspace.worker_model,
+      effort: workspace.worker_reasoning,
     });
     return { orchestrator, worker, workerAccountId: accountId };
   }

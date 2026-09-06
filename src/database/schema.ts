@@ -247,6 +247,20 @@ ALTER TABLE workspaces ADD COLUMN updated_at TEXT;
 UPDATE workspaces SET updated_at = created_at WHERE updated_at IS NULL;
 `,
   },
+  {
+    id: 3,
+    name: 'team-and-conversations',
+    sql: `
+-- A workspace's team is more than two agent ids: each role also names the
+-- model and the reasoning level the person chose, and those must survive a
+-- restart. Both are optional - NULL means "the CLI's own default".
+ALTER TABLE workspace_agents ADD COLUMN model TEXT;
+ALTER TABLE workspace_agents ADD COLUMN reasoning TEXT;
+-- Conversations can be archived: hidden from the recents list, never deleted
+-- by that action. NULL means visible.
+ALTER TABLE chat_sessions ADD COLUMN archived_at TEXT;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

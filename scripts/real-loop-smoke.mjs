@@ -108,14 +108,12 @@ try {
     label: 'o workspace passa na verificação registrada',
     command: check.command,
   });
-  const agents = services.agents.list();
-  const orchestrator = agents.find((a) => a.role === 'ORCHESTRATOR' && a.accountId === openai.id);
-  const worker = agents.find((a) => a.role === 'CODING_WORKER' && a.accountId === anthropic.id);
-  if (!orchestrator || !worker) {
-    say(false, 'agents', 'no agent bound to each connected account');
-    throw new EarlyExit(1);
-  }
-  services.workspaces.setAgents(workspace.id, orchestrator.id, worker.id);
+  // The team is bound by account, exactly as the interface binds it.
+  services.workspaces.setTeam(
+    workspace.id,
+    { accountId: openai.id },
+    { accountId: anthropic.id },
+  );
   registered = true;
   say(true, 'workspace', dir);
 

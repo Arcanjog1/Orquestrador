@@ -3,13 +3,13 @@ import { Check, ChevronRight, Folder, Loader2, Sparkles, X } from "lucide-react"
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AddProjectDialog, LoginDialog } from "@/components/orch/dialogs";
+import { TeamForm } from "@/components/orch/TeamForm";
 import { ProviderIcon, SectionLabel } from "@/components/orch/primitives";
 import { cn } from "@/lib/utils";
 import { api, messageOf } from "@/lib/api";
 import { Link, useRouter } from "@/router";
 import type {
   AccountView,
-  AgentView,
   DiagnosticView,
   ProviderName,
   RuntimeId,
@@ -27,13 +27,12 @@ const steps = ["Bem-vindo", "Componentes", "Agentes", "GitHub", "Projeto", "Equi
  *   Componentes -> runtime.diagnose / runtime.install, with real progress
  *   Agentes     -> accounts.create + accounts.connect, for both providers
  *   Projeto     -> workspace.selectFolder / workspace.clone
- *   Equipe      -> workspace.setAgents
+ *   Equipe      -> workspace.setTeam
  * Nothing advances on a simulated success.
  */
 export function OnboardingPage({
   diagnostics,
   accounts,
-  agents,
   workspaces,
   workspace,
   reload,
@@ -41,7 +40,6 @@ export function OnboardingPage({
 }: {
   diagnostics: DiagnosticView | null;
   accounts: readonly AccountView[];
-  agents: readonly AgentView[];
   workspaces: readonly WorkspaceView[];
   workspace: WorkspaceView | null;
   reload: () => void;
@@ -103,35 +101,12 @@ export function OnboardingPage({
     }
   }
 
-  const orchestrators = agents.filter((a) => a.role === "ORCHESTRATOR");
-  const workers = agents.filter((a) => a.role === "CODING_WORKER");
-
-  async function assignTeam() {
-    const orchestrator = orchestrators[0];
-    const worker = workers[0];
-    if (!workspace || !orchestrator || !worker) return;
-    setBusy("team");
-    setError(null);
-    try {
-      await api.workspace.setAgents({
-        workspaceId: workspace.id,
-        orchestratorAgentId: orchestrator.id,
-        workerAgentId: worker.id,
-      });
-      reload();
-    } catch (e) {
-      setError(messageOf(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
   const ready =
     (diagnostics?.ready ?? false) &&
     accounts.some((a) => a.state === "connected") &&
     workspace !== null &&
-    workspace.orchestratorAgentId !== null &&
-    workspace.workerAgentId !== null;
+    workspace.team.orchestrator.accountId !== null &&
+    workspace.team.worker.accountId !== null;
 
   return (
     <div className="flex min-h-screen justify-center bg-background px-6 py-14">
@@ -341,38 +316,23 @@ export function OnboardingPage({
             <>
               <SectionLabel>Passo 5</SectionLabel>
               <h2 className="mt-1 text-lg font-semibold">Configure sua equipe</h2>
-              <div className="mt-4 space-y-2">
-                {[
-                  ["ORCHESTRATOR", orchestrators[0]] as const,
-                  ["CODING_WORKER", workers[0]] as const,
-                ].map(([role, agent]) => (
-                  <div
-                    key={role}
-                    className="rounded-lg border border-border bg-surface-raised p-3"
-                  >
-                    <div className="flex items-center gap-2">
-                      <ProviderIcon provider={role === "ORCHESTRATOR" ? "openai" : "anthropic"} />
-                      <SectionLabel>{role.replace("_", " ")}</SectionLabel>
-                    </div>
-                    <div className="mt-2 text-sm">
-                      {agent ? agent.name : "Nenhum agente disponível"}
-                    </div>
-                    <div className="mt-1 font-mono text-xs text-muted-foreground">
-                      {agent?.runtimeId ?? "conecte uma conta deste provider"}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              {workspace && orchestrators[0] && workers[0] && (
-                <Button
-                  className="mt-4"
-                  variant="secondary"
-                  disabled={busy === "team"}
-                  onClick={() => void assignTeam()}
-                >
-                  {busy === "team" && <Loader2 className="size-3.5 animate-spin" />} Atribuir a{" "}
-                  {workspace.name}
-                </Button>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Cada função usa uma das suas contas. O Codex supervisiona; o Claude Code
+                executa.
+              </p>
+              {workspace ? (
+                <div className="mt-4">
+                  <TeamForm
+                    workspace={workspace}
+                    accounts={accounts}
+                    submitLabel={`Atribuir a ${workspace.name}`}
+                    onSaved={reload}
+                  />
+                </div>
+              ) : (
+                <p className="mt-4 text-sm text-attention">
+                  Adicione um projeto no passo anterior para montar a equipe dele.
+                </p>
               )}
               {error && <p className="mt-3 text-xs text-danger">{error}</p>}
               {ready ? (

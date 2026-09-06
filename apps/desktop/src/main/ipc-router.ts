@@ -14,6 +14,7 @@
 
 import {
   REQUEST_CHANNELS,
+  type IpcMap,
   type IpcResult,
   type RequestChannel,
 } from '../shared/ipc-contract.js';
@@ -132,6 +133,10 @@ export class IpcRouter {
     this.handlers.set('workspace.setAgents', (p) => {
       const input = p as { workspaceId: string; orchestratorAgentId: string; workerAgentId: string };
       return s.workspaces.setAgents(input.workspaceId, input.orchestratorAgentId, input.workerAgentId);
+    });
+    this.handlers.set('workspace.setTeam', (p) => {
+      const input = p as IpcMap['workspace.setTeam']['request'];
+      return s.workspaces.setTeam(input.workspaceId, input.orchestrator, input.worker);
     });
 
     // The project's own verifications: configuration a person writes, which the

@@ -16,7 +16,7 @@
  *    by sending a gigabyte of text.
  */
 
-import type { IpcMap, RequestChannel } from './ipc-contract.js';
+import { REASONING_LEVELS, type IpcMap, type RequestChannel } from './ipc-contract.js';
 
 export class IpcValidationError extends Error {
   readonly code = 'INVALID_ARGUMENT';
@@ -174,6 +174,24 @@ export function obj<T>(shape: Shape, rules: ObjectRules = {}): Validator<T> {
 export const runtimeId = oneOf(['codex', 'claude-code', 'git'] as const);
 
 /**
+ * A model name as the CLIs take it (`gpt-5.1-codex`, `claude-opus-5`,
+ * `provider/model`). Never whitespace, never a leading dash: this becomes one
+ * argv entry after `--model`, and must not be readable as another flag.
+ */
+export const modelName = str({
+  min: 1,
+  max: 120,
+  pattern: /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/,
+  what: 'a model name',
+});
+
+/** One role of a workspace team: the account, and how it should run. */
+export const teamMember = obj<{ accountId: string; model?: string; reasoning?: string }>(
+  { accountId: id, model: modelName, reasoning: oneOf(REASONING_LEVELS) },
+  { optional: ['model', 'reasoning'] },
+);
+
+/**
  * A URL that may be handed to the system browser.
  *
  * Only http and https. `file:`, `javascript:` and custom schemes are refused
@@ -243,6 +261,11 @@ export const REQUEST_VALIDATORS: {
     workspaceId: id,
     orchestratorAgentId: id,
     workerAgentId: id,
+  }),
+  'workspace.setTeam': obj({
+    workspaceId: id,
+    orchestrator: teamMember,
+    worker: teamMember,
   }),
 
   'verifications.list': obj({ workspaceId: id }),

@@ -412,17 +412,17 @@ test('a run refuses to start when a runtime or account is not ready, instead of 
     const workspace = value<{ id: string }>(
       await fixture.router.handle('workspace.create', { name: 'Scratch', localPath: repo.dir }),
     );
-    value(
+    const codex = value<{ id: string }>(
+      await fixture.router.handle('accounts.create', { name: 'Codex', provider: 'openai' }),
+    );
+    const claude = value<{ id: string }>(
       await fixture.router.handle('accounts.create', { name: 'Claude', provider: 'anthropic' }),
     );
-    const agents = value<Array<{ id: string; role: string }>>(
-      await fixture.router.handle('agents.list', null),
-    );
     value(
-      await fixture.router.handle('workspace.setAgents', {
+      await fixture.router.handle('workspace.setTeam', {
         workspaceId: workspace.id,
-        orchestratorAgentId: agents.find((a) => a.role === 'ORCHESTRATOR')!.id,
-        workerAgentId: agents.find((a) => a.role === 'CODING_WORKER')!.id,
+        orchestrator: { accountId: codex.id },
+        worker: { accountId: claude.id },
       }),
     );
     const session = value<{ id: string }>(

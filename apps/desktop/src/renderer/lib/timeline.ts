@@ -166,18 +166,18 @@ export function agentOfAuthor(author: string, agents: AgentIdentitySource): Agen
       provider: 'openai' as Provider,
       agent: agents.orchestratorName ?? 'Codex',
       account: agents.orchestratorAccount,
-      model: null,
-      reasoning: null,
+      model: agents.orchestratorModel ?? null,
+      reasoning: agents.orchestratorReasoning ?? null,
     };
   }
   if (author === 'worker') {
     return {
       role: 'CODING WORKER',
       provider: 'anthropic' as Provider,
-      agent: agents.workerName ?? 'Claude',
+      agent: agents.workerName ?? 'Claude Code',
       account: agents.workerAccount,
-      model: null,
-      reasoning: null,
+      model: agents.workerModel ?? null,
+      reasoning: agents.workerReasoning ?? null,
     };
   }
   return null;
@@ -188,6 +188,11 @@ export interface AgentIdentitySource {
   orchestratorAccount: string | null;
   workerName: string | null;
   workerAccount: string | null;
+  /** Shown as badges; already in the interface's words ("Alto"), not the CLI's. */
+  orchestratorModel?: string | null;
+  orchestratorReasoning?: string | null;
+  workerModel?: string | null;
+  workerReasoning?: string | null;
 }
 
 // -- The builder ------------------------------------------------------------

@@ -211,6 +211,19 @@ export interface WorkspaceRecord extends SqlRow {
 export interface WorkspaceWithAgents extends WorkspaceRecord {
   orchestrator_agent_id: string | null;
   worker_agent_id: string | null;
+  /** Model the orchestrator runs with; null leaves the CLI's default alone. */
+  orchestrator_model: string | null;
+  /** Reasoning level for the orchestrator (`low` | `medium` | `high`), or null. */
+  orchestrator_reasoning: string | null;
+  worker_model: string | null;
+  worker_reasoning: string | null;
+}
+
+/** One role's binding, as `setTeam` takes it. */
+export interface TeamMemberInput {
+  agentId: string;
+  model?: string | null;
+  reasoning?: string | null;
 }
 
 export class WorkspaceRepository extends Repository {
@@ -267,18 +280,29 @@ export class WorkspaceRepository extends Repository {
    * to.
    */
   setAgents(workspaceId: string, orchestratorAgentId: string, workerAgentId: string): WorkspaceWithAgents {
+    return this.setTeam(workspaceId, { agentId: orchestratorAgentId }, { agentId: workerAgentId });
+  }
+
+  /**
+   * The full binding: who supervises, who executes, and with which model and
+   * reasoning level each. `setAgents` is this with the defaults.
+   */
+  setTeam(
+    workspaceId: string,
+    orchestrator: TeamMemberInput,
+    worker: TeamMemberInput,
+  ): WorkspaceWithAgents {
     this.db.transaction(() => {
       this.db.run('DELETE FROM workspace_agents WHERE workspace_id = ?', [workspaceId]);
-      this.db.run('INSERT INTO workspace_agents (workspace_id, agent_id, role) VALUES (?,?,?)', [
-        workspaceId,
-        orchestratorAgentId,
-        'ORCHESTRATOR',
-      ]);
-      this.db.run('INSERT INTO workspace_agents (workspace_id, agent_id, role) VALUES (?,?,?)', [
-        workspaceId,
-        workerAgentId,
-        'CODING_WORKER',
-      ]);
+      for (const [role, member] of [
+        ['ORCHESTRATOR', orchestrator],
+        ['CODING_WORKER', worker],
+      ] as const) {
+        this.db.run(
+          'INSERT INTO workspace_agents (workspace_id, agent_id, role, model, reasoning) VALUES (?,?,?,?,?)',
+          [workspaceId, member.agentId, role, blankToNull(member.model), blankToNull(member.reasoning)],
+        );
+      }
       this.touch(workspaceId);
     });
     return this.require(workspaceId);
@@ -289,16 +313,31 @@ export class WorkspaceRepository extends Repository {
   }
 
   private withAgents(row: WorkspaceRecord): WorkspaceWithAgents {
-    const bindings = this.db.all<{ agent_id: string; role: string }>(
-      'SELECT agent_id, role FROM workspace_agents WHERE workspace_id = ?',
-      [row.id],
-    );
+    const bindings = this.db.all<{
+      agent_id: string;
+      role: string;
+      model: string | null;
+      reasoning: string | null;
+    }>('SELECT agent_id, role, model, reasoning FROM workspace_agents WHERE workspace_id = ?', [
+      row.id,
+    ]);
+    const orchestrator = bindings.find((b) => b.role === 'ORCHESTRATOR');
+    const worker = bindings.find((b) => b.role === 'CODING_WORKER');
     return {
       ...row,
-      orchestrator_agent_id: bindings.find((b) => b.role === 'ORCHESTRATOR')?.agent_id ?? null,
-      worker_agent_id: bindings.find((b) => b.role === 'CODING_WORKER')?.agent_id ?? null,
+      orchestrator_agent_id: orchestrator?.agent_id ?? null,
+      worker_agent_id: worker?.agent_id ?? null,
+      orchestrator_model: orchestrator?.model ?? null,
+      orchestrator_reasoning: orchestrator?.reasoning ?? null,
+      worker_model: worker?.model ?? null,
+      worker_reasoning: worker?.reasoning ?? null,
     };
   }
+}
+
+function blankToNull(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? '';
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 /* ------------------------------------------------------------------ *

@@ -117,7 +117,6 @@ function Shell() {
         <OnboardingPage
           diagnostics={state.diagnostics}
           accounts={state.accounts}
-          agents={state.agents}
           workspaces={state.workspaces}
           workspace={workspace}
           reload={reload}
@@ -142,7 +141,6 @@ function Shell() {
           workspaces={state.workspaces}
           workspace={workspace}
           accounts={state.accounts}
-          agents={state.agents}
           reload={reload}
           onSelectWorkspace={setWorkspaceId}
         />

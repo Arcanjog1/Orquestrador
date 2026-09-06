@@ -469,3 +469,108 @@ Options:
   assert.deepEqual(args, ['exec', '--skip-git-repo-check']);
   assert.match(result.stdout, /"action":"done"/, 'stdout is still parsed when there is no file');
 });
+
+/* ------------------------------------------------------------------------ *
+ * The team's model and reasoning level.
+ *
+ * A workspace's team names a model and a reasoning level per role. Both are
+ * passed on only when the installed build advertises the flag: codex-cli
+ * 0.153.0 has `-m/--model` and `-c/--config` on `exec`, Claude Code 2.1.261
+ * has `--model` and `--effort`. On a build without them the choice is dropped
+ * rather than guessed, and the run still happens.
+ * ------------------------------------------------------------------------ */
+
+const CODEX_EXEC_HELP_WITH_MODEL = `${CODEX_EXEC_HELP}
+  -m, --model <MODEL>
+          Model the agent should use
+
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from config.toml
+`;
+
+const CLAUDE_HELP_WITH_MODEL = `${CLAUDE_HELP}      --model <model>                   Model for the current session
+      --effort <level>                  Effort level: low, medium, high
+`;
+
+test('Codex is told the team\'s model and reasoning level, as its own exec flags', async () => {
+  const { manager, calls } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': CODEX_EXEC_HELP_WITH_MODEL,
+  });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+    model: 'gpt-5.1-codex',
+    reasoningEffort: 'high',
+  });
+  await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 1 });
+
+  const exec = calls.find((c) => c.args?.[0] === 'exec' && c.args[1] !== '--help')!;
+  const args = exec.args!;
+  assert.equal(args[args.indexOf('--model') + 1], 'gpt-5.1-codex');
+  // The documented config key, quoted so Codex's TOML reader takes it as a
+  // string; one argv entry, so no shell ever sees the quotes.
+  assert.equal(args[args.indexOf('--config') + 1], 'model_reasoning_effort="high"');
+  assert.ok(!exec.stdin?.includes('--model'), 'flags do not leak into the prompt');
+});
+
+test('Codex drops the model choice on a build whose exec has no such flag', async () => {
+  const { manager, calls } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': CODEX_EXEC_HELP,
+  });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+    model: 'gpt-5.1-codex',
+    reasoningEffort: 'high',
+  });
+  await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 1 });
+  const exec = calls.find((c) => c.args?.[0] === 'exec' && c.args[1] !== '--help')!;
+  assert.ok(!exec.args!.includes('--model'));
+  assert.ok(!exec.args!.includes('--config'));
+});
+
+test('Codex with no team choice adds neither flag, even when the build has them', async () => {
+  const { manager, calls } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': CODEX_EXEC_HELP_WITH_MODEL,
+  });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+    model: null,
+    reasoningEffort: null,
+  });
+  await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 1 });
+  const exec = calls.find((c) => c.args?.[0] === 'exec' && c.args[1] !== '--help')!;
+  assert.ok(!exec.args!.includes('--model'));
+  assert.ok(!exec.args!.includes('--config'));
+});
+
+test('Claude Code is told the team\'s model and effort, only when its help offers them', async () => {
+  for (const [help, expected] of [
+    [CLAUDE_HELP_WITH_MODEL, true],
+    [CLAUDE_HELP, false],
+  ] as const) {
+    const { manager, calls } = fakeProcessManager({ '--help': help });
+    const adapter = new ClaudeCodeAdapter({
+      processManager: manager,
+      resolveExecutable: async () => '/managed/claude.exe',
+      buildEnvironment: () => ({}),
+      model: 'claude-opus-5',
+      effort: 'medium',
+    });
+    await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 1 });
+    const run = calls.find((c) => c.args?.[0] === '--print')!;
+    const args = run.args!;
+    if (expected) {
+      assert.equal(args[args.indexOf('--model') + 1], 'claude-opus-5');
+      assert.equal(args[args.indexOf('--effort') + 1], 'medium');
+    } else {
+      assert.ok(!args.includes('--model'));
+      assert.ok(!args.includes('--effort'));
+    }
+    assert.equal(run.stdin, 'p', 'the prompt still goes over stdin');
+  }
+});

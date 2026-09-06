@@ -462,6 +462,95 @@ test('a dialog that missed the first report still gets the code from the next on
   say({ stage: 'cancelled', label: 'Conexão cancelada.' });
 });
 
+test('the team dialog offers the real accounts by name, and what it saves is what the loop reads', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-team-'));
+  try {
+    // Two persisted accounts, one per provider, and a project - added the way
+    // the interface adds them. Neither account is connected: the dialog is
+    // about *which* account, and must show them either way.
+    await window.webContents.executeJavaScript(
+      `window.api.accounts.create(${JSON.stringify({ name: 'Codex Trabalho', provider: 'openai' })})`,
+    );
+    await window.webContents.executeJavaScript(
+      `window.api.accounts.create(${JSON.stringify({ name: 'Claude Trabalho', provider: 'anthropic' })})`,
+    );
+    const workspace = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Projeto em equipe', localPath: dir })})`,
+    );
+    assert.equal(workspace.team.orchestrator.accountName, null, 'nothing chosen yet');
+
+    // No runtime is installed here, so a fresh load lands on onboarding; the
+    // workspace is reached the way a person reaches it: "Pular onboarding".
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Projeto em equipe/, 15_000);
+
+    // The header chip opens the team popover; "Editar equipe" opens the dialog.
+    await click(window, 'team-chip');
+    await waitForText(window, /Editar equipe/, 10_000);
+    await click(window, 'edit-team');
+    const dialog = await waitForText(window, /Equipe deste projeto/, 10_000);
+
+    // Accounts, by their own names - not "Codex", not "OpenAI".
+    const orchestratorPick = await window.webContents.executeJavaScript(
+      `document.querySelector('[data-testid="team-orchestrator-account"]').textContent`,
+    );
+    const workerPick = await window.webContents.executeJavaScript(
+      `document.querySelector('[data-testid="team-worker-account"]').textContent`,
+    );
+    const openaiNames = (await window.webContents.executeJavaScript('window.api.accounts.list()'))
+      .filter((a) => a.provider === 'openai')
+      .map((a) => a.name);
+    assert.ok(
+      openaiNames.some((name) => orchestratorPick.includes(name)),
+      `the orchestrator picker shows one of the OpenAI accounts, got "${orchestratorPick}"`,
+    );
+    assert.notEqual(orchestratorPick.trim(), 'Codex', 'the provider is not offered as an account');
+    assert.match(workerPick, /Claude Trabalho/);
+    // The labels are rendered uppercase by CSS, and innerText follows.
+    assert.match(dialog, /Provider/i);
+    assert.match(dialog, /Model/i);
+    assert.match(dialog, /Reasoning/i);
+
+    // Choose a model for the orchestrator and save.
+    await type(window, 'team-orchestrator-model', 'gpt-5.1-codex');
+    await click(window, 'team-save');
+    const closed = Date.now() + 10_000;
+    let text = '';
+    while (Date.now() < closed) {
+      text = await window.webContents.executeJavaScript('document.body.innerText');
+      if (!/Equipe deste projeto/.test(text)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.doesNotMatch(text, /Equipe deste projeto/, 'the dialog closed after saving');
+
+    // What was saved is the workspace's team, by account, as the run reads it.
+    const saved = (await window.webContents.executeJavaScript('window.api.workspace.list()')).find(
+      (w) => w.id === workspace.id,
+    );
+    assert.ok(openaiNames.includes(saved.team.orchestrator.accountName));
+    assert.ok(orchestratorPick.includes(saved.team.orchestrator.accountName), 'the shown account is the saved one');
+    assert.equal(saved.team.orchestrator.model, 'gpt-5.1-codex');
+    assert.equal(saved.team.worker.accountName, 'Claude Trabalho');
+    assert.equal(saved.team.worker.provider, 'anthropic');
+    assert.equal(saved.workerAgentId, `agent-worker-${saved.team.worker.accountId}`);
+
+    // And the header shows the team by account after a restart of the page.
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Projeto em equipe/, 15_000);
+    await click(window, 'team-chip');
+    const popover = await waitForText(window, /Conta: Claude Trabalho/, 10_000);
+    assert.match(popover, /gpt-5\.1-codex/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /* ------------------------------------------------------------------ helpers */
 
 let sharedWindow = null;

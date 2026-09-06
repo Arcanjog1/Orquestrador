@@ -69,6 +69,20 @@ export type Agent = {
   reasoning: string | null;
 };
 
+/** The reasoning level as the interface names it; the CLIs take the key. */
+export function reasoningLabel(level: string | null | undefined): string | null {
+  switch (level) {
+    case "low":
+      return "Baixo";
+    case "medium":
+      return "Médio";
+    case "high":
+      return "Alto";
+    default:
+      return null;
+  }
+}
+
 /** The reasons a run can stop for a human, offered in Settings. */
 export const humanReviewReasons = [
   {

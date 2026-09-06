@@ -19,6 +19,10 @@ export interface ClaudeAdapterOptions {
   resolveExecutable: () => Promise<string>;
   /** Environment for the chosen account, from `ClaudeAccountManager`. */
   buildEnvironment: () => Record<string, string | undefined>;
+  /** Model to run with (`--model`), when the team chose one. */
+  model?: string | null;
+  /** Effort level (`--effort low|medium|high`), when the team chose one. */
+  effort?: string | null;
 }
 
 export class ClaudeCodeAdapter implements AgentRunner {
@@ -109,6 +113,14 @@ export class ClaudeCodeAdapter implements AgentRunner {
     const args = ['--print'];
     if (this.capabilities.flags.has('--permission-mode')) {
       args.push('--permission-mode', 'acceptEdits');
+    }
+    // The team's choices, only on builds that take them. Claude Code 2.1.261
+    // offers `--model <model>` and `--effort <level>`.
+    if (this.options.model && this.capabilities.flags.has('--model')) {
+      args.push('--model', this.options.model);
+    }
+    if (this.options.effort && this.capabilities.flags.has('--effort')) {
+      args.push('--effort', this.options.effort);
     }
     return args;
   }

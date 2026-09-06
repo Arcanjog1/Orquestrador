@@ -43,6 +43,7 @@ export const REQUEST_CHANNELS = [
   'workspace.create',
   'workspace.clone',
   'workspace.setAgents',
+  'workspace.setTeam',
 
   'verifications.list',
   'verifications.create',
@@ -178,6 +179,37 @@ export interface VerificationView {
   readonly createdAt: string;
 }
 
+export type TeamRole = 'ORCHESTRATOR' | 'CODING_WORKER';
+
+/** The reasoning levels both CLIs accept by that name. */
+export const REASONING_LEVELS = ['low', 'medium', 'high'] as const;
+export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
+
+/**
+ * One role of a workspace's team, resolved for display.
+ *
+ * Provider is fixed by the role (Codex supervises, Claude Code executes); the
+ * account is one of the user's persisted accounts of that provider, named
+ * here so the interface never shows a provider where an account belongs.
+ */
+export interface TeamMemberView {
+  readonly role: TeamRole;
+  readonly provider: ProviderName;
+  readonly agentId: string | null;
+  readonly accountId: string | null;
+  /** The account's display name, e.g. "Codex Trabalho"; null when unbound. */
+  readonly accountName: string | null;
+  /** Null means the CLI's own default. */
+  readonly model: string | null;
+  readonly reasoning: ReasoningLevel | null;
+}
+
+export interface TeamMemberInput {
+  readonly accountId: string;
+  readonly model?: string;
+  readonly reasoning?: ReasoningLevel;
+}
+
 export interface WorkspaceView {
   readonly id: string;
   readonly name: string;
@@ -193,6 +225,10 @@ export interface WorkspaceView {
   readonly branch: string | null;
   readonly orchestratorAgentId: string | null;
   readonly workerAgentId: string | null;
+  readonly team: {
+    readonly orchestrator: TeamMemberView;
+    readonly worker: TeamMemberView;
+  };
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -286,6 +322,15 @@ export interface IpcMap {
   };
   'workspace.setAgents': {
     request: { workspaceId: string; orchestratorAgentId: string; workerAgentId: string };
+    response: WorkspaceView;
+  };
+  /**
+   * Binds the team by *account*: the orchestrator to an OpenAI account, the
+   * worker to an Anthropic one, each with an optional model and reasoning
+   * level. An account of the wrong provider is refused.
+   */
+  'workspace.setTeam': {
+    request: { workspaceId: string; orchestrator: TeamMemberInput; worker: TeamMemberInput };
     response: WorkspaceView;
   };
 

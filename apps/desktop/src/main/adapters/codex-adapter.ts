@@ -37,6 +37,13 @@ export interface CodexAdapterOptions {
    * workspaces bound to two accounts never share a login.
    */
   buildEnvironment?: () => Record<string, string | undefined>;
+  /** Model to run with (`-m`), when the team chose one. */
+  model?: string | null;
+  /**
+   * Reasoning level (`low` | `medium` | `high`), passed as the documented
+   * `model_reasoning_effort` config override when the team chose one.
+   */
+  reasoningEffort?: string | null;
 }
 
 export class CodexAdapter implements AgentRunner {
@@ -172,6 +179,17 @@ export class CodexAdapter implements AgentRunner {
       const schemaPath = join(scratch, 'decision.schema.json');
       writeFileSync(schemaPath, `${JSON.stringify(this.options.outputSchema, null, 2)}\n`, 'utf8');
       args.push('--output-schema', schemaPath);
+    }
+
+    // The team's model and reasoning level, only on builds whose `exec` takes
+    // them. codex-cli 0.153.0 offers `-m/--model` and `-c/--config key=value`,
+    // and `model_reasoning_effort` is a documented config key. The value is
+    // quoted so the CLI's TOML reader takes it as the string it is.
+    if (this.options.model && this.execCapabilities.flags.has('--model')) {
+      args.push('--model', this.options.model);
+    }
+    if (this.options.reasoningEffort && this.execCapabilities.flags.has('--config')) {
+      args.push('--config', `model_reasoning_effort="${this.options.reasoningEffort}"`);
     }
 
     let lastMessagePath: string | null = null;
