@@ -1149,16 +1149,32 @@ function removeTree(dir) {
 }
 
 /** Clicks the element carrying a `data-testid`, failing loudly if it is absent. */
-async function click(window, testid) {
-  const done = await window.webContents.executeJavaScript(`
-    (() => {
-      const el = document.querySelector('[data-testid="${testid}"]');
-      if (!el) return 'missing';
-      el.click();
-      return 'clicked';
-    })()
-  `);
-  if (done !== 'clicked') throw new Error(`no element with data-testid="${testid}"`);
+/**
+ * Clicks the element, once it is there and enabled: a button the page has
+ * disabled while it finishes something (a branch switch still refreshing
+ * git) swallows a click, so the helper waits for it the way a person would.
+ */
+async function click(window, testid, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  let done = 'missing';
+  while (Date.now() < deadline) {
+    done = await window.webContents.executeJavaScript(`
+      (() => {
+        const el = document.querySelector('[data-testid="${testid}"]');
+        if (!el) return 'missing';
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') return 'disabled';
+        el.click();
+        return 'clicked';
+      })()
+    `);
+    if (done === 'clicked') return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(
+    done === 'disabled'
+      ? `the element with data-testid="${testid}" stayed disabled`
+      : `no element with data-testid="${testid}"`,
+  );
 }
 
 /**

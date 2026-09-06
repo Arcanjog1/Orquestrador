@@ -288,13 +288,19 @@ export function WorkspacePage({
 
   // -- Branches: read from git on demand, switched only on request ---------
 
+  // Reads overlap (a switch refreshes, and opening the chip refreshes again);
+  // only the newest answer may land, or a slower, older read would paint a
+  // tree that is no longer there.
+  const branchesRead = useRef(0);
   const refreshBranches = useCallback(async () => {
     if (!workspace) {
       setBranches(null);
       return;
     }
+    const read = ++branchesRead.current;
     try {
-      setBranches(await api.workspace.branches({ workspaceId: workspace.id }));
+      const fresh = await api.workspace.branches({ workspaceId: workspace.id });
+      if (read === branchesRead.current) setBranches(fresh);
     } catch (error) {
       fail(error);
     }
