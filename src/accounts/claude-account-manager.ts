@@ -226,13 +226,20 @@ export class ClaudeAccountManager {
     let output = '';
     let capturedUrl: string | null = null;
 
+    // The sign-in process is stopped through its own signal, never through
+    // `cancelAll`: the process manager is shared with everything else the
+    // application runs, and a cancel there is sticky.
+    const login = new AbortController();
+    if (options.signal?.aborted) login.abort();
+    options.signal?.addEventListener('abort', () => login.abort(), { once: true });
+
     const running = this.processManager.run({
       command: executable,
       args: ['auth', 'login'],
       cwd: this.paths.root,
       env: this.buildEnvironment(account.id),
       timeoutMs: options.completionTimeoutMs ?? 600_000,
-      ...(options.signal ? { signal: options.signal } : {}),
+      signal: login.signal,
       onStdout: (chunk) => {
         output += chunk;
       },
@@ -287,8 +294,11 @@ export class ClaudeAccountManager {
       }
     }
 
-    // Never leave a sign-in process running.
-    if (!settled) await this.processManager.cancelAll(3000);
+    // Never leave a sign-in process running - and stop only this one. The
+    // process manager is shared with everything else the application runs; a
+    // `cancelAll` here was sticky and refused every later process, including
+    // the status check that would have shown the account connected.
+    if (!settled) login.abort();
     await running.catch(() => undefined);
 
     if (status.state === 'connected') {

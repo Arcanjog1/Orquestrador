@@ -392,6 +392,183 @@ test('an unparsable answer is asked to fix its format once, then the run fails c
     assert.equal(run.status, 'FAILED');
     assert.equal(prepared.orchestrator.calls.length, 2, 'exactly one repair attempt');
     assert.match(prepared.orchestrator.calls[1]!.prompt, /JSON/);
+
+    // The repair is a *new* CLI process with no memory of the first: it must
+    // be given the objective again, and shown what it answered before.
+    const repair = prepared.orchestrator.calls[1]!.prompt;
+    assert.match(repair, /OBJECTIVE: faça algo/, 'the repair carries the original prompt');
+    assert.match(repair, /isto não é JSON/, 'and the answer that was refused');
+
+    // The failure says what happened, not a sentence that fits everything.
+    assert.equal(run.failureKind, 'decision');
+    assert.match(run.summary ?? '', /respondeu duas vezes, mas não com uma decisão válida/);
+    assert.match(run.summary ?? '', /No JSON object/);
+    assert.match(run.summary ?? '', /ainda não é JSON/, 'the excerpt shows what came back');
+
+    // And "Detalhes" has the diagnostics of every attempt.
+    const detail = value<{
+      steps: Array<{ phase: string; status: string; detail: string | null }>;
+    }>(await prepared.fixture.router.handle('run.detail', { runId: sent.run.id }));
+    const attempts = detail.steps.filter((s) => s.phase === 'orchestrator' && s.status === 'unparsed');
+    assert.equal(attempts.length, 2);
+    for (const [index, attempt] of attempts.entries()) {
+      const parsed = JSON.parse(attempt.detail!) as Record<string, unknown>;
+      assert.equal(parsed.attempt, index + 1);
+      assert.equal(parsed.outcome, 'completed');
+      assert.equal(typeof parsed.parseError, 'string');
+      assert.equal(typeof parsed.stdoutExcerpt, 'string');
+    }
+    assert.equal(detail.steps.at(-1)?.status, 'gave-up');
+  } finally {
+    await prepared.cleanup();
+  }
+});
+
+test('a CLI that exits without answering is reported as that, with its own words', async () => {
+  const prepared = await prepare({
+    orchestratorScript: [],
+    maxIterations: 1,
+  });
+  // An orchestrator whose process gives up: it exits with code 1, an error on
+  // stderr, and a header that must never reach the person. That is what a
+  // usage limit or an expired login looks like from outside the CLI.
+  prepared.orchestrator.run = async () => ({
+    outcome: 'completed',
+    exitCode: 1,
+    signal: null,
+    stdout: '',
+    stderr: 'Error: usage limit reached for this account\nAuthorization: Bearer abcdefghijklmnop123456\n',
+    durationMs: 5,
+    truncated: false,
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+  });
+  try {
+    const sent = value<{ run: { id: string } }>(
+      await prepared.fixture.router.handle('chat.sendMessage', {
+        sessionId: prepared.sessionId,
+        text: 'faça algo',
+      }),
+    );
+    const run = await prepared.fixture.services.orchestration.waitFor(sent.run.id);
+    assert.equal(run.status, 'FAILED');
+    assert.equal(run.failureKind, 'decision');
+    assert.match(run.summary ?? '', /saiu com código 1: Error: usage limit reached/);
+    const messages = value<Array<{ author: string; text: string }>>(
+      await prepared.fixture.router.handle('chat.listMessages', { sessionId: prepared.sessionId }),
+    );
+    assert.ok(messages.some((m) => m.author === 'system' && /usage limit reached/.test(m.text)));
+    const detail = value<{ steps: Array<{ detail: string | null }> }>(
+      await prepared.fixture.router.handle('run.detail', { runId: sent.run.id }),
+    );
+    const everything = JSON.stringify(detail);
+    assert.doesNotMatch(everything, /abcdefghijklmnop123456/, 'the header value is redacted everywhere');
+    assert.match(everything, /usage limit reached/);
+  } finally {
+    await prepared.cleanup();
+  }
+});
+
+test('a follow-up message in the same conversation is read against what came before', async () => {
+  const prepared = await prepare({
+    orchestratorScript: [done(), done()],
+    maxIterations: 1,
+  });
+  try {
+    const first = value<{ run: { id: string } }>(
+      await prepared.fixture.router.handle('chat.sendMessage', {
+        sessionId: prepared.sessionId,
+        text: 'Crie hello.txt com o conteúdo combinado',
+      }),
+    );
+    await prepared.fixture.services.orchestration.waitFor(first.run.id);
+    const second = value<{ run: { id: string } }>(
+      await prepared.fixture.router.handle('chat.sendMessage', {
+        sessionId: prepared.sessionId,
+        text: 'Continue de onde parou.',
+      }),
+    );
+    await prepared.fixture.services.orchestration.waitFor(second.run.id);
+
+    const prompts = prepared.orchestrator.calls.map((c) => c.prompt);
+    assert.doesNotMatch(prompts[0]!, /CONVERSATION BEFORE/, 'the first run has no history');
+    assert.match(prompts[1]!, /OBJECTIVE: Continue de onde parou\./);
+    assert.match(prompts[1]!, /CONVERSATION BEFORE THIS OBJECTIVE/);
+    assert.match(prompts[1]!, /USER: Crie hello\.txt com o conteúdo combinado/);
+  } finally {
+    await prepared.cleanup();
+  }
+});
+
+test('a run left RUNNING by a closed application is marked interrupted on the next start', async () => {
+  const prepared = await prepare({ orchestratorScript: [done()], maxIterations: 1 });
+  try {
+    const { database } = prepared.fixture.services;
+    const session = database.chat.requireSession(prepared.sessionId);
+    const run = database.runs.create({
+      id: 'run-left-behind',
+      sessionId: session.id,
+      workspaceId: session.workspace_id,
+      objective: 'algo que estava no meio',
+      orchestratorAgentId: null,
+      maxIterations: 3,
+    });
+    database.runs.setStatus(run.id, 'RUNNING');
+    database.runs.setIteration(run.id, 2);
+    await prepared.fixture.services.shutdown();
+
+    const reopened = new AppServices({ paths: prepared.fixture.paths, openUrl: () => {} });
+    try {
+      const view = reopened.orchestration.view(run.id);
+      assert.equal(view.status, 'FAILED');
+      assert.equal(view.failureKind, 'interrupted');
+      assert.equal(view.iterations, 2, 'the loop counter, not the number of steps');
+      assert.match(view.summary ?? '', /o aplicativo foi fechado/);
+      const note = database.chat; // closed; read through the reopened graph instead
+      void note;
+      const messages = reopened.chat.listMessages(session.id);
+      assert.ok(messages.some((m) => m.author === 'system' && /fechado durante a execução/.test(m.text)));
+      assert.equal(reopened.orchestration.listForWorkspace(session.workspace_id).length, 1);
+    } finally {
+      await reopened.shutdown();
+    }
+  } finally {
+    prepared.cleanup().catch(() => undefined);
+  }
+});
+
+test('a run waiting at the human gate can be closed by the person, and stays closed', async () => {
+  const prepared = await prepare({
+    orchestratorScript: [
+      JSON.stringify({ action: 'blocked', reason: 'Preciso saber a senha do banco.', acceptanceCriteria: [], verificationCommands: [] }),
+    ],
+  });
+  try {
+    const sent = value<{ run: { id: string } }>(
+      await prepared.fixture.router.handle('chat.sendMessage', {
+        sessionId: prepared.sessionId,
+        text: 'migre o banco',
+      }),
+    );
+    const blocked = await prepared.fixture.services.orchestration.waitFor(sent.run.id);
+    assert.equal(blocked.status, 'BLOCKED');
+
+    const dismissed = value<{ cancelled: boolean }>(
+      await prepared.fixture.router.handle('run.cancel', { runId: sent.run.id }),
+    );
+    assert.equal(dismissed.cancelled, true);
+    const after = value<{ status: string; summary: string | null }>(
+      await prepared.fixture.router.handle('run.get', { runId: sent.run.id }),
+    );
+    assert.equal(after.status, 'CANCELLED');
+    assert.match(after.summary ?? '', /revisão humana/);
+    // A second cancel finds nothing open.
+    assert.equal(
+      value<{ cancelled: boolean }>(
+        await prepared.fixture.router.handle('run.cancel', { runId: sent.run.id }),
+      ).cancelled,
+      false,
+    );
   } finally {
     await prepared.cleanup();
   }

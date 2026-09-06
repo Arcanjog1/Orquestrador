@@ -32,6 +32,7 @@ export type {
   ListSessionsOptions,
   MessageRecord,
   RunRecord,
+  RunStepRecord,
   RunStatus,
   VerificationDefinitionRecord,
   WorkspaceWithAgents,
@@ -76,7 +77,8 @@ export interface ProviderAccountManager {
 export { ProcessManager } from '../../../../src/process/process-manager.js';
 export type { ProcessResult } from '../../../../src/process/process-manager.js';
 
-export { GitEvidenceCollector } from '../../../../src/git/git-evidence-collector.js';
+export { GitEvidenceCollector, parseStatusShort } from '../../../../src/git/git-evidence-collector.js';
+export { redact } from '../../../../src/security/secret-redactor.js';
 export { screenCommand } from '../../../../src/git/git-safety.js';
 
 export { AcceptanceCriteriaLedger } from '../../../../src/orchestrator/acceptance-criteria.js';

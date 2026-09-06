@@ -104,7 +104,11 @@ export class AppServices {
       this.processManager,
       this.events,
       options.createRunners ?? ((workspace) => this.buildRunners(workspace)),
-      options.orchestration ?? {},
+      {
+        // Evidence is collected with the managed Git when there is one.
+        gitCommand: () => this.runtimeManager.getExecutablePath('git'),
+        ...(options.orchestration ?? {}),
+      },
       // Tests supplying their own runners are supplying their own agents too,
       // so there is nothing to check.
       options.createRunners ? async () => null : (workspace) => this.checkAgentsReady(workspace),
@@ -113,6 +117,8 @@ export class AppServices {
 
     this.database.providers.ensureSeeded();
     this.agents.sync();
+    // A run the previous process left as RUNNING is not running now.
+    this.orchestration.reconcileInterrupted();
   }
 
   /**

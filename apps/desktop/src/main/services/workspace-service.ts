@@ -6,10 +6,10 @@
  * managed Git runtime, so a machine with no git on PATH still works.
  */
 
-import { mkdirSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import type { Database, ProcessManager, WorkspaceWithAgents } from '../core.js';
-import { newId } from '../core.js';
+import { GitEvidenceCollector, newId, parseStatusShort } from '../core.js';
 import {
   REASONING_LEVELS,
   type ProviderName,
@@ -17,6 +17,7 @@ import {
   type TeamMemberInput,
   type TeamMemberView,
   type TeamRole,
+  type WorkspaceChangesView,
   type WorkspaceView,
 } from '../../shared/ipc-contract.js';
 import type { RuntimeService } from './runtime-service.js';
@@ -196,6 +197,71 @@ export class WorkspaceService {
     return this.toView(record);
   }
 
+  /**
+   * What changed in the working copy, read with git and never remembered.
+   *
+   * Read-only by construction: `GitEvidenceCollector.git` refuses any argument
+   * that could write. The diff is bounded so a huge tree cannot flood the
+   * window; the file list is always complete.
+   */
+  async changes(workspaceId: string): Promise<WorkspaceChangesView> {
+    const workspace = this.database.workspaces.require(workspaceId);
+    const none: WorkspaceChangesView = {
+      isRepository: false,
+      branch: null,
+      head: null,
+      files: [],
+      diffStat: '',
+      diff: '',
+      truncated: false,
+    };
+    let git: string;
+    try {
+      git = await this.runtimes.executablePath('git');
+    } catch {
+      return none;
+    }
+    const collector = new GitEvidenceCollector(workspace.local_path, this.processManager, git);
+    if (!(await collector.isGitRepository())) return none;
+
+    const [head, branch, status, stat, diff, untracked] = await Promise.all([
+      collector.git(['rev-parse', 'HEAD']),
+      collector.git(['branch', '--show-current']),
+      collector.git(['status', '--porcelain']),
+      collector.git(['diff', 'HEAD', '--stat']),
+      collector.git(['diff', 'HEAD']),
+      collector.git(['ls-files', '--others', '--exclude-standard']),
+    ]);
+    const files = parseStatusShort(status.stdout).map((entry) => ({
+      path: entry.path,
+      status: describeStatus(entry.indexStatus, entry.worktreeStatus),
+    }));
+
+    // Untracked files have no diff of their own; show them as additions so a
+    // new file the worker wrote is visible, not just named.
+    let text = diff.ok ? diff.stdout : '';
+    for (const path of untracked.stdout.split(/\r?\n/).filter((l) => l.trim().length > 0)) {
+      const content = readTextIfSmall(join(workspace.local_path, path));
+      if (content === null) continue;
+      text += `${text.endsWith('\n') || text.length === 0 ? '' : '\n'}diff --git a/${path} b/${path}\nnew file\n--- /dev/null\n+++ b/${path}\n`;
+      text += content
+        .split(/\r?\n/)
+        .map((line) => `+${line}`)
+        .join('\n');
+      text += '\n';
+    }
+    const truncated = text.length > DIFF_LIMIT;
+    return {
+      isRepository: true,
+      branch: branch.ok ? branch.stdout.trim() || null : null,
+      head: head.ok ? head.stdout.trim() : null,
+      files,
+      diffStat: stat.ok ? stat.stdout : '',
+      diff: truncated ? `${text.slice(0, DIFF_LIMIT)}\n… (diff truncado)` : text,
+      truncated,
+    };
+  }
+
   private accountForRole(role: TeamRole, accountId: string) {
     const account = this.database.accounts.find(accountId);
     if (!account) throw new WorkspaceError('Essa conta não existe mais.');
@@ -257,6 +323,29 @@ export class WorkspaceService {
       model,
       reasoning: reasoningOrNull(reasoning),
     };
+  }
+}
+
+/** The diff view is for reading; beyond this a person uses their tools. */
+const DIFF_LIMIT = 200_000;
+
+function describeStatus(index: string, worktree: string): string {
+  if (index === '?' || worktree === '?') return 'novo';
+  if (index === 'A') return 'adicionado';
+  if (index === 'D' || worktree === 'D') return 'removido';
+  if (index === 'R') return 'renomeado';
+  if (index === 'M' || worktree === 'M') return 'modificado';
+  return `${index}${worktree}`.trim() || 'alterado';
+}
+
+function readTextIfSmall(path: string): string | null {
+  try {
+    const stats = statSync(path);
+    if (!stats.isFile() || stats.size > 64_000) return null;
+    const text = readFileSync(path, 'utf8');
+    return text.includes('\0') ? null : text;
+  } catch {
+    return null;
   }
 }
 

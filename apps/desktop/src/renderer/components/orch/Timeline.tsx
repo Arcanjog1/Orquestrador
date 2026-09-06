@@ -62,6 +62,8 @@ export function TimelineView({
   onOpenEvidence,
   onOpenDetail,
   onResume,
+  onOpenRunDetail,
+  onRetry,
 }: {
   entries: TimelineEntry[];
   onResolveHumanReview: (option: string) => void;
@@ -69,6 +71,10 @@ export function TimelineView({
   onOpenEvidence: () => void;
   onOpenDetail: (entry: Extract<TimelineEntry, { kind: "agent" }>) => void;
   onResume: () => void;
+  /** Opens the recorded steps and diagnostics of one run. */
+  onOpenRunDetail: (runId: string) => void;
+  /** Sends the run's objective again, as a new run. */
+  onRetry: (runId: string) => void;
 }) {
   return (
     <div className="timeline-rail mx-auto w-full max-w-3xl px-6 py-6">
@@ -81,6 +87,8 @@ export function TimelineView({
           onOpenEvidence={onOpenEvidence}
           onOpenDetail={onOpenDetail}
           onResume={onResume}
+          onOpenRunDetail={onOpenRunDetail}
+          onRetry={onRetry}
         />
       ))}
     </div>
@@ -94,6 +102,8 @@ function TimelineItem({
   onOpenEvidence,
   onOpenDetail,
   onResume,
+  onOpenRunDetail,
+  onRetry,
 }: {
   entry: TimelineEntry;
   onResolveHumanReview: (option: string) => void;
@@ -101,6 +111,8 @@ function TimelineItem({
   onOpenEvidence: () => void;
   onOpenDetail: (entry: Extract<TimelineEntry, { kind: "agent" }>) => void;
   onResume: () => void;
+  onOpenRunDetail: (runId: string) => void;
+  onRetry: (runId: string) => void;
 }) {
   switch (entry.kind) {
     case "user":
@@ -296,15 +308,13 @@ function TimelineItem({
             </div>
 
             <div className="mt-3.5 flex flex-wrap gap-2">
-              <Button size="sm" onClick={() => onResolveHumanReview(entry.options[0] ?? "")}>
-                Aprovar recomendação
-              </Button>
-              {entry.options.slice(1).map((o) => (
+              {entry.options.map((o, i) => (
                 <Button
                   key={o}
                   size="sm"
-                  variant="secondary"
+                  variant={i === 0 ? "default" : o === "Cancelar" ? "ghost" : "secondary"}
                   onClick={() => onResolveHumanReview(o)}
+                  data-testid={`human-review-${i}`}
                 >
                   {o}
                 </Button>
@@ -326,13 +336,40 @@ function TimelineItem({
             </div>
             <p className="mt-1.5 text-sm text-foreground/90">{entry.detail}</p>
             <div className="mt-3 flex flex-wrap gap-2">
-              <Button size="sm">Tentar nova abordagem</Button>
-              <Button size="sm" variant="secondary">
-                Revisar comigo
+              <Button size="sm" onClick={() => onRetry(entry.runId)}>
+                Tentar novamente
               </Button>
-              <Button size="sm" variant="ghost">
-                Cancelar
+              <Button size="sm" variant="secondary" onClick={() => onOpenRunDetail(entry.runId)}>
+                Detalhes
               </Button>
+            </div>
+          </div>
+        </Node>
+      );
+
+    case "failed":
+      return (
+        <Node icon={<TriangleAlert className="size-4" />} tone="danger">
+          <div
+            className="rounded-lg border border-danger/35 bg-danger/[0.06] p-3.5"
+            data-testid="run-failed-card"
+          >
+            <div className="text-sm font-semibold text-danger">{entry.title}</div>
+            <p className="mt-1.5 text-sm text-foreground/90">{entry.detail}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => onOpenRunDetail(entry.runId)}
+                data-testid="run-failed-details"
+              >
+                Detalhes
+              </Button>
+              {entry.failureKind !== "readiness" && (
+                <Button size="sm" variant="ghost" onClick={() => onRetry(entry.runId)}>
+                  Tentar novamente
+                </Button>
+              )}
             </div>
           </div>
         </Node>
@@ -402,13 +439,7 @@ function TimelineItem({
                 <FileDiff className="size-3.5" /> Ver alterações
               </Button>
               <Button size="sm" variant="secondary" onClick={onOpenEvidence}>
-                Ver execução completa
-              </Button>
-              <Button size="sm" variant="secondary">
-                Criar commit
-              </Button>
-              <Button size="sm" variant="ghost">
-                Abrir no GitHub
+                Ver evidências
               </Button>
             </div>
           </div>

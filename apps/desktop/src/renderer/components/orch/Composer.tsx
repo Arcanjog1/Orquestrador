@@ -1,88 +1,59 @@
-import { useState } from "react";
-import {
-  ArrowUp,
-  Ban,
-  Loader2,
-  Mic,
-  Paperclip,
-  Pause,
-  Play,
-  Plus,
-  Zap,
-} from "lucide-react";
+import { useState, type RefObject } from "react";
+import { ArrowUp, Ban, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
 import { runStateMeta, type Agent, type RunState } from "@/lib/orchestrator-data";
 import { ProviderIcon } from "./primitives";
 
-const modes = ["Automático", "Planejar", "Perguntar", "Executar"] as const;
-
+/**
+ * The composer: one text box, one send button, and - while a run goes - a
+ * status line with a real Cancel.
+ *
+ * The prototype also drew an execution-mode picker, attachment, microphone and
+ * "Pausar" controls. None of those had anything behind them; the loop has no
+ * pause and takes no attachments. A control that does nothing is worse than
+ * none, so they are gone until there is something for them to do.
+ */
 export function Composer({
   state,
   onSubmit,
-  onPause,
-  onResume,
   onCancel,
   orchestrator,
   disabled = false,
+  inputRef,
 }: {
   state: RunState;
   onSubmit: (text: string) => void;
-  onPause: () => void;
-  onResume: () => void;
   onCancel: () => void;
   /** The registered ORCHESTRATOR agent, or null when none is configured. */
   orchestrator: Agent | null;
   disabled?: boolean;
+  /** Lets the page focus the box, e.g. from "Dar instrução". */
+  inputRef?: RefObject<HTMLTextAreaElement | null>;
 }) {
   const [text, setText] = useState("");
-  const [mode, setMode] = useState<(typeof modes)[number]>("Automático");
 
   const running = !["IDLE", "DONE", "CANCELLED", "FAILED", "PAUSED", "NEEDS_HUMAN"].includes(
     state,
   );
 
-  if (running || state === "PAUSED") {
+  if (running) {
     return (
       <div className="shrink-0 border-t border-border bg-chrome px-6 py-4">
         <div className="mx-auto flex max-w-3xl items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3">
-          {state === "PAUSED" ? (
-            <Pause className="size-4 text-attention" />
-          ) : (
-            <Loader2 className="size-4 animate-spin text-running" />
-          )}
+          <Loader2 className="size-4 animate-spin text-running" />
           <div className="min-w-0">
-            <div className="truncate text-sm font-medium">
-              {state === "PAUSED"
-                ? "Execução pausada"
-                : "Executando automaticamente…"}
-            </div>
+            <div className="truncate text-sm font-medium">Executando automaticamente…</div>
             <div className="truncate text-xs text-muted-foreground">
               {runStateMeta[state].hint} · nenhuma ação sua é necessária
             </div>
           </div>
           <div className="ml-auto flex shrink-0 gap-2">
-            {state === "PAUSED" ? (
-              <Button size="sm" onClick={onResume}>
-                <Play className="size-3.5" /> Continuar
-              </Button>
-            ) : (
-              <Button size="sm" variant="secondary" onClick={onPause}>
-                <Pause className="size-3.5" /> Pausar
-              </Button>
-            )}
             <Button
               size="sm"
               variant="ghost"
               className="text-danger hover:text-danger"
               onClick={onCancel}
+              data-testid="cancel-run"
             >
               <Ban className="size-3.5" /> Cancelar
             </Button>
@@ -96,6 +67,8 @@ export function Composer({
     <div className="shrink-0 border-t border-border bg-chrome px-6 py-4">
       <div className="mx-auto max-w-3xl rounded-xl border border-border bg-surface focus-within:border-primary/40">
         <textarea
+          ref={inputRef}
+          data-testid="composer-input"
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
@@ -109,45 +82,6 @@ export function Composer({
           className="w-full resize-none bg-transparent px-4 pt-3 text-sm outline-none placeholder:text-muted-foreground"
         />
         <div className="flex items-center gap-2 px-3 pb-2.5">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                className={cn(
-                  "inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors",
-                  mode === "Automático"
-                    ? "border-primary/30 bg-primary/10 text-primary"
-                    : "border-border bg-surface-raised text-foreground/85",
-                )}
-              >
-                <Zap className="size-3.5" />
-                {mode}
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-52">
-              <DropdownMenuLabel>Modo de execução</DropdownMenuLabel>
-              {modes.map((m) => (
-                <DropdownMenuItem key={m} onClick={() => setMode(m)}>
-                  {m}
-                  {m === "Automático" && (
-                    <span className="ml-auto text-[11px] text-muted-foreground">
-                      principal
-                    </span>
-                  )}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          <button className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-            <Plus className="size-4" />
-          </button>
-          <button className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-            <Paperclip className="size-4" />
-          </button>
-          <button className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-            <Mic className="size-4" />
-          </button>
-
           <div className="ml-auto flex items-center gap-2">
             {orchestrator && (
               <span className="hidden items-center gap-1.5 text-[11px] text-muted-foreground sm:inline-flex">
@@ -166,6 +100,7 @@ export function Composer({
                 setText("");
               }}
               aria-label="Executar tarefa"
+              data-testid="composer-send"
             >
               <ArrowUp className="size-4" />
             </Button>

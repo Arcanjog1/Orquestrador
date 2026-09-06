@@ -92,11 +92,12 @@ export class ChatService {
     // the archive and sent something expects to see it in the list again.
     if (session.archived_at) this.database.chat.setSessionArchived(sessionId, false);
 
-    const message = toMessageView(
-      this.database.chat.addMessage({ sessionId, author: 'user', body: text }),
-    );
+    const record = this.database.chat.addMessage({ sessionId, author: 'user', body: text });
     const run = this.orchestration.start({ sessionId, objective: text });
+    // The message that started the run carries its id, so the history of a
+    // later run can leave this one out, and the interface can pair them.
+    this.database.chat.setMessageRun(record.id, run.id);
     this.database.workspaces.touch(workspace.id);
-    return { message, run };
+    return { message: toMessageView({ ...record, run_id: run.id }), run };
   }
 }

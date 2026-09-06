@@ -168,3 +168,49 @@ test('an account whose CLI call fails is disconnected, with an action to take', 
     assert.equal(status.remedy, 'Conectar');
   });
 });
+
+test('giving up on a sign-in stops only that sign-in, and the manager keeps working', async () => {
+  // The same defect the Codex manager had: `connect` ended with a `cancelAll`
+  // on the process manager shared by the whole application, which is sticky -
+  // every later process, including the status check that would show the
+  // account connected, was refused until restart. A real ProcessManager and a
+  // stand-in claude: the manager runs `auth login` and `auth status --json`
+  // with the application root as cwd, so a script named `auth` there is what
+  // `node auth ...` resolves to.
+  // Not `withHome`: that helper removes the folder as soon as the async body
+  // has *started*, which would delete the stand-in before it is spawned.
+  const home = mkdtempSync(join(tmpdir(), 'lao-accounts-giveup-'));
+  try {
+    const { accounts, paths } = makeManagers(home);
+    writeFileSync(
+      join(paths.root, 'auth'),
+      [
+        "const args = process.argv.slice(2).join(' ');",
+        "if (args === 'status --json') { console.log(JSON.stringify({ loggedIn: false })); process.exit(0); }",
+        "if (args === 'login') { console.log('Open https://claude.ai/login?code=abc to sign in'); setTimeout(() => {}, 60_000); }",
+      ].join('\n'),
+      'utf8',
+    );
+    accounts.createAccount(WORK);
+    const opened: string[] = [];
+    const manager = (accounts as unknown as { processManager: ProcessManager }).processManager;
+
+    const result = await accounts.connect(WORK, {
+      openUrl: (url) => {
+        opened.push(url);
+      },
+      urlTimeoutMs: 15_000,
+      completionTimeoutMs: 2_500,
+    });
+    assert.deepEqual(opened, ['https://claude.ai/login?code=abc']);
+    assert.equal(result.state, 'disconnected');
+
+    assert.equal(manager.liveCount, 0, 'the sign-in process did not outlive the attempt');
+    assert.equal(manager.isCancelled, false, 'giving up did not cancel the whole manager');
+    const after = await accounts.getStatus(WORK);
+    assert.equal(after.state, 'disconnected', 'the CLI answered; the check was not refused');
+    await manager.cancelAll(1000);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

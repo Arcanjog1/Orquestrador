@@ -138,6 +138,9 @@ export class IpcRouter {
       const input = p as IpcMap['workspace.setTeam']['request'];
       return s.workspaces.setTeam(input.workspaceId, input.orchestrator, input.worker);
     });
+    this.handlers.set('workspace.changes', (p) =>
+      s.workspaces.changes((p as { workspaceId: string }).workspaceId),
+    );
 
     // The project's own verifications: configuration a person writes, which the
     // loop then resolves by id. Four domain operations over the existing
@@ -199,6 +202,7 @@ export class IpcRouter {
     this.handlers.set('run.list', (p) =>
       s.orchestration.listForWorkspace((p as { workspaceId: string }).workspaceId),
     );
+    this.handlers.set('run.detail', (p) => s.orchestration.detail((p as { runId: string }).runId));
     this.handlers.set('run.cancel', (p) => ({
       cancelled: s.orchestration.cancel((p as { runId: string }).runId),
     }));

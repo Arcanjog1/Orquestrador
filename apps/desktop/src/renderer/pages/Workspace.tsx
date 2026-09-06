@@ -6,13 +6,12 @@ import { TopContextBar } from "@/components/orch/TopContextBar";
 import { TimelineView } from "@/components/orch/Timeline";
 import { ActivityPanel, type Step } from "@/components/orch/ActivityPanel";
 import { Composer } from "@/components/orch/Composer";
+import { DiffDialog, EvidenceDialog, RunDetailDialog } from "@/components/orch/RunDialogs";
 import {
   AddProjectDialog,
   AgentDetailDialog,
   CancelDialog,
   CommandPalette,
-  DiffDialog,
-  EvidenceDialog,
   TeamDialog,
   RenameSessionDialog,
   ConfirmDialog,
@@ -31,6 +30,8 @@ import { Link, useRouter } from "@/router";
 import type {
   AccountView,
   ChatMessageView,
+  RunDetailView,
+  WorkspaceChangesView,
   ChatSessionView,
   RunProgressEvent,
   RunView,
@@ -65,6 +66,10 @@ export function WorkspacePage({
   const [activityOpen, setActivityOpen] = useState(true);
   const [diffOpen, setDiffOpen] = useState(false);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const [detailRunId, setDetailRunId] = useState<string | null>(null);
+  const [changes, setChanges] = useState<WorkspaceChangesView | null>(null);
+  const [runDetail, setRunDetail] = useState<RunDetailView | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const [teamOpen, setTeamOpen] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -178,6 +183,41 @@ export function WorkspacePage({
     void loadMessages();
   }, [loadMessages]);
 
+  // -- The working copy, read with git, never remembered ---------------------
+
+  const refreshChanges = useCallback(async () => {
+    if (!workspace) {
+      setChanges(null);
+      return;
+    }
+    try {
+      setChanges(await api.workspace.changes({ workspaceId: workspace.id }));
+    } catch {
+      setChanges(null);
+    }
+  }, [workspace?.id]);
+
+  useEffect(() => {
+    void refreshChanges();
+  }, [refreshChanges]);
+
+  // The last run of the conversation being read, so its verifications and
+  // steps are on the panel before a new one starts.
+  useEffect(() => {
+    if (!run) {
+      setRunDetail(null);
+      return;
+    }
+    let alive = true;
+    api.run
+      .detail({ runId: run.id })
+      .then((d) => alive && setRunDetail(d))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [run?.id, run?.status]);
+
   // -- Live run progress ---------------------------------------------------
 
   useEffect(
@@ -201,9 +241,17 @@ export function WorkspacePage({
             .get({ runId: event.runId })
             .then(setRun)
             .catch(() => {});
+          void api.run
+            .detail({ runId: event.runId })
+            .then(setRunDetail)
+            .catch(() => {});
+        }
+        // The working copy moved: the panel's file count is read again.
+        if (["evidence", "verification", "done", "failed", "cancelled", "blocked"].includes(event.stage)) {
+          void refreshChanges();
         }
       }),
-    [sessionId],
+    [sessionId, refreshChanges],
   );
 
   // -- Derived -------------------------------------------------------------
@@ -236,8 +284,16 @@ export function WorkspacePage({
         agents: identity,
         branch: workspace?.branch ?? null,
         liveStage: stage,
+        filesChanged: changes?.isRepository ? changes.files.length : null,
+        tests:
+          runDetail && runDetail.verifications.length > 0
+            ? {
+                passed: runDetail.verifications.filter((v) => v.passed).length,
+                total: runDetail.verifications.length,
+              }
+            : null,
       }),
-    [messages, run, identity, workspace, stage],
+    [messages, run, identity, workspace, stage, changes, runDetail],
   );
 
   const team: Agent[] = useMemo(() => {
@@ -355,6 +411,38 @@ export function WorkspacePage({
     void api.app.openExternal({ url }).catch(fail);
   };
 
+  /**
+   * The human-review card's three choices, each a real operation:
+   * "Continuar" starts a new run that reads the conversation so far,
+   * "Dar instrução" hands the keyboard back, "Cancelar" closes the run.
+   */
+  async function resolveHumanReview(option: string) {
+    if (option === "Continuar") {
+      await send("Continue de onde parou. O bloqueio foi resolvido; prossiga com o objetivo original.");
+    } else if (option === "Dar instrução") {
+      composerRef.current?.focus();
+    } else if (option === "Cancelar" && run) {
+      try {
+        await api.run.cancel({ runId: run.id });
+        setRun(await api.run.get({ runId: run.id }));
+        await loadMessages();
+      } catch (error) {
+        fail(error);
+      }
+    } else {
+      await send(option);
+    }
+  }
+
+  async function retry(runId: string) {
+    try {
+      const previous = await api.run.get({ runId });
+      await send(previous.objective);
+    } catch (error) {
+      fail(error);
+    }
+  }
+
   if (!workspace) {
     return <NoWorkspace onAdd={() => setAddProjectOpen(true)} open={addProjectOpen}
       onOpenChange={setAddProjectOpen} onAdded={(id) => { reload(); onSelectWorkspace(id); }} />;
@@ -408,11 +496,13 @@ export function WorkspacePage({
               <>
                 <TimelineView
                   entries={entries}
-                  onResolveHumanReview={(option) => void send(option)}
+                  onResolveHumanReview={(option) => void resolveHumanReview(option)}
                   onOpenDiff={() => setDiffOpen(true)}
                   onOpenEvidence={() => setEvidenceOpen(true)}
                   onOpenDetail={(e) => setDetailEntry(e)}
                   onResume={() => toast("A execução não pode ser retomada; envie uma nova instrução.")}
+                  onOpenRunDetail={(id) => setDetailRunId(id)}
+                  onRetry={(id) => void retry(id)}
                 />
                 <div ref={bottom} className="h-2" />
               </>
@@ -429,10 +519,17 @@ export function WorkspacePage({
                 onOpenEvidence={() => setEvidenceOpen(true)}
                 currentAgent={currentAgent}
                 steps={steps}
-                filesChanged={null}
-                tests={null}
+                filesChanged={changes?.isRepository ? changes.files.length : null}
+                tests={
+                  runDetail && runDetail.verifications.length > 0
+                    ? {
+                        passed: runDetail.verifications.filter((v) => v.passed).length,
+                        total: runDetail.verifications.length,
+                      }
+                    : null
+                }
                 contextPercent={null}
-                onOpenStep={() => setEvidenceOpen(true)}
+                onOpenStep={() => (run ? setDetailRunId(run.id) : setEvidenceOpen(true))}
               />
             </div>
           ) : (
@@ -449,16 +546,21 @@ export function WorkspacePage({
         <Composer
           state={runState}
           onSubmit={(text) => void send(text)}
-          onPause={() => toast("Pausar ainda não está disponível; use Cancelar.")}
-          onResume={() => {}}
           onCancel={() => setCancelOpen(true)}
           orchestrator={team.find((a) => a.role === "ORCHESTRATOR") ?? null}
           disabled={sending}
+          inputRef={composerRef}
         />
       </main>
 
       <DiffDialog open={diffOpen} onOpenChange={setDiffOpen} workspace={workspace} />
-      <EvidenceDialog open={evidenceOpen} onOpenChange={setEvidenceOpen} workspace={workspace} />
+      <EvidenceDialog
+        open={evidenceOpen}
+        onOpenChange={setEvidenceOpen}
+        workspace={workspace}
+        runId={run?.id ?? null}
+      />
+      <RunDetailDialog runId={detailRunId} onOpenChange={(v) => !v && setDetailRunId(null)} />
       <RenameSessionDialog
         session={renaming}
         onOpenChange={(v) => !v && setRenaming(null)}

@@ -6,8 +6,15 @@
  * not know about (a profile directory, an artifacts path, a payload blob).
  */
 
-import type { ChatSessionRecord, MessageRecord, RunRecord } from '../core.js';
-import type { ChatMessageView, ChatSessionView, RunView } from '../../shared/ipc-contract.js';
+import type { ChatSessionRecord, MessageRecord, RunRecord, RunStepRecord } from '../core.js';
+import { redact } from '../core.js';
+import type {
+  ChatMessageView,
+  ChatSessionView,
+  RunDetailView,
+  RunFailureKind,
+  RunView,
+} from '../../shared/ipc-contract.js';
 
 export function toSessionView(
   record: ChatSessionRecord,
@@ -36,16 +43,82 @@ export function toMessageView(record: MessageRecord): ChatMessageView {
   };
 }
 
-export function toRunView(record: RunRecord, iterations: number): RunView {
+export function toRunView(record: RunRecord, steps: readonly RunStepRecord[]): RunView {
   return {
     id: record.id,
     sessionId: record.session_id ?? '',
     workspaceId: record.workspace_id,
     status: record.status,
-    iterations,
+    // The loop's own counter, not the number of steps it recorded.
+    iterations: record.iteration,
     summary: record.termination_reason,
     objective: record.objective,
+    failureKind: record.status === 'FAILED' ? failureKindOf(steps) : null,
     startedAt: record.started_at,
     finishedAt: record.finished_at,
+  };
+}
+
+/** Reads why a run failed from the last step the loop recorded. */
+function failureKindOf(steps: readonly RunStepRecord[]): RunFailureKind {
+  const last = steps[steps.length - 1];
+  switch (last?.phase) {
+    case 'readiness':
+      return 'readiness';
+    case 'orchestrator':
+      return 'decision';
+    case 'limit':
+      return 'limit';
+    case 'interrupted':
+      return 'interrupted';
+    default:
+      return 'error';
+  }
+}
+
+export function toRunDetailView(
+  record: RunRecord,
+  steps: readonly RunStepRecord[],
+  invocations: readonly Record<string, unknown>[],
+  verifications: readonly Record<string, unknown>[],
+): RunDetailView {
+  const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+  const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+  return {
+    run: toRunView(record, steps),
+    baseline: {
+      branch: record.baseline_branch,
+      commit: record.baseline_commit,
+      dirty: record.baseline_dirty === 1,
+    },
+    steps: steps.map((step) => ({
+      id: step.id,
+      iteration: step.iteration,
+      phase: step.phase,
+      status: step.status,
+      summary: step.summary === null ? null : redact(step.summary),
+      detail: step.detail === null ? null : redact(step.detail),
+      startedAt: step.started_at,
+    })),
+    invocations: invocations.map((row) => ({
+      id: str(row.id) ?? '',
+      iteration: num(row.iteration) ?? 0,
+      role: str(row.role) ?? '',
+      agentId: str(row.agent_id),
+      accountId: str(row.account_id),
+      task: str(row.task) === null ? null : redact(str(row.task)!).slice(0, 2000),
+      outcome: str(row.outcome) ?? '',
+      exitCode: num(row.exit_code),
+      durationMs: num(row.duration_ms),
+      startedAt: str(row.started_at) ?? '',
+    })),
+    verifications: verifications.map((row) => ({
+      iteration: num(row.iteration) ?? 0,
+      command: redact(str(row.command) ?? ''),
+      exitCode: num(row.exit_code),
+      passed: row.passed === 1 || row.passed === true,
+      refused: str(row.refused),
+      durationMs: num(row.duration_ms),
+    })),
   };
 }

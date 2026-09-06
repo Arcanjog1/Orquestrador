@@ -467,6 +467,11 @@ export class ChatRepository extends Repository {
     return this.db.get<MessageRecord>('SELECT * FROM messages WHERE id = ?', [id])!;
   }
 
+  /** Links a message to the run it started, once the run exists. */
+  setMessageRun(messageId: string, runId: string): void {
+    this.db.run('UPDATE messages SET run_id = ? WHERE id = ?', [runId, messageId]);
+  }
+
   listMessages(sessionId: string, limit = 500): MessageRecord[] {
     return this.db.all<MessageRecord>(
       'SELECT * FROM messages WHERE session_id = ? ORDER BY created_at, rowid LIMIT ?',
@@ -552,6 +557,11 @@ export class RunRepository extends Repository {
     return this.db.all<RunRecord>('SELECT * FROM runs WHERE session_id = ? ORDER BY started_at', [
       sessionId,
     ]);
+  }
+
+  /** Runs the database still shows as going. After a restart, none really is. */
+  listUnfinished(): RunRecord[] {
+    return this.db.all<RunRecord>("SELECT * FROM runs WHERE status IN ('PENDING','RUNNING') ORDER BY started_at");
   }
 
   /** Every run of a workspace, newest first, whether or not its conversation still exists. */

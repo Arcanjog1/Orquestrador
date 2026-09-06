@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
-import { DiffDialog, EvidenceDialog } from "@/components/orch/dialogs";
+import { DiffDialog, RunDetailDialog } from "@/components/orch/RunDialogs";
 import { SectionLabel, StatusPill } from "@/components/orch/primitives";
 import { runStateOf, spanBetween } from "@/lib/timeline";
 import { api, messageOf } from "@/lib/api";
@@ -19,7 +19,7 @@ export function HistoryPage({ workspace }: { workspace: WorkspaceView | null }) 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [diff, setDiff] = useState(false);
-  const [evidence, setEvidence] = useState(false);
+  const [detailRun, setDetailRun] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -102,13 +102,14 @@ export function HistoryPage({ workspace }: { workspace: WorkspaceView | null }) 
                   <span className="font-mono">{spanBetween(run.startedAt, run.finishedAt)}</span>
                   <span className="font-mono">{workspace?.branch ?? "—"}</span>
                   <button onClick={() => setDiff(true)} className="text-primary hover:underline">
-                    Ver alterações
+                    Ver alterações atuais
                   </button>
                   <button
-                    onClick={() => setEvidence(true)}
+                    onClick={() => setDetailRun(run.id)}
                     className="text-primary hover:underline"
+                    data-testid={`history-detail-${run.id}`}
                   >
-                    Ver evidências
+                    Detalhes
                   </button>
                 </div>
                 {run.summary && (
@@ -133,7 +134,7 @@ export function HistoryPage({ workspace }: { workspace: WorkspaceView | null }) 
       </div>
 
       <DiffDialog open={diff} onOpenChange={setDiff} workspace={workspace} />
-      <EvidenceDialog open={evidence} onOpenChange={setEvidence} workspace={workspace} />
+      <RunDetailDialog runId={detailRun} onOpenChange={(v) => !v && setDetailRun(null)} />
     </div>
   );
 }

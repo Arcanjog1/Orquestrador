@@ -39,10 +39,11 @@ import {
   formatDoneRejection,
   newId,
   parseDecision,
+  redact,
 } from '../core.js';
-import type { ChatMessageView, RunView } from '../../shared/ipc-contract.js';
+import type { ChatMessageView, RunDetailView, RunView } from '../../shared/ipc-contract.js';
 import type { EventBus } from '../events.js';
-import { toMessageView, toRunView } from './views.js';
+import { toMessageView, toRunDetailView, toRunView } from './views.js';
 
 /** Everything a run needs that is not persisted state. */
 export interface RunnerPair {
@@ -58,6 +59,12 @@ export interface OrchestrationOptions {
   verificationTimeoutMs?: number;
   /** Accepts a run that changed no file. Off by default: see the DONE gate. */
   allowNoChanges?: boolean;
+  /**
+   * Resolves the git executable evidence is collected with. The application
+   * passes its managed Git so a machine with no git on PATH still gets
+   * evidence; when it cannot be resolved, `git` from PATH is tried.
+   */
+  gitCommand?: () => Promise<string>;
 }
 
 export type RunnerFactory = (workspace: WorkspaceWithAgents) => Promise<RunnerPair>;
@@ -108,7 +115,21 @@ export class OrchestrationService {
    */
   cancel(runId: string): boolean {
     const controller = this.active.get(runId);
-    if (!controller) return false;
+    if (!controller) {
+      // A run waiting at the human gate is not running, but it is still
+      // open. Cancelling it closes the question: the person chose to stop.
+      const run = this.database.runs.find(runId);
+      if (run && run.status === 'BLOCKED') {
+        this.database.runs.setStatus(runId, 'CANCELLED', 'Encerrada pelo usuário na revisão humana.');
+        this.step(runId, run.iteration, 'cancelled', 'dismissed', 'Encerrada na revisão humana.');
+        if (run.session_id) {
+          this.say(run.session_id, runId, 'system', 'Execução encerrada na revisão humana.');
+          this.progress(runId, run.session_id, 'cancelled', 'Encerrada.', 'CANCELLED');
+        }
+        return true;
+      }
+      return false;
+    }
     controller.abort();
     const pair = this.runners.get(runId);
     if (pair) {
@@ -143,8 +164,12 @@ export class OrchestrationService {
 
     void this.execute(run.id, workspace, input.objective, controller)
       .catch((error: unknown) => {
-        this.database.runs.setStatus(run.id, 'FAILED', describeError(error));
-        this.say(session.id, run.id, 'system', `Falhou: ${describeError(error)}`);
+        const reason = describeError(error);
+        this.database.runs.setStatus(run.id, 'FAILED', reason);
+        this.step(run.id, this.database.runs.require(run.id).iteration, 'error', 'failed', reason, {
+          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        });
+        this.say(session.id, run.id, 'system', `Falhou: ${reason}`);
         this.progress(run.id, session.id, 'failed', 'Falhou.', 'FAILED');
       })
       .finally(() => {
@@ -152,7 +177,27 @@ export class OrchestrationService {
         this.runners.delete(run.id);
       });
 
-    return toRunView(this.database.runs.require(run.id), 0);
+    return toRunView(this.database.runs.require(run.id), []);
+  }
+
+  /**
+   * Called once at start-up: a run the database still shows as running was
+   * cut short by the previous process ending. Nothing is executing it now, so
+   * the truth is recorded rather than an eternal spinner.
+   */
+  reconcileInterrupted(): number {
+    let count = 0;
+    for (const run of this.database.runs.listUnfinished()) {
+      if (this.active.has(run.id)) continue;
+      const reason = 'Interrompida: o aplicativo foi fechado durante a execução.';
+      this.database.runs.setStatus(run.id, 'FAILED', reason);
+      this.step(run.id, run.iteration, 'interrupted', 'failed', reason);
+      if (run.session_id && this.database.chat.findSession(run.session_id)) {
+        this.database.chat.addMessage({ sessionId: run.session_id, runId: run.id, author: 'system', body: reason });
+      }
+      count += 1;
+    }
+    return count;
   }
 
   /** Waits for a run to leave the active set. Used by tests and by shutdown. */
@@ -167,7 +212,7 @@ export class OrchestrationService {
 
   view(runId: string): RunView {
     const run = this.database.runs.require(runId);
-    return toRunView(run, this.database.runs.steps(runId).length);
+    return toRunView(run, this.database.runs.steps(runId));
   }
 
   /** The execution history of a project, newest first. */
@@ -175,7 +220,21 @@ export class OrchestrationService {
     this.database.workspaces.require(workspaceId);
     return this.database.runs
       .listForWorkspace(workspaceId)
-      .map((run) => toRunView(run, this.database.runs.steps(run.id).length));
+      .map((run) => toRunView(run, this.database.runs.steps(run.id)));
+  }
+
+  /**
+   * Everything recorded about one run: steps with their diagnostics,
+   * invocations, verification results. What "Detalhes" shows.
+   */
+  detail(runId: string): RunDetailView {
+    const run = this.database.runs.require(runId);
+    return toRunDetailView(
+      run,
+      this.database.runs.steps(runId),
+      this.database.runs.invocations(runId),
+      this.database.runs.verifications(runId),
+    );
   }
 
   // -- the loop ------------------------------------------------------------
@@ -205,7 +264,10 @@ export class OrchestrationService {
 
     const runners = await this.createRunners(workspace);
     this.runners.set(runId, runners);
-    const collector = new GitEvidenceCollector(workspace.local_path, this.processManager);
+    const gitCommand = await this.options.gitCommand?.().catch(() => undefined);
+    const collector = gitCommand
+      ? new GitEvidenceCollector(workspace.local_path, this.processManager, gitCommand)
+      : new GitEvidenceCollector(workspace.local_path, this.processManager);
     const verifier = new Verifier({
       cwd: workspace.local_path,
       timeoutMs: this.options.verificationTimeoutMs ?? DEFAULTS.verificationTimeoutMs,
@@ -222,6 +284,9 @@ export class OrchestrationService {
     /** Every command actually resolved from an id, deduplicated. */
     const resolvedCommands = new Set<string>();
     let feedback: string | null = null;
+    // What was said in this conversation before this run, so a follow-up
+    // ("continue", "now also do X") is read against what came before it.
+    const history = this.conversationBefore(sessionId, runId);
 
     for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
       if (signal.aborted) return this.finishCancelled(runId, sessionId);
@@ -244,8 +309,9 @@ export class OrchestrationService {
         iteration,
         feedback,
         iterations,
+        history,
       });
-      const decision = await this.askForDecision({
+      const asked = await this.askForDecision({
         runId,
         workspace,
         runners,
@@ -254,12 +320,16 @@ export class OrchestrationService {
         signal,
       });
       if (signal.aborted) return this.finishCancelled(runId, sessionId);
-      if (!decision) {
-        this.database.runs.setStatus(runId, 'FAILED', 'O orquestrador não devolveu uma decisão válida.');
-        this.say(sessionId, runId, 'system', 'O orquestrador não devolveu uma decisão válida.');
+      if (!asked.decision) {
+        // Say exactly what happened - the CLI's exit, or what it answered
+        // instead of a decision - rather than a sentence that fits everything.
+        const reason = asked.failure ?? 'O orquestrador não devolveu uma decisão válida.';
+        this.database.runs.setStatus(runId, 'FAILED', reason);
+        this.say(sessionId, runId, 'system', `Falhou: ${reason}`);
         this.progress(runId, sessionId, 'failed', 'Falhou.', 'FAILED');
         return;
       }
+      const decision = asked.decision;
       record.decision = decision;
       ledger.add(decision.acceptanceCriteria, iteration);
 
@@ -406,11 +476,41 @@ export class OrchestrationService {
     }
 
     this.database.runs.setStatus(runId, 'FAILED', `Limite de ${maxIterations} iterações atingido.`);
+    this.step(runId, maxIterations, 'limit', 'reached', `Limite de ${maxIterations} iterações atingido.`);
     this.say(sessionId, runId, 'system', `Parei após ${maxIterations} iterações sem concluir.`);
     this.progress(runId, sessionId, 'failed', 'Limite de iterações atingido.', 'FAILED');
   }
 
-  /** One parse attempt, then one format-repair attempt, then give up. */
+  /**
+   * The conversation before this run: the person's messages and the loop's
+   * own outcomes, bounded. Enough for "continue" to mean something.
+   */
+  private conversationBefore(sessionId: string, runId: string): string | null {
+    const messages = this.database.chat
+      .listMessages(sessionId)
+      .filter((m) => m.run_id !== runId)
+      .filter((m) => m.author === 'user' || m.author === 'orchestrator' || m.author === 'system')
+      .slice(-12);
+    if (messages.length === 0) return null;
+    const lines = messages.map((m) => {
+      const who = m.author === 'user' ? 'USER' : m.author === 'orchestrator' ? 'ORCHESTRATOR' : 'SYSTEM';
+      return `${who}: ${m.body.replace(/\s+/g, ' ').trim().slice(0, 400)}`;
+    });
+    const text = lines.join('\n');
+    return text.length > 4000 ? `...\n${text.slice(-4000)}` : text;
+  }
+
+  /**
+   * One parse attempt, then one format-repair attempt, then give up - saying
+   * exactly why.
+   *
+   * The repair is a *new* CLI process with no memory of the first one, so it
+   * is sent the original prompt again with the correction appended; a repair
+   * request on its own would ask a model that never saw the objective to
+   * "repeat the same decision". Every attempt leaves a step with the CLI's
+   * outcome, exit code, the parse problem and redacted excerpts of what it
+   * printed, which is what "Detalhes" shows.
+   */
   private async askForDecision(input: {
     runId: string;
     workspace: WorkspaceWithAgents;
@@ -418,10 +518,12 @@ export class OrchestrationService {
     prompt: string;
     iteration: number;
     signal: AbortSignal;
-  }): Promise<Decision | null> {
+  }): Promise<{ decision: Decision | null; failure?: string }> {
     const { runId, workspace, runners, iteration, signal } = input;
     let currentPrompt = input.prompt;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    let lastProblem = 'nenhuma resposta';
+    let lastExcerpt = '';
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
       const startedAt = new Date().toISOString();
       const result = await runners.orchestrator.run({
         prompt: currentPrompt,
@@ -434,7 +536,7 @@ export class OrchestrationService {
         runId,
         iteration,
         agentId: workspace.orchestrator_agent_id,
-        accountId: null,
+        accountId: this.orchestratorAccountId(workspace),
         role: 'ORCHESTRATOR',
         task: null,
         outcome: result.outcome,
@@ -442,21 +544,75 @@ export class OrchestrationService {
         durationMs: result.durationMs,
         startedAt,
       });
-      if (signal.aborted) return null;
+      if (signal.aborted) return { decision: null };
+
+      const diagnostics = {
+        attempt,
+        outcome: result.outcome,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        stdoutExcerpt: excerpt(result.stdout),
+        stderrExcerpt: excerpt(result.stderr),
+        ...(result.error ? { error: result.error } : {}),
+      };
+
       if (result.outcome !== 'completed') {
-        this.step(runId, iteration, 'orchestrator', result.outcome, result.error ?? '');
-        return null;
+        const problem =
+          result.outcome === 'timeout'
+            ? `o Codex não respondeu em ${Math.round((this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs) / 60_000)} min`
+            : `o Codex não concluiu (${result.outcome}${result.exitCode !== null ? `, código ${result.exitCode}` : ''})`;
+        const said = firstLine(result.stderr) || firstLine(result.stdout) || result.error || '';
+        this.step(runId, iteration, 'orchestrator', result.outcome, problem, diagnostics);
+        return {
+          decision: null,
+          failure: `${capitalize(problem)}${said ? `: ${redact(said)}` : '.'}`,
+        };
       }
 
       const parsed = parseDecision(result.stdout);
       if (parsed.ok) {
-        this.step(runId, iteration, 'orchestrator', 'ok', parsed.decision.action);
-        return parsed.decision;
+        this.step(runId, iteration, 'orchestrator', 'ok', parsed.decision.action, {
+          attempt,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+        });
+        return { decision: parsed.decision };
       }
-      this.step(runId, iteration, 'orchestrator', 'unparsed', parsed.error);
-      currentPrompt = parsed.repairPrompt;
+      if (result.exitCode !== null && result.exitCode !== 0) {
+        // The CLI ran and gave up - a usage limit, an expired login, a crash.
+        // Its own words are the diagnosis; asking it to fix the format would
+        // only repeat the same exit.
+        const said = firstLine(result.stderr) || firstLine(result.stdout);
+        const problem = `o Codex saiu com código ${result.exitCode}`;
+        this.step(runId, iteration, 'orchestrator', 'exited', problem, {
+          ...diagnostics,
+          parseError: parsed.error,
+        });
+        return {
+          decision: null,
+          failure: `${capitalize(problem)}${said ? `: ${redact(said)}` : ' sem explicar.'}`,
+        };
+      }
+      lastProblem = parsed.error;
+      lastExcerpt = excerpt(result.stdout, 160);
+      this.step(runId, iteration, 'orchestrator', 'unparsed', parsed.error, {
+        ...diagnostics,
+        parseError: parsed.error,
+        exitCode: result.exitCode,
+      });
+      currentPrompt = `${input.prompt}\n\n${parsed.repairPrompt}`;
     }
-    return null;
+    const failure =
+      `O Codex respondeu duas vezes, mas não com uma decisão válida. ` +
+      `Problema: ${lastProblem}` +
+      (lastExcerpt ? ` A resposta começava com: "${redact(lastExcerpt)}"` : ' A resposta estava vazia.');
+    this.step(runId, iteration, 'orchestrator', 'gave-up', failure);
+    return { decision: null, failure };
+  }
+
+  private orchestratorAccountId(workspace: WorkspaceWithAgents): string | null {
+    if (!workspace.orchestrator_agent_id) return null;
+    return this.database.agents.find(workspace.orchestrator_agent_id)?.account_id ?? null;
   }
 
   private buildOrchestratorPrompt(input: {
@@ -466,6 +622,7 @@ export class OrchestrationService {
     iteration: number;
     feedback: string | null;
     iterations: readonly IterationRecord[];
+    history?: string | null;
   }): string {
     const catalogue = this.database.verifications.list(input.workspace.id);
     const lines: string[] = [
@@ -501,6 +658,13 @@ export class OrchestrationService {
       'unknown verification id is reported as a failure and never executed.',
     ];
 
+    if (input.history) {
+      lines.push(
+        '',
+        'CONVERSATION BEFORE THIS OBJECTIVE (for context; the OBJECTIVE above is what to do now):',
+        input.history,
+      );
+    }
     if (input.feedback) {
       lines.push('', 'RESULT OF THE PREVIOUS ITERATION:', input.feedback);
     }
@@ -552,8 +716,23 @@ export class OrchestrationService {
     this.progress(runId, sessionId, 'cancelled', 'Cancelado.', 'CANCELLED');
   }
 
-  private step(runId: string, iteration: number, phase: string, status: string, summary: string): void {
-    this.database.runs.addStep({ runId, iteration, phase, status, summary });
+  private step(
+    runId: string,
+    iteration: number,
+    phase: string,
+    status: string,
+    summary: string,
+    detail?: Record<string, unknown>,
+  ): void {
+    this.database.runs.addStep({
+      runId,
+      iteration,
+      phase,
+      status,
+      summary: redact(summary).slice(0, 1000),
+      // Diagnostics are stored redacted: a CLI's stderr can echo a header.
+      detail: detail ? redact(JSON.stringify(detail)) : null,
+    });
   }
 
   private say(sessionId: string, runId: string, author: string, body: string): ChatMessageView {
@@ -585,6 +764,26 @@ function describeFiles(evidence: GitEvidence): string {
   const files = evidence.changedFiles.slice(0, 8).join(', ');
   const extra = evidence.changedFiles.length > 8 ? ` (+${evidence.changedFiles.length - 8})` : '';
   return files.length > 0 ? `${files}${extra}` : 'nenhum arquivo';
+}
+
+/** A bounded, single-string excerpt of what a CLI printed. */
+function excerpt(text: string, max = 600): string {
+  const trimmed = text.replace(/\r/g, '').trim();
+  return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
+}
+
+function firstLine(text: string): string {
+  return (
+    text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.length > 0)
+      ?.slice(0, 300) ?? ''
+  );
+}
+
+function capitalize(text: string): string {
+  return text.length > 0 ? text[0]!.toUpperCase() + text.slice(1) : text;
 }
 
 function indent(text: string): string {

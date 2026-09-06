@@ -275,6 +275,7 @@ export const REQUEST_VALIDATORS: {
     orchestrator: teamMember,
     worker: teamMember,
   }),
+  'workspace.changes': obj({ workspaceId: id }),
 
   'verifications.list': obj({ workspaceId: id }),
   'verifications.create': obj({
@@ -310,5 +311,6 @@ export const REQUEST_VALIDATORS: {
 
   'run.get': obj({ runId: id }),
   'run.list': obj({ workspaceId: id }),
+  'run.detail': obj({ runId: id }),
   'run.cancel': obj({ runId: id }),
 };

@@ -43,6 +43,7 @@ export type TimelineEntry =
   | {
       kind: 'humanReview';
       id: string;
+      runId: string;
       reason: string;
       reasonKind: string;
       progress: string[];
@@ -64,8 +65,21 @@ export type TimelineEntry =
       branch: string;
     }
   | { kind: 'cancelled'; id: string; summary: string[] }
-  | { kind: 'noProgress'; id: string; detail: string }
+  | { kind: 'noProgress'; id: string; runId: string; detail: string }
+  | {
+      /** A failure that is not "no progress": the loop says what broke. */
+      kind: 'failed';
+      id: string;
+      runId: string;
+      title: string;
+      detail: string;
+      failureKind: string | null;
+    }
   | { kind: 'paused'; id: string; iteration: number };
+
+/** The choices the human-review card offers, in the order shown. */
+export const HUMAN_REVIEW_OPTIONS = ['Continuar', 'Dar instrução', 'Cancelar'] as const;
+export type HumanReviewOption = (typeof HUMAN_REVIEW_OPTIONS)[number];
 
 // -- Run state --------------------------------------------------------------
 
@@ -207,6 +221,9 @@ export interface TimelineInput {
   /** Branch of the working copy, for the done card. Null when git cannot say. */
   branch: string | null;
   liveStage: string | null;
+  /** Measured figures for the done card; absent ones stay an em dash. */
+  filesChanged?: number | null;
+  tests?: { passed: number; total: number } | null;
 }
 
 /**
@@ -217,7 +234,7 @@ export interface TimelineInput {
  * whatever the run's real status is.
  */
 export function buildTimeline(input: TimelineInput): TimelineEntry[] {
-  const { messages, run, agents, branch, liveStage } = input;
+  const { messages, run, agents, branch, liveStage, filesChanged, tests } = input;
   const entries: TimelineEntry[] = [];
 
   for (const message of messages) {
@@ -272,10 +289,23 @@ export function buildTimeline(input: TimelineInput): TimelineEntry[] {
   }
 
   const terminal = terminalEntry(run, branch, liveStage);
-  if (terminal) entries.push(terminal);
+  if (terminal) {
+    if (terminal.kind === 'done') {
+      if (filesChanged !== undefined && filesChanged !== null) terminal.files = `${filesChanged}`;
+      if (tests) terminal.tests = `${tests.passed} / ${tests.total}`;
+    }
+    entries.push(terminal);
+  }
 
   return entries;
 }
+
+const FAILURE_TITLE: Record<string, string> = {
+  decision: 'O orquestrador não devolveu uma decisão',
+  readiness: 'A execução não pôde começar',
+  interrupted: 'Execução interrompida',
+  error: 'Erro durante a execução',
+};
 
 function terminalEntry(
   run: RunView | null,
@@ -317,19 +347,34 @@ function terminalEntry(
     return {
       kind: 'humanReview',
       id: `${run.id}-human`,
+      runId: run.id,
       reason: run.summary ?? 'Uma decisão humana é necessária para continuar.',
       reasonKind: 'Decisão necessária',
       progress: run.iterations > 0 ? [`${run.iterations} iteração(ões) concluída(s)`] : [],
       recommendation: run.summary ?? 'Revise o que foi registrado e decida como seguir.',
-      options: ['Escrever instrução'],
+      options: [...HUMAN_REVIEW_OPTIONS],
     };
   }
 
   if (run.status === 'FAILED') {
+    // "No progress" is one failure among several. The others - the
+    // orchestrator's CLI not answering, an account not ready, the application
+    // closing - are named as what they are, never dressed as no progress.
+    if (run.failureKind === 'limit') {
+      return {
+        kind: 'noProgress',
+        id: `${run.id}-failed`,
+        runId: run.id,
+        detail: run.summary ?? 'A execução falhou.',
+      };
+    }
     return {
-      kind: 'noProgress',
+      kind: 'failed',
       id: `${run.id}-failed`,
+      runId: run.id,
+      title: FAILURE_TITLE[run.failureKind ?? ''] ?? 'A execução falhou',
       detail: run.summary ?? 'A execução falhou.',
+      failureKind: run.failureKind,
     };
   }
 

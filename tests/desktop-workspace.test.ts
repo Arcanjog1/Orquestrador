@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDesktopFixture, ScriptedAgent } from './helpers/desktop-fixture.js';
@@ -310,5 +310,55 @@ test('a folder that is not a repository reports no branch rather than guessing',
   } finally {
     await fixture.cleanup();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('workspace.changes reads the working copy with git, read-only, untracked files included', async () => {
+  const { createGitFixture } = await import('./helpers/git-fixture.js');
+  const repo = createGitFixture('lao-changes-');
+  repo.write('README.md', 'hello\n');
+  repo.commitAll('init');
+  const fixture = createDesktopFixture();
+  try {
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.create', { name: 'Mudanças', localPath: repo.dir }),
+    );
+    // No managed git in this app root: the service is honest about it.
+    const before = value<{ isRepository: boolean; files: unknown[] }>(
+      await fixture.router.handle('workspace.changes', { workspaceId: workspace.id }),
+    );
+    // With git on PATH the managed runtime resolves it as a system install.
+    if (!before.isRepository) return;
+
+    writeFileSync(join(repo.dir, 'README.md'), 'changed\n', 'utf8');
+    writeFileSync(join(repo.dir, 'novo.txt'), 'novo conteúdo\n', 'utf8');
+    const changes = value<{
+      isRepository: boolean;
+      branch: string | null;
+      head: string | null;
+      files: Array<{ path: string; status: string }>;
+      diff: string;
+      diffStat: string;
+      truncated: boolean;
+    }>(await fixture.router.handle('workspace.changes', { workspaceId: workspace.id }));
+    assert.equal(changes.isRepository, true);
+    assert.ok(changes.head && changes.head.length >= 7);
+    assert.deepEqual(
+      changes.files.map((f) => [f.path, f.status]).sort(),
+      [
+        ['README.md', 'modificado'],
+        ['novo.txt', 'novo'],
+      ],
+    );
+    assert.match(changes.diff, /\+changed/);
+    assert.match(changes.diff, /novo\.txt/);
+    assert.match(changes.diff, /\+novo conteúdo/, 'an untracked file is shown as an addition');
+    assert.match(changes.diffStat, /README\.md/);
+    assert.equal(changes.truncated, false);
+    // Reading changed nothing.
+    assert.equal(readFileSync(join(repo.dir, 'README.md'), 'utf8'), 'changed\n');
+  } finally {
+    await fixture.cleanup();
+    repo.cleanup();
   }
 });

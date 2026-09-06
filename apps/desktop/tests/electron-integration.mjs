@@ -633,6 +633,68 @@ test('a conversation is renamed, archived, found and deleted from the real sideb
   }
 });
 
+test('a run that cannot start says which account is missing, and "Detalhes" shows the record', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-run-'));
+  try {
+    // A project bound to two accounts that were never connected, in an app
+    // root with no runtime: the readiness check refuses the run. That refusal
+    // must be a card that names the problem, not "no progress detected".
+    const accounts = await window.webContents.executeJavaScript('window.api.accounts.list()');
+    const codex = accounts.find((a) => a.provider === 'openai' && a.name === 'Codex Trabalho');
+    const claude = accounts.find((a) => a.provider === 'anthropic' && a.name === 'Claude Trabalho');
+    assert.ok(codex && claude, 'the accounts from the team test');
+    const workspace = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Projeto executado', localPath: dir })})`,
+    );
+    await window.webContents.executeJavaScript(
+      `window.api.workspace.setTeam(${JSON.stringify({
+        workspaceId: workspace.id,
+        orchestrator: { accountId: codex.id },
+        worker: { accountId: claude.id },
+      })})`,
+    );
+
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Projeto executado/, 15_000);
+
+    // The empty state has its own box; the composer appears with the timeline.
+    await window.webContents.executeJavaScript(`
+      (() => {
+        const el = document.querySelector('textarea');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(el, 'crie hello.txt');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+        return true;
+      })()
+    `);
+
+    const card = await waitForText(window, /A execução não pôde começar/, 20_000);
+    assert.doesNotMatch(card, /Sem progresso detectado/, 'a readiness refusal is not "no progress"');
+    assert.match(card, /não está configurado|Conecte a conta/);
+
+    await click(window, 'run-failed-details');
+    const detail = await waitForText(window, /Detalhes da execução/, 10_000);
+    assert.match(detail, /FAILED/);
+    assert.match(detail, /Prontidão/, 'the readiness step is on the record');
+
+    // And the same run is in the history, as a run.
+    const runs = await window.webContents.executeJavaScript(
+      `window.api.run.list(${JSON.stringify({ workspaceId: workspace.id })})`,
+    );
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].status, 'FAILED');
+    assert.equal(runs[0].failureKind, 'readiness');
+    assert.equal(runs[0].objective, 'crie hello.txt');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /* ------------------------------------------------------------------ helpers */
 
 let sharedWindow = null;

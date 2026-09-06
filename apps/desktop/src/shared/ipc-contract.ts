@@ -44,6 +44,7 @@ export const REQUEST_CHANNELS = [
   'workspace.clone',
   'workspace.setAgents',
   'workspace.setTeam',
+  'workspace.changes',
 
   'verifications.list',
   'verifications.create',
@@ -60,6 +61,7 @@ export const REQUEST_CHANNELS = [
 
   'run.get',
   'run.list',
+  'run.detail',
   'run.cancel',
 ] as const;
 
@@ -277,8 +279,74 @@ export interface RunView {
   readonly summary: string | null;
   /** What the person asked for, as sent. Survives the conversation's deletion. */
   readonly objective: string;
+  /**
+   * Why a FAILED run failed, from the last step the loop recorded:
+   * `readiness` (an account or runtime was not ready), `decision` (the
+   * orchestrator's CLI did not return a usable decision), `limit` (the
+   * iteration limit was reached), `interrupted` (the application closed),
+   * `error` (an exception). Null for any other status.
+   */
+  readonly failureKind: RunFailureKind | null;
   readonly startedAt: string;
   readonly finishedAt: string | null;
+}
+
+export type RunFailureKind = 'readiness' | 'decision' | 'limit' | 'interrupted' | 'error';
+
+/** One recorded step of a run, with its diagnostics when it left any. */
+export interface RunStepView {
+  readonly id: number;
+  readonly iteration: number;
+  readonly phase: string;
+  readonly status: string;
+  readonly summary: string | null;
+  /** Redacted JSON diagnostics (outcome, exit code, excerpts), or null. */
+  readonly detail: string | null;
+  readonly startedAt: string;
+}
+
+export interface RunInvocationView {
+  readonly id: string;
+  readonly iteration: number;
+  readonly role: string;
+  readonly agentId: string | null;
+  readonly accountId: string | null;
+  /** The worker's instruction, bounded. Null for the orchestrator. */
+  readonly task: string | null;
+  readonly outcome: string;
+  readonly exitCode: number | null;
+  readonly durationMs: number | null;
+  readonly startedAt: string;
+}
+
+export interface RunVerificationView {
+  readonly iteration: number;
+  readonly command: string;
+  readonly exitCode: number | null;
+  readonly passed: boolean;
+  readonly refused: string | null;
+  readonly durationMs: number | null;
+}
+
+/** Everything recorded about one run. What "Detalhes" and Evidence show. */
+export interface RunDetailView {
+  readonly run: RunView;
+  readonly baseline: { readonly branch: string | null; readonly commit: string | null; readonly dirty: boolean };
+  readonly steps: readonly RunStepView[];
+  readonly invocations: readonly RunInvocationView[];
+  readonly verifications: readonly RunVerificationView[];
+}
+
+/** The working copy right now, read with git. What the diff view shows. */
+export interface WorkspaceChangesView {
+  readonly isRepository: boolean;
+  readonly branch: string | null;
+  readonly head: string | null;
+  readonly files: readonly { readonly path: string; readonly status: string }[];
+  readonly diffStat: string;
+  /** Unified diff of tracked changes plus untracked files, bounded. */
+  readonly diff: string;
+  readonly truncated: boolean;
 }
 
 export interface RunProgressEvent {
@@ -346,6 +414,8 @@ export interface IpcMap {
     request: { workspaceId: string; orchestrator: TeamMemberInput; worker: TeamMemberInput };
     response: WorkspaceView;
   };
+  /** Read-only: what changed in the working copy, straight from git. */
+  'workspace.changes': { request: { workspaceId: string }; response: WorkspaceChangesView };
 
   /**
    * The verifications of one project: read, add, change, remove.
@@ -410,6 +480,7 @@ export interface IpcMap {
   'run.get': { request: { runId: string }; response: RunView };
   /** Every run of a project, newest first - the execution history. */
   'run.list': { request: { workspaceId: string }; response: readonly RunView[] };
+  'run.detail': { request: { runId: string }; response: RunDetailView };
   'run.cancel': { request: { runId: string }; response: { cancelled: boolean } };
 }
 
