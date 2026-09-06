@@ -23,6 +23,7 @@ import { ProcessManager } from '../process/process-manager.js';
 import { scanPath } from '../preflight/preflight.js';
 import { extractArchive, findExecutable, planPromotion } from './archive.js';
 import { downloadAndVerify } from './downloader.js';
+import { moveDirectoryWithRetry, removeTreeWithRetry } from './fs-retry.js';
 import {
   judgeAuthenticode,
   readAuthenticode,
@@ -66,6 +67,36 @@ export interface ManagedRuntimeOptions {
   compatibility?: RuntimeCompatibility;
 }
 
+/** One step of one install attempt, as the record a person can open shows it. */
+export interface InstallTrailEntry {
+  readonly source: string;
+  readonly phase: InstallPhase;
+  readonly message: string;
+}
+
+/** Why the last install of this runtime failed, step by step. */
+export interface InstallFailure {
+  readonly at: string;
+  readonly message: string;
+  /** One line per attempted step: `[source] phase: what happened`. */
+  readonly detail: string;
+  readonly trail: readonly InstallTrailEntry[];
+}
+
+/** An error inside `installFrom`, tagged with the phase it happened in. */
+class InstallStepError extends Error {
+  constructor(
+    readonly phase: InstallPhase,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'InstallStepError';
+  }
+}
+
+/** A downloaded executable's first run: the antivirus scans it first. */
+const STAGED_VERSION_TIMEOUT_MS = 180_000;
+
 /** Filenames inside a runtime's directory. */
 const CURRENT = 'current';
 const PREVIOUS = 'previous';
@@ -84,6 +115,8 @@ export abstract class ManagedRuntime {
   protected readonly target: RuntimeTarget;
   protected readonly fetchImpl: typeof fetch | undefined;
   private readonly compatibilityOverride: RuntimeCompatibility | undefined;
+  /** The last failed install, kept so the interface can show its steps. */
+  lastFailure: InstallFailure | null = null;
 
   constructor(options: ManagedRuntimeOptions = {}) {
     this.paths = options.paths ?? appPaths();
@@ -225,11 +258,28 @@ export abstract class ManagedRuntime {
     return this.acquire(firstInstallRequest(this.compatibility), onProgress, options);
   }
 
+  /**
+   * Makes sure the executable the adapters will get is one they can use:
+   * a managed install behind the tested version is brought up to it, and a
+   * machine whose only build is an incompatible one on the PATH gets the
+   * managed build installed next to it. The PATH build is never touched -
+   * not renamed, not removed, not overwritten; the application simply
+   * prefers its own from then on. Null when nothing needed doing.
+   */
+  async ensureCompatible(onProgress?: ProgressReporter, options: InstallOptions = {}): Promise<InstallResult | null> {
+    const detection = await this.detect();
+    if (detection.origin === 'managed') return this.ensureTested(onProgress, options);
+    if (detection.origin === 'system' && detection.incompatible && this.sources.length > 0) {
+      return this.acquire(firstInstallRequest(this.compatibility), onProgress, options);
+    }
+    return null;
+  }
+
   async getVersion(): Promise<string | null> {
     return (await this.detect()).version;
   }
 
-  async healthCheck(): Promise<HealthStatus> {
+  async healthCheck(versionTimeoutMs?: number): Promise<HealthStatus> {
     const detection = await this.detect();
     if (!detection.executablePath) {
       return {
@@ -248,7 +298,7 @@ export abstract class ManagedRuntime {
         remedy: 'Atualizar automaticamente',
       };
     }
-    const version = await this.readVersion(detection.executablePath);
+    const version = await this.readVersion(detection.executablePath, versionTimeoutMs);
     if (version === null) {
       return {
         healthy: false,
@@ -265,8 +315,13 @@ export abstract class ManagedRuntime {
    * relies on. Runs against the staged build before anything is promoted.
    */
   async capabilityCheck(executablePath: string): Promise<{ ok: boolean; detail: string }> {
-    const version = await this.readVersion(executablePath);
-    if (version === null) return { ok: false, detail: 'the executable did not report a version' };
+    const version = await this.readVersion(executablePath, STAGED_VERSION_TIMEOUT_MS);
+    if (version === null) {
+      return {
+        ok: false,
+        detail: `the executable did not report a version within ${STAGED_VERSION_TIMEOUT_MS / 1000} s (${executablePath})`,
+      };
+    }
     return { ok: true, detail: `reported "${version}"` };
   }
 
@@ -373,7 +428,9 @@ export abstract class ManagedRuntime {
     const report = (phase: InstallPhase, message: string, percent?: number): void => {
       onProgress?.({ runtimeId: this.id, phase, message, ...(percent === undefined ? {} : { percent }) });
     };
-    const failures: string[] = [];
+    const trail: InstallTrailEntry[] = [];
+    const wanted = request.kind === 'tested' ? `version ${request.version}` : 'latest';
+    const where = `${this.target.platform}-${this.target.arch}`;
 
     for (const source of this.orderedSources()) {
       // Cancellation is checked between phases as well as inside the download:
@@ -386,17 +443,21 @@ export abstract class ManagedRuntime {
       try {
         resolved = await source.resolve(this.target, request);
       } catch (err) {
-        failures.push(`${source.id}: ${(err as Error).message}`);
+        trail.push({ source: source.id, phase: 'resolving', message: (err as Error).message });
         continue;
       }
       if (!resolved) {
-        failures.push(`${source.id}: nothing available for this request`);
+        trail.push({
+          source: source.id,
+          phase: 'resolving',
+          message: `nothing available for ${wanted} on ${where}`,
+        });
         continue;
       }
 
       const decision = evaluateCompatibility(this.compatibility, resolved.version);
       if (!decision.compatible) {
-        failures.push(`${source.id}: ${decision.reason}`);
+        trail.push({ source: source.id, phase: 'resolving', message: decision.reason });
         continue;
       }
 
@@ -404,19 +465,21 @@ export abstract class ManagedRuntime {
         throwIfCancelled(this.id, options.signal);
         const result = await this.installFrom(source, resolved, report, options.signal);
         report('done', `${this.displayName} pronto`, 100);
+        this.lastFailure = null;
         return result;
       } catch (err) {
-        failures.push(`${source.id}: ${(err as Error).message}`);
+        // The person's cancel is not one more failed source.
+        if (err instanceof RuntimeInstallCancelledError) throw err;
+        const phase = err instanceof InstallStepError ? err.phase : 'installing';
+        trail.push({ source: source.id, phase, message: `${(err as Error).message} (url: ${resolved.url})` });
       }
     }
 
     throwIfCancelled(this.id, options.signal);
-    throw new RuntimeError(
-      this.id,
-      `Não foi possível preparar ${this.displayName} automaticamente.`,
-      'Tentar novamente',
-      failures.join('; '),
-    );
+    const message = `Não foi possível preparar ${this.displayName} automaticamente.`;
+    const detail = trail.map((entry) => `[${entry.source}] ${entry.phase}: ${entry.message}`).join('\n');
+    this.lastFailure = { at: new Date().toISOString(), message, detail, trail };
+    throw new RuntimeError(this.id, message, 'Tentar novamente', detail);
   }
 
   private async installFrom(
@@ -427,6 +490,9 @@ export abstract class ManagedRuntime {
   ): Promise<InstallResult> {
     const stagingDir = join(this.paths.staging, `${this.id}-${Date.now()}`);
     mkdirSync(stagingDir, { recursive: true });
+    // Every throw below is tagged with the phase it came from, so the record
+    // says "extracting: tar.exe ..." rather than only "could not prepare".
+    let phase: InstallPhase = 'downloading';
 
     try {
       const archiveName = resolved.archiveKind === 'raw'
@@ -443,11 +509,14 @@ export abstract class ManagedRuntime {
         fetchImpl: this.fetchImpl,
         onProgress: (received, total) => {
           const percent = total ? Math.min(99, Math.round((received / total) * 100)) : undefined;
-          report('downloading', `Baixando ${this.displayName}...`, percent);
+          const mb = (received / 1_048_576).toFixed(0);
+          const of = total ? ` de ${(total / 1_048_576).toFixed(0)}` : '';
+          report('downloading', `Baixando ${this.displayName}... ${mb}${of} MB`, percent);
         },
       });
 
       throwIfCancelled(this.id, signal);
+      phase = 'verifying';
       report('verifying', 'Verificando...', 100);
       const bytes = readFileSync(archivePath);
       let verdict: IntegrityVerdict = verifyBytes(
@@ -463,13 +532,14 @@ export abstract class ManagedRuntime {
       const extractedRoot = join(stagingDir, 'extracted');
       mkdirSync(extractedRoot, { recursive: true });
 
+      phase = 'extracting';
       let stagedExecutable: string | null;
       if (resolved.archiveKind === 'raw') {
         const target = join(extractedRoot, archiveName);
         renameSync(archivePath, target);
         stagedExecutable = target;
       } else {
-        report('extracting', 'Instalando...');
+        report('extracting', 'Extraindo...');
         await extractArchive({
           archivePath,
           destination: extractedRoot,
@@ -481,7 +551,7 @@ export abstract class ManagedRuntime {
 
       if (!stagedExecutable) {
         throw new Error(
-          `no executable named ${resolved.executableNames.join(' or ')} inside the download`,
+          `no executable named ${resolved.executableNames.join(' or ')} inside the download (${download.bytes} bytes, ${resolved.archiveKind})`,
         );
       }
       if (process.platform !== 'win32') {
@@ -501,6 +571,7 @@ export abstract class ManagedRuntime {
       }
 
       // Prove the staged build works BEFORE it replaces a working one.
+      phase = 'staging-health-check';
       report('staging-health-check', 'Testando...');
       const capability = await this.capabilityCheck(stagedExecutable);
       if (!capability.ok) {
@@ -510,8 +581,9 @@ export abstract class ManagedRuntime {
       const promotion = planPromotion(extractedRoot, stagedExecutable);
       const previousManifest = this.readManifest();
 
+      phase = 'installing';
       report('installing', 'Instalando...');
-      this.promote(promotion.promoteDir, previousManifest);
+      await this.promote(promotion.promoteDir, previousManifest);
 
       const manifest: RuntimeManifest = {
         runtimeId: this.id,
@@ -536,8 +608,9 @@ export abstract class ManagedRuntime {
       };
       writeFileSync(this.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
+      phase = 'health-check';
       report('health-check', 'Testando...');
-      const health = await this.healthCheck();
+      const health = await this.healthCheck(STAGED_VERSION_TIMEOUT_MS);
 
       // A promoted build that fails its health check is undone immediately.
       if (!health.healthy && this.canRollBack) {
@@ -552,18 +625,30 @@ export abstract class ManagedRuntime {
         manifest,
         health,
       };
+    } catch (err) {
+      if (err instanceof RuntimeInstallCancelledError || err instanceof InstallStepError) throw err;
+      throw new InstallStepError(phase, (err as Error).message);
     } finally {
-      rmSync(stagingDir, { recursive: true, force: true });
+      // Best effort, and never the reason an otherwise finished install is
+      // reported as failed: on Windows the folder can stay locked for a
+      // moment after the staged build ran.
+      await removeTreeWithRetry(stagingDir, { maxWaitMs: 5000 });
     }
   }
 
-  /** Moves the staged tree into `current`, keeping the old one as `previous`. */
-  private promote(stagedDir: string, previousManifest: RuntimeManifest | null): void {
+  /**
+   * Moves the staged tree into `current`, keeping the old one as `previous`.
+   *
+   * Each move retries transient Windows refusals (a just-run executable is
+   * still being scanned) and copies when the two folders are on different
+   * volumes; a plain rename did neither and failed installs it had finished.
+   */
+  private async promote(stagedDir: string, previousManifest: RuntimeManifest | null): Promise<void> {
     mkdirSync(this.installDir, { recursive: true });
-    rmSync(this.previousDir, { recursive: true, force: true });
+    await removeTreeWithRetry(this.previousDir, { force: false });
 
     if (existsSync(this.currentDir)) {
-      renameSync(this.currentDir, this.previousDir);
+      await moveDirectoryWithRetry(this.currentDir, this.previousDir);
       if (previousManifest) {
         writeFileSync(
           this.previousManifestPath,
@@ -573,7 +658,7 @@ export abstract class ManagedRuntime {
       }
     }
     mkdirSync(dirname(this.currentDir), { recursive: true });
-    renameSync(stagedDir, this.currentDir);
+    await moveDirectoryWithRetry(stagedDir, this.currentDir);
   }
 
   /** Licence and notice files shipped with a runtime, so they are preserved. */
@@ -589,12 +674,12 @@ export abstract class ManagedRuntime {
     return null;
   }
 
-  protected async readVersion(executablePath: string): Promise<string | null> {
+  protected async readVersion(executablePath: string, timeoutMs = 60_000): Promise<string | null> {
     const result = await this.processManager.run({
       command: executablePath,
       args: this.versionArgs,
       cwd: this.paths.root,
-      timeoutMs: 60_000,
+      timeoutMs,
     });
     if (result.outcome !== 'completed' || result.exitCode !== 0) return null;
     const line = (result.stdout || result.stderr).split(/\r?\n/)[0]?.trim();

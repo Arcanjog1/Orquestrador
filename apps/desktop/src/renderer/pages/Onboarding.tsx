@@ -58,6 +58,8 @@ export function OnboardingPage({
   });
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const [showDetail, setShowDetail] = useState(false);
   const [progress, setProgress] = useState<Record<string, RuntimeProgressEvent>>({});
   const [addProject, setAddProject] = useState(false);
 
@@ -73,9 +75,14 @@ export function OnboardingPage({
   async function installRuntime(id: RuntimeId) {
     setBusy(id);
     setError(null);
+    setErrorDetail(null);
+    setShowDetail(false);
     try {
       const result = await api.runtime.install({ runtimeId: id });
-      if (!result.ok) setError(result.message);
+      if (!result.ok) {
+        setError(result.message);
+        setErrorDetail(result.detail);
+      }
       reload();
     } catch (e) {
       setError(messageOf(e));
@@ -229,7 +236,48 @@ export function OnboardingPage({
                   </p>
                 )}
               </div>
-              {error && <p className="mt-3 text-xs text-danger">{error}</p>}
+              {error && (
+                <div className="mt-3" data-testid="runtime-error">
+                  <p className="text-xs text-danger">
+                    {error}
+                    {errorDetail && (
+                      <button
+                        className="ml-2 underline"
+                        onClick={() => setShowDetail((v) => !v)}
+                        data-testid="runtime-error-details"
+                      >
+                        {showDetail ? "Ocultar detalhes" : "Detalhes"}
+                      </button>
+                    )}
+                  </p>
+                  {showDetail && errorDetail && (
+                    <pre
+                      className="mt-2 max-h-48 overflow-auto rounded-md border border-border bg-surface p-2 text-[11px] whitespace-pre-wrap break-all text-muted-foreground"
+                      data-testid="runtime-error-detail"
+                    >
+                      {errorDetail}
+                    </pre>
+                  )}
+                </div>
+              )}
+              {!error &&
+                runtimes.some((r) => !r.ready && r.lastFailure) &&
+                busy === null && (
+                  <div className="mt-3" data-testid="runtime-last-failure">
+                    {runtimes
+                      .filter((r) => !r.ready && r.lastFailure)
+                      .map((r) => (
+                        <details key={r.runtimeId} className="text-xs text-muted-foreground">
+                          <summary className="cursor-pointer text-danger">
+                            {r.displayName}: {r.lastFailure!.message} — Detalhes
+                          </summary>
+                          <pre className="mt-2 max-h-48 overflow-auto rounded-md border border-border bg-surface p-2 text-[11px] whitespace-pre-wrap break-all">
+                            {r.lastFailure!.detail}
+                          </pre>
+                        </details>
+                      ))}
+                  </div>
+                )}
               <Button className="mt-6" data-testid="continue" onClick={() => setStep(2)}>
                 Continuar
               </Button>

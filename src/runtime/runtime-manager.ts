@@ -14,7 +14,7 @@
 
 import { ensureAppPaths, appPaths, type AppPaths } from './paths.js';
 import { ClaudeCodeRuntime, CodexRuntime, GitRuntime } from './runtimes.js';
-import type { ManagedRuntime, ManagedRuntimeOptions } from './managed-runtime.js';
+import type { InstallFailure, ManagedRuntime, ManagedRuntimeOptions } from './managed-runtime.js';
 import {
   RuntimeError,
   type HealthStatus,
@@ -35,6 +35,13 @@ export interface RuntimeStatus {
   canAutoConfigure: boolean;
   /** A managed install older than the tested version; `upgradeOutdated` moves it. */
   outdated: { installed: string; tested: string } | null;
+  /**
+   * The only build found is an incompatible one on the PATH: the managed
+   * build must be installed beside it (the PATH build is left alone).
+   */
+  needsManaged: boolean;
+  /** The last install that failed, with its steps, until one succeeds. */
+  lastFailure: InstallFailure | null;
 }
 
 /** What the onboarding screen renders. */
@@ -88,8 +95,7 @@ export class RuntimeManager {
   async upgradeOutdated(onProgress?: ProgressReporter, options: InstallOptions = {}): Promise<InstallResult[]> {
     const results: InstallResult[] = [];
     for (const runtime of this.list()) {
-      if (!runtime.outdatedManagedVersion()) continue;
-      const result = await runtime.ensureTested(onProgress, options);
+      const result = await runtime.ensureCompatible(onProgress, options);
       if (result) results.push(result);
     }
     return results;
@@ -126,6 +132,8 @@ export class RuntimeManager {
         health,
         canAutoConfigure: runtime.sources.length > 0,
         outdated: runtime.outdatedManagedVersion(),
+        needsManaged: detection.origin === 'system' && detection.incompatible !== undefined && runtime.sources.length > 0,
+        lastFailure: runtime.lastFailure,
       });
     }
 

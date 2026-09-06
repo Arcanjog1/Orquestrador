@@ -131,6 +131,10 @@ export interface RuntimeStatusView {
   readonly canAutoConfigure: boolean;
   /** Already user-facing Portuguese; the renderer never composes these. */
   readonly detail: string;
+  /** The only build is an incompatible one on the PATH; the app installs its own beside it. */
+  readonly needsManaged: boolean;
+  /** Why the last install failed, step by step, until one succeeds. */
+  readonly lastFailure: { readonly at: string; readonly message: string; readonly detail: string } | null;
 }
 
 export interface DiagnosticView {
@@ -148,6 +152,8 @@ export interface RuntimeProgressEvent {
   readonly label: string;
   readonly message: string;
   readonly percent: number | null;
+  /** On `failed`: the steps that failed, safe to show under "Detalhes". */
+  readonly detail?: string | null;
 }
 
 export interface InstallResultView {
@@ -155,6 +161,8 @@ export interface InstallResultView {
   readonly runtimeId: RuntimeId;
   readonly version: string | null;
   readonly message: string;
+  /** On failure: the steps that failed - source, phase, what happened. */
+  readonly detail: string | null;
 }
 
 export type AuthStateView =

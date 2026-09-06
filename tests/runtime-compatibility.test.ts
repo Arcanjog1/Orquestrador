@@ -198,3 +198,175 @@ class StubSourceByRequest implements RuntimeSource {
     return request.kind === 'tested' ? this.answers.tested : this.answers.latest;
   }
 }
+
+/* ------------------------------------------------------------------------ *
+ * The Windows incident, end to end: an old Codex on the PATH, no managed
+ * build, and "Atualizar". The managed build must be installed beside the old
+ * one, win from then on, and the old one must be left exactly as it was.
+ * ------------------------------------------------------------------------ */
+
+import { RuntimeService } from '../apps/desktop/src/main/services/runtime-service.js';
+import { EventBus } from '../apps/desktop/src/main/events.js';
+import { fakeExecutableName, fakeExecutableBody } from './helpers/fake-runtime-source.js';
+
+/** A source that resolves to a fake archive on disk, served by a fake fetch. */
+function archiveSource(home: string, version: string, id = 'fake-source'): { source: RuntimeSource; fetch: typeof fetch } {
+  const archive = buildFakeArchive(join(home, `archive-${id}`), 'codex', version);
+  const source: RuntimeSource = {
+    id,
+    label: id,
+    contract: 'DOCUMENTED',
+    integrityStrategy: 'NPM_INTEGRITY',
+    async resolve(): Promise<ResolvedDownload> {
+      return {
+        url: archive.url,
+        version,
+        archiveKind: 'tgz',
+        executableNames: archive.executableNames,
+        integrity: archive.integrity,
+      };
+    },
+  };
+  return { source, fetch: makeFetch({ [archive.url]: { bytes: archive.bytes } }) };
+}
+
+test('an old Codex on the PATH: the managed build is installed beside it, wins, and the old one is untouched', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lao-path-old-'));
+  try {
+    const paths = pathsFor(home);
+    // The person's own Codex 0.104.0, installed by npm, on the PATH. A real
+    // file, so "untouched" can be checked byte for byte.
+    const pathDir = join(home, 'on-path');
+    mkdirSync(pathDir, { recursive: true });
+    const oldCodex = join(pathDir, fakeExecutableName('codex'));
+    writeFileSync(oldCodex, fakeExecutableBody('codex-cli 0.104.0'), 'utf8');
+    const oldBytes = readFileSync(oldCodex);
+
+    const tested = RUNTIME_COMPATIBILITY.codex.testedVersion;
+    const { source, fetch } = archiveSource(home, tested);
+    const runtime = new CodexOnPath([source], { paths, fetchImpl: fetch }, { path: oldCodex, versionLine: 'codex-cli 0.104.0' });
+
+    // Before: found, refused, not ready.
+    const before = await runtime.detect();
+    assert.equal(before.origin, 'system');
+    assert.equal(before.version, '0.104.0');
+    assert.ok(before.incompatible);
+    await assert.rejects(runtime.getExecutablePath(), RuntimeIncompatibleError);
+
+    const manager = new RuntimeManager({ paths, fetchImpl: fetch });
+    manager.register(runtime);
+    const status = (await manager.diagnose()).runtimes.find((r) => r.runtimeId === 'codex')!;
+    assert.equal(status.needsManaged, true, 'the diagnostic says the managed build is needed');
+    assert.equal(status.canAutoConfigure, true);
+
+    // "Atualizar": the same call the button makes.
+    const phases: string[] = [];
+    const result = await manager.install('codex', (p) => phases.push(p.phase));
+    assert.equal(result.manifest.version, tested);
+    assert.equal(result.health.healthy, true);
+    assert.deepEqual(
+      [...new Set(phases)],
+      ['resolving', 'downloading', 'verifying', 'extracting', 'staging-health-check', 'installing', 'health-check', 'done'],
+      'the flow the person watches: preparing, downloading, verifying, installing, testing, ready',
+    );
+
+    // After: the managed build wins, and is what adapters get.
+    const after = await runtime.detect();
+    assert.equal(after.origin, 'managed');
+    assert.equal(after.version, tested);
+    assert.equal(after.incompatible, undefined);
+    const executable = await runtime.getExecutablePath();
+    assert.ok(executable.startsWith(paths.runtimes), `managed path, got ${executable}`);
+    assert.notEqual(executable, oldCodex);
+    assert.equal((await runtime.healthCheck()).healthy, true);
+    assert.equal(status.lastFailure, null);
+
+    // The old Codex on the PATH: same file, same bytes, same place.
+    assert.ok(existsSync(oldCodex));
+    assert.deepEqual(readFileSync(oldCodex), oldBytes);
+
+    // And the start-up sweep does nothing more once the build is right.
+    assert.deepEqual(await manager.upgradeOutdated(), []);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('the start-up sweep installs the managed build by itself when the PATH one is too old', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lao-path-sweep-'));
+  try {
+    const paths = pathsFor(home);
+    const tested = RUNTIME_COMPATIBILITY.codex.testedVersion;
+    const { source, fetch } = archiveSource(home, tested);
+    const runtime = new CodexOnPath([source], { paths, fetchImpl: fetch }, { path: '/usr/bin/codex', versionLine: 'codex-cli 0.104.0' });
+    const manager = new RuntimeManager({ paths, fetchImpl: fetch });
+    manager.register(runtime);
+
+    const results = await manager.upgradeOutdated();
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.manifest.version, tested);
+    assert.equal((await runtime.detect()).origin, 'managed');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a failed install says which step failed, per source, and the service hands it to the interface', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lao-path-fail-'));
+  try {
+    const paths = pathsFor(home);
+    const tested = RUNTIME_COMPATIBILITY.codex.testedVersion;
+    // Source one: the GitHub API refuses (rate limit). Source two: resolves,
+    // but the download answers 404.
+    const limited: RuntimeSource = {
+      id: 'codex-github-releases',
+      label: 'GitHub',
+      contract: 'DOCUMENTED',
+      integrityStrategy: 'SHA256',
+      async resolve() {
+        throw new Error('GitHub API answered HTTP 403 - API rate limit exhausted, resets at 2026-09-06T20:00:00.000Z for https://api.github.com/repos/openai/codex/releases/tags/rust-v0.153.4');
+      },
+    };
+    const gone: RuntimeSource = {
+      id: 'codex-npm-registry',
+      label: 'npm',
+      contract: 'PACKAGE_INTERNAL',
+      integrityStrategy: 'NPM_INTEGRITY',
+      async resolve(): Promise<ResolvedDownload> {
+        return { url: 'https://example.invalid/gone.tgz', version: tested, archiveKind: 'tgz', executableNames: ['codex'] };
+      },
+    };
+    const fetch404 = makeFetch({});
+    const runtime = new CodexOnPath([limited, gone], { paths, fetchImpl: fetch404 }, { path: '/usr/bin/codex', versionLine: 'codex-cli 0.104.0' });
+    const manager = new RuntimeManager({ paths, fetchImpl: fetch404 });
+    manager.register(runtime);
+
+    const bus = new EventBus();
+    const events: Array<{ phase: string; detail?: string | null }> = [];
+    bus.subscribe((channel, payload) => {
+      if (channel === 'runtime:progress') {
+        const e = payload as { phase: string; detail?: string | null };
+        events.push({ phase: e.phase, detail: e.detail });
+      }
+    });
+    const service = new RuntimeService(manager, bus, null);
+
+    const outcome = await service.install('codex');
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.message, /Não foi possível preparar Codex automaticamente/);
+    assert.ok(outcome.detail, 'the steps are on the record');
+    assert.match(outcome.detail!, /\[codex-github-releases\] resolving: GitHub API answered HTTP 403 - API rate limit exhausted/);
+    assert.match(outcome.detail!, /\[codex-npm-registry\] downloading: Could not download https:\/\/example\.invalid\/gone\.tgz: the server answered HTTP 404/);
+    const failed = events.find((e) => e.phase === 'failed');
+    assert.ok(failed?.detail?.includes('rate limit'), 'the event carries the same detail');
+
+    // The diagnostic keeps it until an install succeeds.
+    const view = await service.diagnose();
+    const codex = view.runtimes.find((r) => r.runtimeId === 'codex')!;
+    assert.equal(codex.ready, false);
+    assert.equal(codex.needsManaged, true);
+    assert.match(codex.lastFailure?.detail ?? '', /resolving: GitHub API answered HTTP 403/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

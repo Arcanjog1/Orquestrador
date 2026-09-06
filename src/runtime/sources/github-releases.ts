@@ -54,9 +54,12 @@ function headers(env: NodeJS.ProcessEnv): Record<string, string> {
 /**
  * Fetches one release.
  *
- * `tag` is either a concrete tag or the string `latest`. Anything other than a
- * clean, well-shaped answer returns null: the caller then tries the next
- * source instead of inventing a download.
+ * `tag` is either a concrete tag or the string `latest`. A release that does
+ * not exist (404) returns null - the caller then tries the next source. Any
+ * other refusal throws, naming the HTTP status and, for the API's rate limit,
+ * when it resets: "nothing available" hid every one of those from the person
+ * looking at a failed install, and the rate limit is the one an
+ * unauthenticated desktop hits first.
  */
 export async function fetchRelease(
   repository: string,
@@ -65,18 +68,41 @@ export async function fetchRelease(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Release | null> {
   const path = tag === 'latest' ? 'releases/latest' : `releases/tags/${encodeURIComponent(tag)}`;
-  let payload: unknown;
+  const url = `${API_ROOT}/repos/${repository}/${path}`;
+  let response: Response;
   try {
-    const response = await fetchImpl(`${API_ROOT}/repos/${repository}/${path}`, {
+    response = await fetchImpl(url, {
       headers: headers(env),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    if (!response.ok) return null;
+  } catch (error) {
+    throw new Error(`GitHub API unreachable (${describeFetchError(error)}) for ${url}`);
+  }
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const remaining = response.headers.get('x-ratelimit-remaining');
+    const reset = response.headers.get('x-ratelimit-reset');
+    const limited =
+      (response.status === 403 || response.status === 429) && remaining === '0'
+        ? ` - API rate limit exhausted${reset ? `, resets at ${new Date(Number(reset) * 1000).toISOString()}` : ''}`
+        : '';
+    throw new Error(`GitHub API answered HTTP ${response.status}${limited} for ${url}`);
+  }
+  let payload: unknown;
+  try {
     payload = await response.json();
   } catch {
-    return null;
+    throw new Error(`GitHub API answered HTTP ${response.status} without a JSON body for ${url}`);
   }
-  return parseRelease(payload);
+  const release = parseRelease(payload);
+  if (!release) throw new Error(`GitHub API answered a release without a tag for ${url}`);
+  return release;
+}
+
+function describeFetchError(error: unknown): string {
+  const e = error as { name?: string; cause?: { code?: string }; message?: string };
+  if (e?.name === 'TimeoutError') return 'timed out';
+  return e?.cause?.code ?? e?.message ?? String(error);
 }
 
 export function parseRelease(payload: unknown): Release | null {

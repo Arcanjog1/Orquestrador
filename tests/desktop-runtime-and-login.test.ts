@@ -177,8 +177,12 @@ test('a failed install reports a sentence, never a raw error', async () => {
 
   assert.equal(result.ok, false);
   assert.equal(result.message, 'Não foi possível baixar o Codex agora.');
-  assert.ok(!/ENOTFOUND/.test(JSON.stringify(result)));
+  // The sentence is what the row says; the raw reason is kept for "Detalhes",
+  // where a person who wants it can read which step failed and why.
+  assert.ok(!/ENOTFOUND/.test(result.message));
+  assert.match(result.detail ?? '', /ENOTFOUND releases\.example/);
   assert.equal(seen.at(-1)!.label, 'Não foi possível configurar');
+  assert.equal(seen.at(-1)!.detail, result.detail);
 });
 
 test('cancelling a real install aborts the download and is not reported as a failure', async () => {

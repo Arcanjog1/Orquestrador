@@ -8,6 +8,7 @@
  */
 
 import type { Database, InstallPhase, InstallProgress, RuntimeId, RuntimeManager } from '../core.js';
+import { redact } from '../core.js';
 import type {
   DiagnosticView,
   InstallResultView,
@@ -48,6 +49,14 @@ export class RuntimeService {
       canAutoConfigure: status.canAutoConfigure,
       detail: describe(status.health.healthy, status.detection.origin, status.health.problem),
       outdated: status.outdated,
+      needsManaged: status.needsManaged,
+      lastFailure: status.lastFailure
+        ? {
+            at: status.lastFailure.at,
+            message: status.lastFailure.message,
+            detail: redact(status.lastFailure.detail),
+          }
+        : null,
     }));
     return {
       ready: report.ready,
@@ -58,23 +67,36 @@ export class RuntimeService {
   }
 
   /**
-   * Moves managed installs older than their tested version up to it, with
-   * the same progress events an install shows. Runs in the background at
-   * start-up; a failure leaves the working build in place and is reported on
-   * the event channel, never thrown at the caller.
+   * Brings every runtime to a usable build without anyone asking: a managed
+   * install older than its tested version is moved up to it, and a machine
+   * whose only build is an incompatible one on the PATH gets the managed
+   * build installed beside it. Same progress events an install shows. Runs
+   * in the background at start-up; a failure leaves whatever worked in place
+   * and is reported on the event channel, never thrown at the caller.
    */
   async upgradeOutdated(): Promise<InstallResultView[]> {
     const out: InstallResultView[] = [];
     for (const status of (await this.runtimeManager.diagnose()).runtimes) {
-      if (!status.outdated || this.running.has(status.runtimeId)) continue;
-      this.events.emit('runtime:progress', {
-        runtimeId: status.runtimeId,
-        phase: 'resolving',
-        label: 'Atualizando',
-        message: `Atualizando ${status.displayName} ${status.outdated.installed} para ${status.outdated.tested}...`,
-        percent: null,
-      });
-      out.push(await this.install(status.runtimeId));
+      if (this.running.has(status.runtimeId)) continue;
+      if (status.outdated) {
+        this.events.emit('runtime:progress', {
+          runtimeId: status.runtimeId,
+          phase: 'resolving',
+          label: 'Atualizando',
+          message: `Atualizando ${status.displayName} ${status.outdated.installed} para ${status.outdated.tested}...`,
+          percent: null,
+        });
+        out.push(await this.install(status.runtimeId));
+      } else if (status.needsManaged) {
+        this.events.emit('runtime:progress', {
+          runtimeId: status.runtimeId,
+          phase: 'resolving',
+          label: 'Preparando',
+          message: `${status.displayName} ${status.detection.version ?? ''} encontrado no PATH é antigo; preparando a versão gerenciada...`,
+          percent: null,
+        });
+        out.push(await this.install(status.runtimeId));
+      }
     }
     return out;
   }
@@ -82,7 +104,7 @@ export class RuntimeService {
   /** Installs one runtime, reporting progress as it goes. */
   async install(runtimeId: RuntimeId): Promise<InstallResultView> {
     if (this.running.has(runtimeId)) {
-      return { ok: false, runtimeId, version: null, message: 'Já existe uma instalação em andamento.' };
+      return { ok: false, runtimeId, version: null, message: 'Já existe uma instalação em andamento.', detail: null };
     }
     const controller = new AbortController();
     this.running.set(runtimeId, controller);
@@ -116,20 +138,23 @@ export class RuntimeService {
         runtimeId,
         version: result.manifest.version,
         message: `${result.manifest.version} instalado.`,
+        detail: null,
       };
     } catch (error) {
       // A cancellation is not a failure: the interface says so, and offers the
       // action again instead of apologising.
       const cancelled = controller.signal.aborted;
       const message = cancelled ? 'Instalação cancelada.' : userMessageFor(error);
+      const detail = cancelled ? null : detailFor(error);
       this.events.emit('runtime:progress', {
         runtimeId,
         phase: cancelled ? 'cancelled' : 'failed',
         label: cancelled ? 'Cancelado' : 'Não foi possível configurar',
         message,
         percent: null,
+        detail,
       });
-      return { ok: false, runtimeId, version: null, message };
+      return { ok: false, runtimeId, version: null, message, detail };
     } finally {
       this.running.delete(runtimeId);
     }
@@ -159,6 +184,19 @@ function describe(healthy: boolean, origin: string, problem: string | undefined)
  * gets a generic one, because "ENOENT: spawn codex" is not a message a person
  * can act on.
  */
+/**
+ * The steps that failed, for "Detalhes". Public URLs, HTTP statuses, phase
+ * names and the CLI's own words; redacted, so no header or token that a
+ * stderr might echo ever reaches the interface.
+ */
+function detailFor(error: unknown): string | null {
+  if (error && typeof error === 'object' && 'detail' in error) {
+    const detail = (error as { detail?: unknown }).detail;
+    if (typeof detail === 'string' && detail.length > 0) return redact(detail);
+  }
+  return error instanceof Error ? redact(`${error.name}: ${error.message}`) : null;
+}
+
 function userMessageFor(error: unknown): string {
   if (error && typeof error === 'object' && 'userMessage' in error) {
     const message = (error as { userMessage?: unknown }).userMessage;
