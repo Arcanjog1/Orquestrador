@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, ExternalLink, Loader2, X } from "lucide-react";
+import { Check, Copy, ExternalLink, Loader2, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -446,20 +446,45 @@ export function LoginDialog({
   onOpenExternal: (url: string) => void;
 }) {
   const [progress, setProgress] = useState<AccountProgressEvent | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!open) {
       setProgress(null);
+      setCopied(false);
       return;
     }
     return api.events.accountProgress((event) => {
-      if (!accountId || event.accountId === accountId) setProgress(event);
+      if (accountId && event.accountId !== accountId) return;
+      setProgress((previous) => {
+        // A sign-in that has ended carries no page and no code, and neither
+        // is kept: the code belongs to that attempt only. While it is still
+        // going, a report that says nothing about them does not take away
+        // what an earlier one said - the page opened and the code to type
+        // must stay on screen until the person is done with them.
+        if (isFinal(event.stage)) return event;
+        return {
+          ...event,
+          ...(event.url ?? previous?.url ? { url: event.url ?? previous?.url } : {}),
+          ...(event.code ?? previous?.code ? { code: event.code ?? previous?.code } : {}),
+        };
+      });
     });
   }, [open, accountId]);
 
   const stage = progress?.stage ?? "starting";
   const done = stage === "connected";
   const failed = stage === "failed" || stage === "cancelled";
+  const code = !done && !failed ? progress?.code : undefined;
+
+  const copyCode = () => {
+    if (!code) return;
+    // The page's own clipboard API: no bridge, no Node, a user gesture.
+    void navigator.clipboard
+      ?.writeText(code)
+      .then(() => setCopied(true))
+      .catch(() => setCopied(false));
+  };
 
   // A connected account closes the dialog by itself, after the confirmation
   // has been on screen long enough to be read. Failure stays open: it carries
@@ -492,9 +517,22 @@ export function LoginDialog({
 
         {!done && !failed && (
           <div className="space-y-4 text-center">
-            {progress?.code && (
-              <div className="font-mono text-2xl tracking-[0.3em] text-primary">
-                {progress.code}
+            {code && (
+              <div className="space-y-2">
+                <div className="text-xs text-muted-foreground">Código do dispositivo</div>
+                <div
+                  data-testid="device-code"
+                  className="select-all font-mono text-2xl tracking-[0.3em] text-primary"
+                >
+                  {code}
+                </div>
+                <Button size="sm" variant="secondary" data-testid="copy-device-code" onClick={copyCode}>
+                  {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                  {copied ? "Copiado" : "Copiar código"}
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Digite esse código na página aberta no navegador.
+                </p>
               </div>
             )}
             <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
@@ -646,4 +684,9 @@ export function AddProjectDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/** The stages after which a sign-in attempt is over, one way or another. */
+function isFinal(stage: string): boolean {
+  return stage === "connected" || stage === "failed" || stage === "cancelled";
 }
