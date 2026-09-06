@@ -29,6 +29,7 @@ export type {
   AccountRecord,
   AgentRecord,
   ChatSessionRecord,
+  ListSessionsOptions,
   MessageRecord,
   RunRecord,
   RunStatus,

@@ -350,6 +350,15 @@ export interface ChatSessionRecord extends SqlRow {
   title: string;
   created_at: string;
   updated_at: string;
+  /** Set when the conversation was archived; null while it is in the list. */
+  archived_at: string | null;
+}
+
+export interface ListSessionsOptions {
+  /** Archived conversations are hidden unless asked for. */
+  includeArchived?: boolean;
+  /** Case-insensitive match on the title. */
+  query?: string;
 }
 
 export interface MessageRecord extends SqlRow {
@@ -374,11 +383,47 @@ export class ChatRepository extends Repository {
     return this.requireSession(input.id);
   }
 
-  listSessions(workspaceId: string): ChatSessionRecord[] {
-    return this.db.all<ChatSessionRecord>(
-      'SELECT * FROM chat_sessions WHERE workspace_id = ? ORDER BY updated_at DESC',
-      [workspaceId],
+  listSessions(workspaceId: string, options: ListSessionsOptions = {}): ChatSessionRecord[] {
+    const where = ['workspace_id = ?'];
+    const params: SqlValue[] = [workspaceId];
+    if (!options.includeArchived) where.push('archived_at IS NULL');
+    const rows = this.db.all<ChatSessionRecord>(
+      `SELECT * FROM chat_sessions WHERE ${where.join(' AND ')} ORDER BY updated_at DESC`,
+      params,
     );
+    // Matched here rather than with LIKE: SQLite folds case for ASCII only, and
+    // titles are written in Portuguese. A workspace's list is small.
+    const query = options.query?.trim().toLocaleLowerCase() ?? '';
+    if (query.length === 0) return rows;
+    return rows.filter((row) => row.title.toLocaleLowerCase().includes(query));
+  }
+
+  renameSession(id: string, title: string): ChatSessionRecord {
+    this.db.run('UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?', [title, now(), id]);
+    return this.requireSession(id);
+  }
+
+  /** Archiving hides; it never deletes. `false` brings the conversation back. */
+  setSessionArchived(id: string, archived: boolean): ChatSessionRecord {
+    this.db.run('UPDATE chat_sessions SET archived_at = ? WHERE id = ?', [archived ? now() : null, id]);
+    return this.requireSession(id);
+  }
+
+  /**
+   * Removes the conversation and its messages. Runs are kept: their
+   * `session_id` becomes NULL through the foreign key, so the execution history
+   * and its evidence stay whole after the conversation is gone.
+   */
+  deleteSession(id: string): boolean {
+    const result = this.db.run('DELETE FROM chat_sessions WHERE id = ?', [id]);
+    return Number(result.changes) > 0;
+  }
+
+  countMessages(sessionId: string): number {
+    const row = this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM messages WHERE session_id = ?', [
+      sessionId,
+    ]);
+    return Number(row?.n ?? 0);
   }
 
   findSession(id: string): ChatSessionRecord | undefined {
@@ -507,6 +552,14 @@ export class RunRepository extends Repository {
     return this.db.all<RunRecord>('SELECT * FROM runs WHERE session_id = ? ORDER BY started_at', [
       sessionId,
     ]);
+  }
+
+  /** Every run of a workspace, newest first, whether or not its conversation still exists. */
+  listForWorkspace(workspaceId: string, limit = 200): RunRecord[] {
+    return this.db.all<RunRecord>(
+      'SELECT * FROM runs WHERE workspace_id = ? ORDER BY started_at DESC LIMIT ?',
+      [workspaceId, limit],
+    );
   }
 
   setStatus(id: string, status: RunStatus, terminationReason?: string | null): void {

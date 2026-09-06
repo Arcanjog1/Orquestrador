@@ -551,6 +551,88 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
   }
 });
 
+test('a conversation is renamed, archived, found and deleted from the real sidebar', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-conv-'));
+  try {
+    const workspace = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Projeto conversas', localPath: dir })})`,
+    );
+    const first = await window.webContents.executeJavaScript(
+      `window.api.chat.createSession(${JSON.stringify({ workspaceId: workspace.id, title: 'Primeira conversa' })})`,
+    );
+    const second = await window.webContents.executeJavaScript(
+      `window.api.chat.createSession(${JSON.stringify({ workspaceId: workspace.id, title: 'Segunda conversa' })})`,
+    );
+
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    let text = await waitForText(window, /Segunda conversa/, 15_000);
+    assert.match(text, /Primeira conversa/);
+
+    // Rename, through the row's menu and the dialog.
+    await openMenu(window, `session-menu-${first.id}`);
+    await click(window, `rename-session-${first.id}`);
+    await waitForText(window, /Renomear conversa/, 10_000);
+    await type(window, 'rename-session-title', 'Conversa renomeada');
+    await click(window, 'rename-session-save');
+    text = await waitForText(window, /Conversa renomeada/, 10_000);
+    assert.doesNotMatch(text, /Primeira conversa/);
+    const listed = await window.webContents.executeJavaScript(
+      `window.api.chat.listSessions(${JSON.stringify({ workspaceId: workspace.id })})`,
+    );
+    assert.equal(listed.find((s) => s.id === first.id).title, 'Conversa renomeada', 'persisted, not local');
+
+    // Archive: leaves the list; "Arquivadas" brings it into view, greyed.
+    await openMenu(window, `session-menu-${second.id}`);
+    await click(window, `archive-session-${second.id}`);
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      text = await window.webContents.executeJavaScript('document.body.innerText');
+      if (!/Segunda conversa/.test(text)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.doesNotMatch(text, /Segunda conversa/, 'an archived conversation is out of Recentes');
+    await click(window, 'toggle-archived');
+    await waitForText(window, /Segunda conversa/, 10_000);
+    const archived = await window.webContents.executeJavaScript(
+      `window.api.chat.listSessions(${JSON.stringify({ workspaceId: workspace.id, includeArchived: true })})`,
+    );
+    assert.ok(archived.find((s) => s.id === second.id).archivedAt, 'archived in the database');
+    await click(window, 'toggle-archived');
+
+    // Search narrows the list by title.
+    await type(window, 'session-search', 'renomeada');
+    text = await waitForText(window, /Conversa renomeada/, 10_000);
+    await type(window, 'session-search', 'nada disso');
+    await waitForText(window, /Nenhuma conversa com esse título/, 10_000);
+    await type(window, 'session-search', '');
+    await waitForText(window, /Conversa renomeada/, 10_000);
+
+    // Delete asks first, then really removes.
+    await openMenu(window, `session-menu-${first.id}`);
+    await click(window, `delete-session-${first.id}`);
+    text = await waitForText(window, /Apagar conversa\?/, 10_000);
+    assert.match(text, /nenhum arquivo do projeto é alterado/);
+    await click(window, 'confirm');
+    const gone = Date.now() + 10_000;
+    while (Date.now() < gone) {
+      text = await window.webContents.executeJavaScript('document.body.innerText');
+      if (!/Conversa renomeada/.test(text)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.doesNotMatch(text, /Conversa renomeada/);
+    const after = await window.webContents.executeJavaScript(
+      `window.api.chat.listSessions(${JSON.stringify({ workspaceId: workspace.id, includeArchived: true })})`,
+    );
+    assert.deepEqual(after.map((s) => s.id), [second.id], 'deleted from the database, archive kept');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /* ------------------------------------------------------------------ helpers */
 
 let sharedWindow = null;
@@ -596,6 +678,23 @@ async function openWindow() {
   });
   await sharedWindow.loadFile(join(bundles, 'index.html'));
   return sharedWindow;
+}
+
+/**
+ * Opens a Radix dropdown menu. Its trigger listens for pointerdown, not click,
+ * so a plain `.click()` does nothing; this sends what a mouse would.
+ */
+async function openMenu(window, testid) {
+  const done = await window.webContents.executeJavaScript(`
+    (() => {
+      const el = document.querySelector('[data-testid="${testid}"]');
+      if (!el) return 'missing';
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse', ctrlKey: false }));
+      return 'opened';
+    })()
+  `);
+  if (done !== 'opened') throw new Error(`no element with data-testid="${testid}"`);
+  await new Promise((r) => setTimeout(r, 150));
 }
 
 /** Clicks the element carrying a `data-testid`, failing loudly if it is absent. */

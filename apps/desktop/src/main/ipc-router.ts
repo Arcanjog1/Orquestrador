@@ -165,9 +165,24 @@ export class IpcRouter {
       removed: s.verifications.remove(p as { workspaceId: string; id: string }),
     }));
 
-    this.handlers.set('chat.listSessions', (p) =>
-      s.chat.listSessions((p as { workspaceId: string }).workspaceId),
-    );
+    this.handlers.set('chat.listSessions', (p) => {
+      const input = p as IpcMap['chat.listSessions']['request'];
+      return s.chat.listSessions(input.workspaceId, {
+        ...(input.includeArchived !== undefined ? { includeArchived: input.includeArchived } : {}),
+        ...(input.query !== undefined ? { query: input.query } : {}),
+      });
+    });
+    this.handlers.set('chat.renameSession', (p) => {
+      const input = p as IpcMap['chat.renameSession']['request'];
+      return s.chat.renameSession(input.sessionId, input.title);
+    });
+    this.handlers.set('chat.archiveSession', (p) => {
+      const input = p as IpcMap['chat.archiveSession']['request'];
+      return s.chat.archiveSession(input.sessionId, input.archived);
+    });
+    this.handlers.set('chat.deleteSession', (p) => ({
+      deleted: s.chat.deleteSession((p as { sessionId: string }).sessionId),
+    }));
     this.handlers.set('chat.createSession', (p) => {
       const input = p as { workspaceId: string; title: string };
       return s.chat.createSession(input.workspaceId, input.title);
@@ -181,6 +196,9 @@ export class IpcRouter {
     });
 
     this.handlers.set('run.get', (p) => s.orchestration.view((p as { runId: string }).runId));
+    this.handlers.set('run.list', (p) =>
+      s.orchestration.listForWorkspace((p as { workspaceId: string }).workspaceId),
+    );
     this.handlers.set('run.cancel', (p) => ({
       cancelled: s.orchestration.cancel((p as { runId: string }).runId),
     }));

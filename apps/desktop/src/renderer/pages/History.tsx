@@ -5,7 +5,7 @@ import { SectionLabel, StatusPill } from "@/components/orch/primitives";
 import { runStateOf, spanBetween } from "@/lib/timeline";
 import { api, messageOf } from "@/lib/api";
 import { Link } from "@/router";
-import type { ChatSessionView, RunView, WorkspaceView } from "@shared/ipc-contract";
+import type { RunView, WorkspaceView } from "@shared/ipc-contract";
 
 /**
  * Run history, exactly as approved.
@@ -15,7 +15,7 @@ import type { ChatSessionView, RunView, WorkspaceView } from "@shared/ipc-contra
  * bridge - there is no separate history store.
  */
 export function HistoryPage({ workspace }: { workspace: WorkspaceView | null }) {
-  const [rows, setRows] = useState<{ session: ChatSessionView; run: RunView | null }[]>([]);
+  const [rows, setRows] = useState<{ run: RunView; title: string; archived: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [diff, setDiff] = useState(false);
@@ -31,21 +31,21 @@ export function HistoryPage({ workspace }: { workspace: WorkspaceView | null }) 
     setLoading(true);
     void (async () => {
       try {
-        const sessions = await api.chat.listSessions({ workspaceId: workspace.id });
-        // A session's run is found through its messages: the loop stamps the
-        // run id on everything it says.
-        const built = await Promise.all(
-          sessions.map(async (session) => {
-            const messages = await api.chat.listMessages({ sessionId: session.id });
-            const runId = [...messages].reverse().find((m) => m.runId)?.runId ?? null;
-            if (!runId) return { session, run: null };
-            try {
-              return { session, run: await api.run.get({ runId }) };
-            } catch {
-              return { session, run: null };
-            }
-          }),
-        );
+        // The history is the runs table itself, newest first. A run whose
+        // conversation was deleted is still here, under its own objective.
+        const [runs, sessions] = await Promise.all([
+          api.run.list({ workspaceId: workspace.id }),
+          api.chat.listSessions({ workspaceId: workspace.id, includeArchived: true }),
+        ]);
+        const byId = new Map(sessions.map((s) => [s.id, s]));
+        const built = runs.map((run) => {
+          const session = byId.get(run.sessionId);
+          return {
+            run,
+            title: session?.title ?? run.objective.split("\n")[0]?.slice(0, 80) ?? run.id,
+            archived: session?.archivedAt !== null && session?.archivedAt !== undefined,
+          };
+        });
         if (alive) {
           setRows(built);
           setError(null);
@@ -81,23 +81,25 @@ export function HistoryPage({ workspace }: { workspace: WorkspaceView | null }) 
         <div className="mt-8">
           <SectionLabel>Runs</SectionLabel>
           <div className="mt-3 space-y-2">
-            {rows.map(({ session, run }) => (
+            {rows.map(({ run, title, archived }) => (
               <div
-                key={session.id}
+                key={run.id}
                 className="rounded-lg border border-border bg-surface p-4 transition-colors hover:border-border-strong"
+                data-testid={`history-${run.id}`}
               >
                 <div className="flex flex-wrap items-center gap-3">
-                  <span className="text-sm font-medium">{session.title}</span>
+                  <span className="text-sm font-medium">{title}</span>
+                  {archived && (
+                    <span className="text-[11px] text-muted-foreground">arquivada</span>
+                  )}
                   <StatusPill state={runStateOf(run, null)} />
                   <span className="ml-auto text-xs text-muted-foreground">
-                    {new Date(session.createdAt).toLocaleString()}
+                    {new Date(run.startedAt).toLocaleString()}
                   </span>
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-muted-foreground">
-                  <span>{run?.iterations ?? 0} iterações</span>
-                  <span className="font-mono">
-                    {run ? spanBetween(run.startedAt, run.finishedAt) : "—"}
-                  </span>
+                  <span>{run.iterations} iterações</span>
+                  <span className="font-mono">{spanBetween(run.startedAt, run.finishedAt)}</span>
                   <span className="font-mono">{workspace?.branch ?? "—"}</span>
                   <button onClick={() => setDiff(true)} className="text-primary hover:underline">
                     Ver alterações
@@ -109,7 +111,7 @@ export function HistoryPage({ workspace }: { workspace: WorkspaceView | null }) 
                     Ver evidências
                   </button>
                 </div>
-                {run?.summary && (
+                {run.summary && (
                   <p className="mt-2 text-sm text-foreground/85">{run.summary}</p>
                 )}
               </div>

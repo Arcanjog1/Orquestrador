@@ -1,17 +1,38 @@
+import { useState } from "react";
 import {
+  Archive,
+  ArchiveRestore,
   ChevronsLeft,
   ChevronsRight,
   Folder,
   History,
+  MoreHorizontal,
+  Pencil,
   Plug,
   Plus,
+  Search,
   Settings,
   Sparkles,
+  Trash2,
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { Link } from "@/router";
 import type { ChatSessionView, WorkspaceView } from "@shared/ipc-contract";
 import { SectionLabel } from "./primitives";
+
+/** What the recents list can do to one conversation. */
+export interface SessionActions {
+  rename: (session: ChatSessionView) => void;
+  archive: (session: ChatSessionView, archived: boolean) => void;
+  remove: (session: ChatSessionView) => void;
+}
 
 /**
  * The sidebar, exactly as approved.
@@ -32,6 +53,11 @@ export function AppSidebar({
   onOpenSession,
   onOpenWorkspace,
   accountName,
+  sessionActions,
+  search,
+  onSearch,
+  showArchived,
+  onShowArchived,
 }: {
   collapsed: boolean;
   onToggle: () => void;
@@ -44,7 +70,14 @@ export function AppSidebar({
   onOpenWorkspace: (workspaceId: string) => void;
   /** The first connected account's name, or null when none is connected. */
   accountName: string | null;
+  sessionActions?: SessionActions;
+  /** Title filter and archive toggle, owned by the page so the list is real. */
+  search?: string;
+  onSearch?: (query: string) => void;
+  showArchived?: boolean;
+  onShowArchived?: (show: boolean) => void;
 }) {
+  const [menuFor, setMenuFor] = useState<string | null>(null);
   return (
     <aside
       className={cn(
@@ -86,25 +119,117 @@ export function AppSidebar({
       </div>
 
       <nav className="mt-5 flex-1 overflow-y-auto px-3 pb-3">
-        {!collapsed && <SectionLabel>Recentes</SectionLabel>}
-        <div className="mt-2 space-y-0.5">
+        {!collapsed && (
+          <div className="flex items-center justify-between">
+            <SectionLabel>Recentes</SectionLabel>
+            {onShowArchived && (
+              <button
+                onClick={() => onShowArchived(!showArchived)}
+                className={cn(
+                  "text-[11px] text-muted-foreground transition-colors hover:text-foreground",
+                  showArchived && "text-primary",
+                )}
+                data-testid="toggle-archived"
+              >
+                {showArchived ? "Ocultar arquivadas" : "Arquivadas"}
+              </button>
+            )}
+          </div>
+        )}
+        {!collapsed && onSearch && (
+          <label className="mt-2 flex items-center gap-2 rounded-md border border-border bg-surface px-2 py-1">
+            <Search className="size-3.5 shrink-0 text-muted-foreground" />
+            <input
+              value={search ?? ""}
+              onChange={(e) => onSearch(e.target.value)}
+              placeholder="Buscar conversas"
+              className="w-full bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground"
+              data-testid="session-search"
+            />
+          </label>
+        )}
+        <div className="mt-2 space-y-0.5" data-testid="session-list">
           {sessions.map((t) => (
-            <button
+            <div
               key={t.id}
-              onClick={() => onOpenSession(t.id)}
               className={cn(
-                "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-sidebar-foreground/85 transition-colors hover:bg-sidebar-accent hover:text-foreground",
-                t.id === activeSessionId && "bg-sidebar-accent text-foreground",
-                collapsed && "justify-center px-0",
+                "group flex w-full items-center gap-1 rounded-md text-sm text-sidebar-foreground/85 transition-colors hover:bg-sidebar-accent hover:text-foreground",
+                (t.id === activeSessionId || menuFor === t.id) && "bg-sidebar-accent text-foreground",
+                t.archivedAt && "text-sidebar-foreground/55",
               )}
-              title={t.title}
+              data-testid={`session-${t.id}`}
             >
-              <History className="size-4 shrink-0 text-muted-foreground" />
-              {!collapsed && <span className="truncate">{t.title}</span>}
-            </button>
+              <button
+                onClick={() => onOpenSession(t.id)}
+                className={cn(
+                  "flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left",
+                  collapsed && "justify-center px-0",
+                )}
+                title={t.title}
+                data-testid={`open-session-${t.id}`}
+              >
+                {t.archivedAt ? (
+                  <Archive className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <History className="size-4 shrink-0 text-muted-foreground" />
+                )}
+                {!collapsed && <span className="truncate">{t.title}</span>}
+              </button>
+              {!collapsed && sessionActions && (
+                <DropdownMenu
+                  open={menuFor === t.id}
+                  onOpenChange={(open) => setMenuFor(open ? t.id : null)}
+                >
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      className={cn(
+                        "mr-1 grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground focus:opacity-100 group-hover:opacity-100",
+                        menuFor === t.id && "opacity-100",
+                      )}
+                      aria-label={`Opções de ${t.title}`}
+                      data-testid={`session-menu-${t.id}`}
+                    >
+                      <MoreHorizontal className="size-4" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-44">
+                    <DropdownMenuItem
+                      onClick={() => sessionActions.rename(t)}
+                      data-testid={`rename-session-${t.id}`}
+                    >
+                      <Pencil className="size-3.5" /> Renomear
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => sessionActions.archive(t, !t.archivedAt)}
+                      data-testid={`archive-session-${t.id}`}
+                    >
+                      {t.archivedAt ? (
+                        <>
+                          <ArchiveRestore className="size-3.5" /> Desarquivar
+                        </>
+                      ) : (
+                        <>
+                          <Archive className="size-3.5" /> Arquivar
+                        </>
+                      )}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onClick={() => sessionActions.remove(t)}
+                      className="text-danger focus:text-danger"
+                      data-testid={`delete-session-${t.id}`}
+                    >
+                      <Trash2 className="size-3.5" /> Apagar
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+            </div>
           ))}
           {!collapsed && sessions.length === 0 && (
-            <p className="px-2 py-1.5 text-xs text-muted-foreground">Nenhuma tarefa ainda.</p>
+            <p className="px-2 py-1.5 text-xs text-muted-foreground">
+              {search ? "Nenhuma conversa com esse título." : "Nenhuma tarefa ainda."}
+            </p>
           )}
         </div>
 

@@ -170,6 +170,14 @@ export class OrchestrationService {
     return toRunView(run, this.database.runs.steps(runId).length);
   }
 
+  /** The execution history of a project, newest first. */
+  listForWorkspace(workspaceId: string): RunView[] {
+    this.database.workspaces.require(workspaceId);
+    return this.database.runs
+      .listForWorkspace(workspaceId)
+      .map((run) => toRunView(run, this.database.runs.steps(run.id).length));
+  }
+
   // -- the loop ------------------------------------------------------------
 
   private async execute(

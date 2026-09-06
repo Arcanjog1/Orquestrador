@@ -29,7 +29,7 @@ import { cn } from "@/lib/utils";
 import type { Agent } from "@/lib/orchestrator-data";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { AccountProgressEvent, AccountView, WorkspaceView } from "@shared/ipc-contract";
-import { api } from "@/lib/api";
+import { api, messageOf } from "@/lib/api";
 import { AgentIdentity, ProviderIcon, SectionLabel, StatBlock } from "./primitives";
 import { TeamForm } from "./TeamForm";
 
@@ -242,6 +242,120 @@ export function TeamDialog({
             }}
           />
         )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Renames a conversation. The title is what the recents list shows and what
+ * search matches; saving is `chat.renameSession`.
+ */
+export function RenameSessionDialog({
+  session,
+  onOpenChange,
+  onRenamed,
+}: {
+  session: { id: string; title: string } | null;
+  onOpenChange: (v: boolean) => void;
+  onRenamed: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setTitle(session?.title ?? "");
+    setError(null);
+  }, [session]);
+
+  const save = async () => {
+    if (!session || !title.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.chat.renameSession({ sessionId: session.id, title: title.trim() });
+      onOpenChange(false);
+      onRenamed();
+    } catch (e) {
+      setError(messageOf(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={session !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle className="text-sm">Renomear conversa</DialogTitle>
+          <DialogDescription className="text-xs">
+            O novo título aparece em Recentes e no histórico.
+          </DialogDescription>
+        </DialogHeader>
+        <Input
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void save();
+          }}
+          maxLength={200}
+          autoFocus
+          data-testid="rename-session-title"
+        />
+        {error && <p className="text-xs text-danger">{error}</p>}
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancelar
+          </Button>
+          <Button
+            onClick={() => void save()}
+            disabled={saving || !title.trim()}
+            data-testid="rename-session-save"
+          >
+            {saving && <Loader2 className="size-3.5 animate-spin" />} Salvar
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * A yes/no for something that cannot be undone. The caller does the work in
+ * `onConfirm`, so the dialog itself never touches the bridge.
+ */
+export function ConfirmDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  confirmLabel,
+  onConfirm,
+  busy = false,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  busy?: boolean;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle className="text-sm">{title}</DialogTitle>
+          <DialogDescription className="text-xs">{description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Voltar
+          </Button>
+          <Button variant="destructive" onClick={onConfirm} disabled={busy} data-testid="confirm">
+            {busy && <Loader2 className="size-3.5 animate-spin" />} {confirmLabel}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

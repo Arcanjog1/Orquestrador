@@ -52,10 +52,14 @@ export const REQUEST_CHANNELS = [
 
   'chat.listSessions',
   'chat.createSession',
+  'chat.renameSession',
+  'chat.archiveSession',
+  'chat.deleteSession',
   'chat.listMessages',
   'chat.sendMessage',
 
   'run.get',
+  'run.list',
   'run.cancel',
 ] as const;
 
@@ -238,6 +242,13 @@ export interface ChatSessionView {
   readonly workspaceId: string;
   readonly title: string;
   readonly createdAt: string;
+  /** Moves whenever a message lands or the title changes; the recents order. */
+  readonly updatedAt: string;
+  /** Non-null while the conversation is archived (hidden, not deleted). */
+  readonly archivedAt: string | null;
+  readonly messageCount: number;
+  /** The latest run this conversation started, when there is one. */
+  readonly lastRun: { readonly id: string; readonly status: string } | null;
 }
 
 export interface ChatMessageView {
@@ -264,6 +275,8 @@ export interface RunView {
   readonly status: string;
   readonly iterations: number;
   readonly summary: string | null;
+  /** What the person asked for, as sent. Survives the conversation's deletion. */
+  readonly objective: string;
   readonly startedAt: string;
   readonly finishedAt: string | null;
 }
@@ -364,11 +377,30 @@ export interface IpcMap {
     response: { removed: boolean };
   };
 
-  'chat.listSessions': { request: { workspaceId: string }; response: readonly ChatSessionView[] };
+  /**
+   * Conversations of one project, newest activity first. Archived ones are
+   * left out unless asked for; `query` narrows by title.
+   */
+  'chat.listSessions': {
+    request: { workspaceId: string; includeArchived?: boolean; query?: string };
+    response: readonly ChatSessionView[];
+  };
   'chat.createSession': {
     request: { workspaceId: string; title: string };
     response: ChatSessionView;
   };
+  'chat.renameSession': { request: { sessionId: string; title: string }; response: ChatSessionView };
+  /** Hides or brings back a conversation. Nothing is deleted either way. */
+  'chat.archiveSession': {
+    request: { sessionId: string; archived: boolean };
+    response: ChatSessionView;
+  };
+  /**
+   * Removes the conversation and its messages for good. Runs it started are
+   * kept in the execution history, with their evidence; files in the project
+   * are never touched. Refused while one of its runs is still going.
+   */
+  'chat.deleteSession': { request: { sessionId: string }; response: { deleted: boolean } };
   'chat.listMessages': { request: { sessionId: string }; response: readonly ChatMessageView[] };
   'chat.sendMessage': {
     request: { sessionId: string; text: string };
@@ -376,6 +408,8 @@ export interface IpcMap {
   };
 
   'run.get': { request: { runId: string }; response: RunView };
+  /** Every run of a project, newest first - the execution history. */
+  'run.list': { request: { workspaceId: string }; response: readonly RunView[] };
   'run.cancel': { request: { runId: string }; response: { cancelled: boolean } };
 }
 

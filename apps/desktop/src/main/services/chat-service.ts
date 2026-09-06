@@ -7,7 +7,7 @@
  * render the message and the "Analisando..." state without blocking.
  */
 
-import type { Database } from '../core.js';
+import type { ChatSessionRecord, Database, ListSessionsOptions } from '../core.js';
 import { newId } from '../core.js';
 import type { ChatMessageView, ChatSessionView, RunView } from '../../shared/ipc-contract.js';
 import type { OrchestrationService } from './orchestration-service.js';
@@ -27,16 +27,51 @@ export class ChatService {
     private readonly orchestration: OrchestrationService,
   ) {}
 
-  listSessions(workspaceId: string): ChatSessionView[] {
+  listSessions(workspaceId: string, options: ListSessionsOptions = {}): ChatSessionView[] {
     this.database.workspaces.require(workspaceId);
-    return this.database.chat.listSessions(workspaceId).map(toSessionView);
+    return this.database.chat.listSessions(workspaceId, options).map((s) => this.view(s));
   }
 
   createSession(workspaceId: string, title: string): ChatSessionView {
     this.database.workspaces.require(workspaceId);
-    return toSessionView(
-      this.database.chat.createSession({ id: newId('chat'), workspaceId, title }),
-    );
+    return this.view(this.database.chat.createSession({ id: newId('chat'), workspaceId, title }));
+  }
+
+  renameSession(sessionId: string, title: string): ChatSessionView {
+    this.database.chat.requireSession(sessionId);
+    return this.view(this.database.chat.renameSession(sessionId, title));
+  }
+
+  /** Hides a conversation from the list, or brings it back. Never deletes. */
+  archiveSession(sessionId: string, archived: boolean): ChatSessionView {
+    this.database.chat.requireSession(sessionId);
+    return this.view(this.database.chat.setSessionArchived(sessionId, archived));
+  }
+
+  /**
+   * Deletes the conversation and its messages.
+   *
+   * Its runs stay in the execution history (their `session_id` becomes NULL)
+   * so evidence and verdicts are never lost with a conversation, and nothing in
+   * the project folder is touched. A conversation with a run still going is
+   * refused: cancel first, then delete.
+   */
+  deleteSession(sessionId: string): boolean {
+    this.database.chat.requireSession(sessionId);
+    const live = this.database.runs
+      .listForSession(sessionId)
+      .find((run) => run.status === 'RUNNING' || run.status === 'PENDING');
+    if (live) {
+      throw new ChatError('Cancele a execução em andamento antes de apagar esta conversa.');
+    }
+    return this.database.chat.deleteSession(sessionId);
+  }
+
+  private view(record: ChatSessionRecord): ChatSessionView {
+    return toSessionView(record, {
+      messageCount: this.database.chat.countMessages(record.id),
+      lastRun: this.database.runs.listForSession(record.id).at(-1) ?? null,
+    });
   }
 
   listMessages(sessionId: string): ChatMessageView[] {
@@ -52,6 +87,10 @@ export class ChatService {
         'Escolha quem supervisiona e quem executa neste projeto antes de enviar uma tarefa.',
       );
     }
+
+    // Writing to an archived conversation reopens it: a person who found it in
+    // the archive and sent something expects to see it in the list again.
+    if (session.archived_at) this.database.chat.setSessionArchived(sessionId, false);
 
     const message = toMessageView(
       this.database.chat.addMessage({ sessionId, author: 'user', body: text }),

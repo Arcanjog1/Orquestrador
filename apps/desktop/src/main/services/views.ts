@@ -9,12 +9,19 @@
 import type { ChatSessionRecord, MessageRecord, RunRecord } from '../core.js';
 import type { ChatMessageView, ChatSessionView, RunView } from '../../shared/ipc-contract.js';
 
-export function toSessionView(record: ChatSessionRecord): ChatSessionView {
+export function toSessionView(
+  record: ChatSessionRecord,
+  extra: { messageCount: number; lastRun: RunRecord | null },
+): ChatSessionView {
   return {
     id: record.id,
     workspaceId: record.workspace_id,
     title: record.title,
     createdAt: record.created_at,
+    updatedAt: record.updated_at,
+    archivedAt: record.archived_at ?? null,
+    messageCount: extra.messageCount,
+    lastRun: extra.lastRun ? { id: extra.lastRun.id, status: extra.lastRun.status } : null,
   };
 }
 
@@ -37,6 +44,7 @@ export function toRunView(record: RunRecord, iterations: number): RunView {
     status: record.status,
     iterations,
     summary: record.termination_reason,
+    objective: record.objective,
     startedAt: record.started_at,
     finishedAt: record.finished_at,
   };

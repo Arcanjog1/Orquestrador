@@ -14,6 +14,8 @@ import {
   DiffDialog,
   EvidenceDialog,
   TeamDialog,
+  RenameSessionDialog,
+  ConfirmDialog,
 } from "@/components/orch/dialogs";
 import { reasoningLabel, suggestions, type Agent } from "@/lib/orchestrator-data";
 import {
@@ -73,6 +75,11 @@ export function WorkspacePage({
 
   const [sessions, setSessions] = useState<readonly ChatSessionView[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const [renaming, setRenaming] = useState<ChatSessionView | null>(null);
+  const [deleting, setDeleting] = useState<ChatSessionView | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
   const [messages, setMessages] = useState<readonly ChatMessageView[]>([]);
   const [run, setRun] = useState<RunView | null>(null);
   const [stage, setStage] = useState<string | null>(null);
@@ -87,13 +94,59 @@ export function WorkspacePage({
   const loadSessions = useCallback(async () => {
     if (!workspace) return;
     try {
-      const list = await api.chat.listSessions({ workspaceId: workspace.id });
+      const list = await api.chat.listSessions({
+        workspaceId: workspace.id,
+        includeArchived: showArchived,
+        ...(search.trim() ? { query: search.trim() } : {}),
+      });
       setSessions(list);
-      setSessionId((current) => (current && list.some((s) => s.id === current) ? current : list[0]?.id ?? null));
+      // A filter narrows the list, not the conversation being read: only when
+      // the open one is truly gone does the selection move.
+      setSessionId((current) => {
+        if (current && list.some((s) => s.id === current)) return current;
+        if (current && (search.trim() || !showArchived)) return current;
+        return list[0]?.id ?? null;
+      });
     } catch (error) {
       fail(error);
     }
-  }, [workspace, fail]);
+  }, [workspace, fail, search, showArchived]);
+
+  const sessionActions = {
+    rename: (session: ChatSessionView) => setRenaming(session),
+    archive: async (session: ChatSessionView, archived: boolean) => {
+      try {
+        await api.chat.archiveSession({ sessionId: session.id, archived });
+        toast(archived ? "Conversa arquivada" : "Conversa restaurada");
+        await loadSessions();
+      } catch (error) {
+        fail(error);
+      }
+    },
+    remove: (session: ChatSessionView) => setDeleting(session),
+  };
+
+  async function confirmDelete() {
+    if (!deleting) return;
+    setDeletingBusy(true);
+    try {
+      await api.chat.deleteSession({ sessionId: deleting.id });
+      toast("Conversa apagada");
+      if (sessionId === deleting.id) {
+        setSessionId(null);
+        setMessages([]);
+        setRun(null);
+        setStage(null);
+        setStages([]);
+      }
+      setDeleting(null);
+      await loadSessions();
+    } catch (error) {
+      fail(error);
+    } finally {
+      setDeletingBusy(false);
+    }
+  }
 
   useEffect(() => {
     setSessionId(null);
@@ -101,6 +154,11 @@ export function WorkspacePage({
     setRun(null);
     setStage(null);
     setStages([]);
+    setSearch("");
+    setShowArchived(false);
+  }, [workspace?.id]);
+
+  useEffect(() => {
     void loadSessions();
   }, [loadSessions]);
 
@@ -322,6 +380,11 @@ export function WorkspacePage({
         accountName={
           accounts.find((a) => a.state === "connected")?.name ?? accounts[0]?.name ?? null
         }
+        sessionActions={sessionActions}
+        search={search}
+        onSearch={setSearch}
+        showArchived={showArchived}
+        onShowArchived={setShowArchived}
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
@@ -396,6 +459,27 @@ export function WorkspacePage({
 
       <DiffDialog open={diffOpen} onOpenChange={setDiffOpen} workspace={workspace} />
       <EvidenceDialog open={evidenceOpen} onOpenChange={setEvidenceOpen} workspace={workspace} />
+      <RenameSessionDialog
+        session={renaming}
+        onOpenChange={(v) => !v && setRenaming(null)}
+        onRenamed={() => {
+          toast("Conversa renomeada");
+          void loadSessions();
+        }}
+      />
+      <ConfirmDialog
+        open={deleting !== null}
+        onOpenChange={(v) => !v && setDeleting(null)}
+        title="Apagar conversa?"
+        description={
+          deleting
+            ? `"${deleting.title}" e suas mensagens serão removidas. As execuções que ela iniciou continuam no histórico, e nenhum arquivo do projeto é alterado.`
+            : ""
+        }
+        confirmLabel="Apagar conversa"
+        busy={deletingBusy}
+        onConfirm={() => void confirmDelete()}
+      />
       <TeamDialog
         open={teamOpen}
         onOpenChange={setTeamOpen}

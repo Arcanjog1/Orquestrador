@@ -185,6 +185,14 @@ export const modelName = str({
   what: 'a model name',
 });
 
+/** A conversation title as a person types it: one line, not blank. */
+export const sessionTitle: Validator<string> = (value, path) => {
+  const s = str({ min: 1, max: 200 })(value, path);
+  if (/[\r\n]/.test(s)) fail(path, 'must be a single line');
+  if (s.trim().length === 0) fail(path, 'must not be blank');
+  return s.trim();
+};
+
 /** One role of a workspace team: the account, and how it should run. */
 export const teamMember = obj<{ accountId: string; model?: string; reasoning?: string }>(
   { accountId: id, model: modelName, reasoning: oneOf(REASONING_LEVELS) },
@@ -289,11 +297,18 @@ export const REQUEST_VALIDATORS: {
   ),
   'verifications.remove': obj({ workspaceId: id, id }),
 
-  'chat.listSessions': obj({ workspaceId: id }),
+  'chat.listSessions': obj(
+    { workspaceId: id, includeArchived: bool, query: str({ min: 0, max: 200 }) },
+    { optional: ['includeArchived', 'query'] },
+  ),
   'chat.createSession': obj({ workspaceId: id, title: str({ min: 1, max: 200 }) }),
+  'chat.renameSession': obj({ sessionId: id, title: sessionTitle }),
+  'chat.archiveSession': obj({ sessionId: id, archived: bool }),
+  'chat.deleteSession': obj({ sessionId: id }),
   'chat.listMessages': obj({ sessionId: id }),
   'chat.sendMessage': obj({ sessionId: id, text: messageText }),
 
   'run.get': obj({ runId: id }),
+  'run.list': obj({ workspaceId: id }),
   'run.cancel': obj({ runId: id }),
 };
