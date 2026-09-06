@@ -579,8 +579,19 @@ test('a conversation is renamed, archived, found and deleted from the real sideb
     await waitForText(window, /Renomear conversa/, 10_000);
     await type(window, 'rename-session-title', 'Conversa renomeada');
     await click(window, 'rename-session-save');
-    text = await waitForText(window, /Conversa renomeada/, 10_000);
-    assert.doesNotMatch(text, /Primeira conversa/);
+    // The toast says "renomeada" before the list has re-read itself; the
+    // row is what must change.
+    const renamedRow = Date.now() + 10_000;
+    let row = '';
+    while (Date.now() < renamedRow) {
+      row = await window.webContents.executeJavaScript(
+        `document.querySelector('[data-testid="session-${first.id}"]')?.textContent ?? ''`,
+      );
+      if (/Conversa renomeada/.test(row)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.match(row, /Conversa renomeada/);
+    assert.doesNotMatch(row, /Primeira conversa/);
     const listed = await window.webContents.executeJavaScript(
       `window.api.chat.listSessions(${JSON.stringify({ workspaceId: workspace.id })})`,
     );
