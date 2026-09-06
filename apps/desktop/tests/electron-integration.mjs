@@ -137,7 +137,7 @@ test('the real Database opens, migrates, writes, reads and survives a reopen', (
     assert.equal(db.schemaVersion, db.expectedSchemaVersion);
     db.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -270,7 +270,7 @@ test('a workspace added over IPC is persisted and listed back', async () => {
     const listed = await window.webContents.executeJavaScript('window.api.workspace.list()');
     assert.ok(listed.some((w) => w.id === created.id));
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -340,7 +340,7 @@ test('a verification is added, edited and switched off on the real Settings scre
     await waitForText(window, /Desativada/, 15_000);
     assert.equal((await stored())[0].enabled, false);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -548,7 +548,7 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
     const popover = await waitForText(window, /Conta: Claude Trabalho/, 10_000);
     assert.match(popover, /gpt-5\.1-codex/);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -641,7 +641,7 @@ test('a conversation is renamed, archived, found and deleted from the real sideb
     );
     assert.deepEqual(after.map((s) => s.id), [second.id], 'deleted from the database, archive kept');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -703,7 +703,7 @@ test('a run that cannot start says which account is missing, and "Detalhes" show
     assert.equal(runs[0].failureKind, 'readiness');
     assert.equal(runs[0].objective, 'crie hello.txt');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -762,7 +762,7 @@ test('the header renames the project and switches branches the git way, asking w
     assert.equal(git('branch', '--show-current').trim(), 'main');
     assert.equal(readFileSync(join(dir, 'a.txt'), 'utf8'), 'two\n', 'the change was carried, not dropped');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTree(dir);
   }
 });
 
@@ -1028,6 +1028,20 @@ async function openMenu(window, testid) {
   `);
   if (done !== 'opened') throw new Error(`no element with data-testid="${testid}"`);
   await new Promise((r) => setTimeout(r, 150));
+}
+
+/**
+ * Removes a scratch folder. On Windows a handle can still be open on it for
+ * a moment after git ran there, and rmSync answers EPERM; a few retries
+ * cover that, and a folder that still will not go is a temp folder, not a
+ * failed assertion.
+ */
+function removeTree(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch {
+    // Left for the OS to clean; the test's result stands.
+  }
 }
 
 /** Clicks the element carrying a `data-testid`, failing loudly if it is absent. */
