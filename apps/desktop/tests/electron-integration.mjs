@@ -690,8 +690,9 @@ test('a run that cannot start says which account is missing, and "Detalhes" show
     assert.match(card, /não está configurado|Conecte a conta/);
 
     await click(window, 'run-failed-details');
-    const detail = await waitForText(window, /Detalhes da execução/, 10_000);
-    assert.match(detail, /FAILED/);
+    // The dialog opens before the record arrives ("Lendo o registro..."):
+    // wait for the record itself, not for the dialog's title.
+    const detail = await waitForText(window, /Detalhes da execução[\s\S]*\bFAILED\b/, 10_000);
     assert.match(detail, /Prontidão/, 'the readiness step is on the record');
 
     // And the same run is in the history, as a run.

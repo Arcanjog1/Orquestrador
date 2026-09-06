@@ -316,7 +316,27 @@ test('the decision schema still describes exactly the actions the parser allows'
   const { ALLOWED_ACTIONS } = await import('../src/orchestrator/decision-parser.js');
   assert.deepEqual([...DECISION_JSON_SCHEMA.properties.action.enum], [...ALLOWED_ACTIONS]);
   assert.equal(DECISION_JSON_SCHEMA.additionalProperties, false);
-  assert.deepEqual([...DECISION_JSON_SCHEMA.required], ['action']);
+  assert.ok(DECISION_JSON_SCHEMA.required.includes('action'));
+});
+
+test('the decision schema passes the strict validation codex exec asks the API for', async () => {
+  // codex-rs 0.153.4 sends `text.format.strict = true` on every exec turn;
+  // the Responses API then refuses any object that does not list every
+  // property in `required`. The schema must satisfy that before a real run
+  // can produce a single decision.
+  const { DECISION_JSON_SCHEMA, strictSchemaProblems } = await import(
+    '../src/orchestrator/decision-schema.js'
+  );
+  assert.deepEqual(strictSchemaProblems(DECISION_JSON_SCHEMA), []);
+  assert.deepEqual(
+    [...DECISION_JSON_SCHEMA.required].sort(),
+    Object.keys(DECISION_JSON_SCHEMA.properties).sort(),
+    'strict mode: every property is required, optional ones are nullable',
+  );
+  // And the check itself catches the shape the previous schema had.
+  const lax = { type: 'object', additionalProperties: false, required: ['action'], properties: { action: { type: 'string' }, task: { type: 'string' } } };
+  assert.ok(strictSchemaProblems(lax).some((p) => p.includes('task')));
+  assert.ok(strictSchemaProblems({ type: 'object', properties: {}, required: [] }).length > 0, 'additionalProperties is mandatory');
 });
 
 test('Codex is told the answer shape and asked to write it to a file', async () => {

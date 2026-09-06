@@ -201,6 +201,8 @@ for (const runtimeId of runtimes) {
       say('catalogue with max: catalogue requested', String(catalogue.catalogueRequested));
       say('catalogue with max: turn completed', String(catalogue.turnRequested && catalogue.producedDecision));
       say('catalogue with max: exit', `${catalogue.exitCode}`);
+      say('output schema: sent / strict', `${catalogue.schemaSent} / ${catalogue.schemaStrict}`);
+      say('output schema: strict-mode problems', catalogue.schemaProblems.join('; ') || 'none');
       for (const line of catalogue.stderrTail.slice(-3)) say('catalogue with max: stderr', line);
       if (!catalogue.pass) throw new Error('the installed Codex did not survive a catalogue with max');
     }

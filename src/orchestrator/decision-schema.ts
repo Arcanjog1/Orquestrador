@@ -9,18 +9,34 @@
  * message rather than leaving the shape to a prompt and hoping. The parser
  * still validates afterwards - a schema tells the model what to produce, it
  * does not prove what arrived.
+ *
+ * **Strict mode.** `codex exec` (codex-rs 0.153.4, `session/turn.rs`) sends
+ * the schema as `text.format = {type: "json_schema", strict: true, ...}`, and
+ * the Responses API validates a strict schema before the model sees it: every
+ * object must carry `additionalProperties: false` and list *every* property
+ * in `required`; an optional field is expressed as a nullable type. A schema
+ * that merely lists `action` as required is rejected with HTTP 400 before any
+ * decision is produced - so the shape below follows those rules, and
+ * `strictSchemaProblems` is the check that keeps it that way.
  */
 
 import { ALLOWED_ACTIONS } from './decision-parser.js';
 
-export const DECISION_SCHEMA_VERSION = 1;
+export const DECISION_SCHEMA_VERSION = 2;
 
 export const DECISION_JSON_SCHEMA = {
-  $schema: 'https://json-schema.org/draft/2020-12/schema',
   title: 'OrchestratorDecision',
   type: 'object',
   additionalProperties: false,
-  required: ['action'],
+  required: [
+    'action',
+    'task',
+    'acceptanceCriteria',
+    'verificationCommands',
+    'summary',
+    'reason',
+    'relevantFiles',
+  ],
   properties: {
     action: {
       type: 'string',
@@ -28,8 +44,8 @@ export const DECISION_JSON_SCHEMA = {
       description: 'What the orchestrator wants to happen next.',
     },
     task: {
-      type: 'string',
-      description: 'What the coding agent must do. Required when action is "delegate".',
+      type: ['string', 'null'],
+      description: 'What the coding agent must do. Required when action is "delegate"; null otherwise.',
     },
     acceptanceCriteria: {
       type: 'array',
@@ -44,16 +60,78 @@ export const DECISION_JSON_SCHEMA = {
         'not registered is reported as a failure and never executed.',
     },
     summary: {
-      type: 'string',
+      type: ['string', 'null'],
       description: 'One line for the user. Not reasoning.',
     },
     reason: {
-      type: 'string',
-      description: 'Why the run cannot continue. Required when action is "blocked".',
+      type: ['string', 'null'],
+      description: 'Why the run cannot continue. Required when action is "blocked"; null otherwise.',
     },
     relevantFiles: {
       type: 'array',
       items: { type: 'string' },
+      description: 'Files the coding agent should look at first. Empty when there are none.',
     },
   },
 } as const;
+
+/**
+ * Problems a strict structured-output validator would raise for `schema`.
+ *
+ * Mirrors the documented rules of OpenAI strict mode, which is what the
+ * Codex CLI asks for on every `exec` turn: objects close themselves with
+ * `additionalProperties: false`, list every property in `required`, and use
+ * only the supported keywords. Empty means the schema will be accepted.
+ */
+export function strictSchemaProblems(schema: unknown, path = '$'): string[] {
+  const problems: string[] = [];
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+    return [`${path}: a schema must be an object`];
+  }
+  const node = schema as Record<string, unknown>;
+  const types = Array.isArray(node.type) ? (node.type as unknown[]) : [node.type];
+  if (types.includes('object')) {
+    if (node.additionalProperties !== false) {
+      problems.push(`${path}: objects must set additionalProperties to false`);
+    }
+    const properties =
+      node.properties && typeof node.properties === 'object'
+        ? (node.properties as Record<string, unknown>)
+        : {};
+    const keys = Object.keys(properties);
+    const required = Array.isArray(node.required) ? (node.required as unknown[]) : [];
+    for (const key of keys) {
+      if (!required.includes(key)) problems.push(`${path}.${key}: every property must be listed in required`);
+    }
+    for (const key of required) {
+      if (typeof key !== 'string' || !keys.includes(key)) {
+        problems.push(`${path}: required names "${String(key)}", which is not a property`);
+      }
+    }
+    for (const key of keys) problems.push(...strictSchemaProblems(properties[key], `${path}.${key}`));
+  }
+  if (types.includes('array')) {
+    if (node.items === undefined) problems.push(`${path}: arrays must declare items`);
+    else problems.push(...strictSchemaProblems(node.items, `${path}[]`));
+  }
+  for (const keyword of Object.keys(node)) {
+    if (!STRICT_KEYWORDS.has(keyword)) problems.push(`${path}: "${keyword}" is not a supported keyword`);
+  }
+  return problems;
+}
+
+/** Keywords strict mode accepts; anything else is refused by the API. */
+const STRICT_KEYWORDS = new Set([
+  'type',
+  'properties',
+  'required',
+  'additionalProperties',
+  'items',
+  'enum',
+  'const',
+  'description',
+  'title',
+  'anyOf',
+  '$defs',
+  '$ref',
+]);

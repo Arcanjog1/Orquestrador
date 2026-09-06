@@ -68,7 +68,9 @@ export function parseDecision(raw: string): ParseResult {
   if (files.error) return fail(files.error, raw);
   if (files.value.length) decision.relevantFiles = files.value;
 
-  if (obj.summary !== undefined) {
+  // Under the strict schema every field is present, and an absent value is
+  // `null`; the parser reads null exactly as it reads a missing key.
+  if (obj.summary !== undefined && obj.summary !== null) {
     if (typeof obj.summary !== 'string') return fail('"summary" must be a string.', raw);
     decision.summary = obj.summary.trim();
   }
@@ -134,12 +136,12 @@ export function buildRepairPrompt(error: string, raw: string): string {
     'Schema:',
     '{',
     '  "action": "delegate" | "verify" | "done" | "blocked",',
-    '  "task": "string, required when action is delegate",',
-    '  "reason": "string, required when action is blocked",',
+    '  "task": "string, required when action is delegate; null otherwise",',
+    '  "reason": "string, required when action is blocked; null otherwise",',
     '  "acceptanceCriteria": ["string", ...],',
     '  "verificationCommands": ["string", ...],',
     '  "relevantFiles": ["string", ...],',
-    '  "summary": "one short line, optional"',
+    '  "summary": "one short line, or null"',
     '}',
     '',
     'Do not change your decision. Repeat the same decision in the correct format.',

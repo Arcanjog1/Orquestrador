@@ -13,6 +13,13 @@
  * carries `max` and `ultra` - the entries the real backend returns, taken
  * from the CLI's own bundled catalogue - and reports whether it crashes.
  *
+ * The turn is the adapter's turn: the decision schema is passed with
+ * `--output-schema`, and the fake backend checks what arrives the way the
+ * real Responses API does - `text.format.strict` is true on every exec
+ * turn, so the schema must satisfy strict structured-output rules (every
+ * property required, objects closed) or the real API answers 400 before
+ * any decision exists.
+ *
  * Nothing external is contacted: a fake ChatGPT backend runs on localhost,
  * `chatgpt`-mode credentials are forged in a throwaway CODEX_HOME (no real
  * account is involved or touched), and `codex exec` is driven exactly as the
@@ -31,6 +38,7 @@
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } from 'node:zlib';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -50,7 +58,20 @@ const DECISION = {
   acceptanceCriteria: ['hello.txt exists with the exact content'],
   verificationCommands: [],
   summary: 'probe decision',
+  reason: null,
+  relevantFiles: [],
 };
+
+/** The application's own decision schema and strict-mode check, from dist. */
+async function loadDecisionSchema() {
+  const dist = new URL('../dist/orchestrator/decision-schema.js', import.meta.url);
+  try {
+    const mod = await import(dist.href);
+    return { schema: mod.DECISION_JSON_SCHEMA, problemsOf: mod.strictSchemaProblems };
+  } catch {
+    return null;
+  }
+}
 
 async function resolveCodex() {
   const explicit = arg('--codex');
@@ -65,6 +86,22 @@ async function resolveCodex() {
   throw new Error('pass --codex <path> or --managed');
 }
 
+/** The request body as text, whatever Content-Encoding the client chose. */
+function decodeBody(raw, encoding) {
+  switch ((encoding ?? '').trim().toLowerCase()) {
+    case 'zstd':
+      return zstdDecompressSync(raw).toString('utf8');
+    case 'gzip':
+      return gunzipSync(raw).toString('utf8');
+    case 'br':
+      return brotliDecompressSync(raw).toString('utf8');
+    case 'deflate':
+      return inflateSync(raw).toString('utf8');
+    default:
+      return raw.toString('utf8');
+  }
+}
+
 function base64url(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
 }
@@ -77,6 +114,9 @@ function fakeJwt(claims) {
 export async function probeCodexCatalog(codexPath, { log = () => {} } = {}) {
   const catalogue = readFileSync(FIXTURE, 'utf8');
   const seen = [];
+  const decisionSchema = await loadDecisionSchema();
+  /** What the fake saw in `text.format` of the turn request, if anything. */
+  let format = null;
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -87,9 +127,30 @@ export async function probeCodexCatalog(codexPath, { log = () => {} } = {}) {
       return;
     }
     if (req.method === 'POST' && url.pathname.endsWith('/responses')) {
-      let body = '';
-      req.on('data', (c) => (body += c));
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
+        // The CLI compresses the turn request (zstd, seen on 0.153.x); the
+        // fake reads it the way the real backend does, by Content-Encoding.
+        let body = '';
+        try {
+          body = decodeBody(Buffer.concat(chunks), req.headers['content-encoding']);
+        } catch (error) {
+          if (process.env.AI_ORCHESTRATOR_PROBE_DUMP === '1') log(`# request body could not be decoded: ${String(error)}`);
+        }
+        try {
+          const parsed = JSON.parse(body);
+          format = parsed?.text?.format ?? null;
+          if (process.env.AI_ORCHESTRATOR_PROBE_DUMP === '1') {
+            log(`# request keys: ${Object.keys(parsed ?? {}).join(', ')}`);
+            log(`# request text: ${JSON.stringify(parsed?.text ?? null).slice(0, 600)}`);
+          }
+        } catch (error) {
+          format = null;
+          if (process.env.AI_ORCHESTRATOR_PROBE_DUMP === '1') {
+            log(`# request body not JSON (${String(error).slice(0, 80)}); headers: ${JSON.stringify(req.headers)}; head: ${body.slice(0, 200)}`);
+          }
+        }
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
         const item = {
           type: 'response.output_item.done',
@@ -166,6 +227,11 @@ export async function probeCodexCatalog(codexPath, { log = () => {} } = {}) {
 
   const lastMessage = join(home, 'last-message.txt');
   const args = ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '--output-last-message', lastMessage];
+  if (decisionSchema) {
+    const schemaPath = join(home, 'decision.schema.json');
+    writeFileSync(schemaPath, JSON.stringify(decisionSchema.schema, null, 2), 'utf8');
+    args.push('--output-schema', schemaPath);
+  }
   log(`# ${codexPath} ${args.join(' ')}`);
 
   const result = await new Promise((resolve) => {
@@ -210,6 +276,17 @@ export async function probeCodexCatalog(codexPath, { log = () => {} } = {}) {
   const catalogueRequested = seen.some((s) => s.endsWith('/models'));
   const turnRequested = seen.some((s) => s.endsWith('/responses'));
   const producedDecision = decision !== null && decision.includes('"action"');
+
+  // The schema check: when the application's schema was sent, the CLI must
+  // have forwarded it in strict mode, and it must satisfy the strict rules
+  // the real API enforces. Both are asserted against what the fake received,
+  // not against what was written to disk.
+  const schemaSent = decisionSchema !== null;
+  const schemaStrict = format?.type === 'json_schema' && format?.strict === true;
+  const schemaProblems =
+    schemaSent && format?.schema ? decisionSchema.problemsOf(format.schema) : schemaSent ? ['the schema did not reach the request'] : [];
+  const schemaOk = !schemaSent || (schemaStrict && schemaProblems.length === 0);
+
   return {
     exitCode: result.code,
     signal: result.signal,
@@ -218,9 +295,12 @@ export async function probeCodexCatalog(codexPath, { log = () => {} } = {}) {
     turnRequested,
     producedDecision,
     decision,
+    schemaSent,
+    schemaStrict,
+    schemaProblems,
     requests: seen,
     stderrTail: result.stderr.split(/\r?\n/).filter((l) => l.trim()).slice(-6),
-    pass: !unknownVariant && catalogueRequested && turnRequested && producedDecision,
+    pass: !unknownVariant && catalogueRequested && turnRequested && producedDecision && schemaOk,
   };
 }
 
@@ -234,6 +314,7 @@ if (invokedDirectly) {
   console.log(`# catalogue requested: ${result.catalogueRequested}`);
   console.log(`# turn requested: ${result.turnRequested}`);
   console.log(`# decision produced: ${result.producedDecision}`);
+  console.log(`# schema sent: ${result.schemaSent}; strict: ${result.schemaStrict}; problems: ${result.schemaProblems.join('; ') || 'none'}`);
   for (const line of result.stderrTail) console.log(`#   stderr: ${line}`);
   console.log(result.pass ? '# PASS: the catalogue with max was accepted and the decision came back' : '# FAIL');
   process.exit(result.pass ? 0 : 1);

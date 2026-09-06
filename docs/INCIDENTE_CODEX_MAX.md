@@ -66,8 +66,40 @@ conduz `codex exec` como o adapter conduz):
    CLI e o caminho do binário que rodou nos Detalhes. O erro de parse continua
    registrado como nota, não como manchete. Nenhum reparo é tentado num crash.
 5. **Sonda no CI.** `probe-real-runtimes.mjs --runtime codex` agora instala o
-   0.153.4 real e o coloca diante do catálogo com `max`; se o CLI recusar, o
-   job falha.
+   0.153.4 real e o coloca diante do catálogo com `max`, com o esquema de
+   decisão em `--output-schema`; se o CLI recusar o catálogo, ou se o esquema
+   que ele envia em modo estrito violar as regras da API, o job falha.
+
+## O segundo defeito que a sonda encontrou: o esquema de saída
+
+Com o catálogo aceito, a sonda passou a conduzir o turno exatamente como o
+adapter conduz — com `--output-schema` — e a ler o pedido que o binário
+envia ao backend (o corpo vem comprimido com zstd; o backend falso o
+descomprime pelo `Content-Encoding`). O `codex exec` 0.153.x envia o esquema
+como `text.format = {type: "json_schema", strict: true, ...}`
+(`codex-rs/core/src/session/turn.rs`, `codex-api/src/common.rs`). No modo
+estrito, a API de Responses valida o esquema antes de o modelo o ver: todo
+objeto precisa de `additionalProperties: false` e de **todas** as
+propriedades em `required`; um campo opcional é um tipo anulável.
+
+O esquema anterior listava só `action` em `required`. Um turno real
+responderia HTTP 400 antes de qualquer decisão — o loop nunca teria passado
+da iteração 1 mesmo com o Codex certo.
+
+O que mudou:
+
+- `DECISION_JSON_SCHEMA` (versão 2) segue as regras do modo estrito:
+  `required` lista todas as propriedades; `task`, `summary` e `reason` são
+  `["string","null"]`; `$schema` foi removido (palavra-chave não aceita).
+- `parseDecision` lê `null` como ausência, e continua exigindo `task` em
+  `delegate` e `reason` em `blocked`.
+- `strictSchemaProblems()` reproduz as regras do modo estrito; um teste
+  unitário e a sonda de CI (contra o pedido real que o binário envia)
+  falham se o esquema voltar a violá-las.
+
+Prova com o binário oficial (`probe-codex-catalog.mjs`): `schema sent:
+true; strict: true; problems: none`, decisão devolvida no arquivo de última
+mensagem com `reason: null` e `relevantFiles: []`.
 
 ## Se acontecer de novo
 
