@@ -12,7 +12,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ManagedRuntime, versionNumberOf } from '../src/runtime/managed-runtime.js';
@@ -20,6 +21,7 @@ import { RuntimeManager } from '../src/runtime/runtime-manager.js';
 import { appPaths, ensureAppPaths } from '../src/runtime/paths.js';
 import { RUNTIME_COMPATIBILITY } from '../src/runtime/compatibility.js';
 import {
+  RuntimeError,
   RuntimeIncompatibleError,
   type ResolvedDownload,
   type RuntimeId,
@@ -39,6 +41,7 @@ class CodexOnPath extends ManagedRuntime {
   readonly displayName = 'Codex';
   readonly sources: readonly RuntimeSource[];
   protected readonly systemExecutableNames = ['codex'] as const;
+  protected override readonly homeEnvVar = 'CODEX_HOME';
 
   constructor(
     sources: RuntimeSource[],
@@ -366,6 +369,168 @@ test('a failed install says which step failed, per source, and the service hands
     assert.equal(codex.ready, false);
     assert.equal(codex.needsManaged, true);
     assert.match(codex.lastFailure?.detail ?? '', /resolving: GitHub API answered HTTP 403/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+
+/* ------------------------------------------------------------------------ *
+ * Source failure versus local execution failure. The Windows incident
+ * downloaded the same 136 MB build twice to fail the same way twice: the
+ * bytes were fine, the machine could not run them. That case now stops at
+ * the first source and says so; a source that really fails still falls
+ * through to the next one.
+ * ------------------------------------------------------------------------ */
+
+/** A source whose archive holds an executable with the given script, with a fetch that counts downloads. */
+function scriptedSource(
+  home: string,
+  version: string,
+  id: string,
+  body: string,
+): { source: RuntimeSource; routes: Record<string, { bytes: Buffer }>; url: string } {
+  const archive = buildFakeArchive(join(home, `archive-${id}`), 'codex', version, body);
+  const url = `https://example.invalid/${id}.tgz`;
+  const source: RuntimeSource = {
+    id,
+    label: id,
+    contract: 'DOCUMENTED',
+    integrityStrategy: 'NPM_INTEGRITY',
+    async resolve(): Promise<ResolvedDownload> {
+      return { url, version, archiveKind: 'tgz', executableNames: archive.executableNames, integrity: archive.integrity };
+    },
+  };
+  return { source, routes: { [url]: { bytes: archive.bytes } }, url };
+}
+
+function countingFetch(routes: Record<string, { bytes: Buffer }>): { fetch: typeof fetch; hits: Record<string, number> } {
+  const inner = makeFetch(routes);
+  const hits: Record<string, number> = {};
+  const counting = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    hits[url] = (hits[url] ?? 0) + 1;
+    return inner(input, init);
+  }) as typeof fetch;
+  return { fetch: counting, hits };
+}
+
+const HANGING_BODY =
+  process.platform === 'win32' ? '@echo off\r\nping -n 61 127.0.0.1 >nul\r\n' : '#!/bin/sh\nsleep 60\n';
+
+test('an executable this machine cannot run stops at the first source: the second build is the same bytes', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lao-local-fail-'));
+  try {
+    const paths = pathsFor(home);
+    const tested = RUNTIME_COMPATIBILITY.codex.testedVersion;
+    const first = scriptedSource(home, tested, 'github-like', HANGING_BODY);
+    const second = scriptedSource(home, tested, 'npm-like', HANGING_BODY);
+    const { fetch, hits } = countingFetch({ ...first.routes, ...second.routes });
+    const runtime = new CodexOnPath(
+      [first.source, second.source],
+      { paths, fetchImpl: fetch, probeTimeouts: { primaryMs: 1500, followUpMs: 800 } },
+      null,
+    );
+
+    const messages: string[] = [];
+    await assert.rejects(
+      runtime.install((p) => messages.push(`${p.phase}: ${p.message}`)),
+      (error: unknown) => {
+        assert.ok(error instanceof RuntimeError);
+        assert.equal(error.userMessage, 'Não foi possível preparar Codex automaticamente.');
+        return true;
+      },
+    );
+
+    const failure = runtime.lastFailure!;
+    assert.ok(failure, 'the failure is kept for the interface');
+    assert.deepEqual(
+      failure.trail.map((t) => [t.source, t.phase]),
+      [
+        ['github-like', 'staging-health-check'],
+        ['github-like', 'staging-health-check'],
+      ],
+      'one source tried, then the note that the rest were not',
+    );
+    assert.match(failure.trail[1]!.message, /falha local de execução, não da fonte/);
+    assert.equal(hits[first.url], 1, 'the first build was downloaded once');
+    assert.equal(hits[second.url] ?? 0, 0, 'the second build was not downloaded');
+
+    // The record says what the process did, not "did not report a version within 180 s".
+    assert.match(failure.detail, /estado: PROCESS_STARTED_NO_OUTPUT/);
+    assert.match(failure.detail, /PID \d+ · estado PROCESS_STARTED_NO_OUTPUT · stdout nada · stderr nada · saída nenhuma/);
+    assert.match(failure.detail, /argv \["--version"\]/);
+    assert.match(failure.detail, /child_process direto/);
+    assert.match(failure.detail, /CODEX_HOME vazio/);
+    assert.match(failure.detail, /cópia em /);
+    assert.match(failure.detail, /encerramento: /);
+    assert.doesNotMatch(failure.detail, /did not report a version within/);
+    assert.ok(messages.some((m) => /staging-health-check: Testando de novo/.test(m)), messages.join('\n'));
+    assert.ok(messages.some((m) => /staging-health-check: Comparando com uma execução direta/.test(m)));
+
+    // Nothing was installed, and staging is clean.
+    assert.equal((await runtime.detect()).origin, 'missing');
+    assert.deepEqual(readdirSync(paths.staging), []);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a source that really fails still falls through to the next one', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lao-source-fail-'));
+  try {
+    const paths = pathsFor(home);
+    const tested = RUNTIME_COMPATIBILITY.codex.testedVersion;
+    // The first source's bytes verify (their own checksum) but are no archive.
+    const junk = Buffer.from('this is not a tarball');
+    const junkUrl = 'https://example.invalid/junk.tgz';
+    const junkSource: RuntimeSource = {
+      id: 'junk',
+      label: 'junk',
+      contract: 'DOCUMENTED',
+      integrityStrategy: 'NPM_INTEGRITY',
+      async resolve(): Promise<ResolvedDownload> {
+        return {
+          url: junkUrl,
+          version: tested,
+          archiveKind: 'tgz',
+          executableNames: fakeExecutableNames('codex'),
+          integrity: `sha512-${createHash('sha512').update(junk).digest('base64')}`,
+        };
+      },
+    };
+    const good = scriptedSource(home, tested, 'good', fakeExecutableBody(`codex-cli ${tested}`));
+    const { fetch, hits } = countingFetch({ [junkUrl]: { bytes: junk }, ...good.routes });
+    const runtime = new CodexOnPath([junkSource, good.source], { paths, fetchImpl: fetch }, null);
+
+    const result = await runtime.install();
+    assert.equal(result.manifest.sourceId, 'good');
+    assert.equal(result.health.healthy, true);
+    assert.equal(hits[junkUrl], 1);
+    assert.equal(hits[good.url], 1, 'the extraction failure of the first source moved on to the second');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a first start held for longer than the check, then a fast one: installed, with the delay on record', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lao-slow-start-'));
+  try {
+    const paths = pathsFor(home);
+    const tested = RUNTIME_COMPATIBILITY.codex.testedVersion;
+    const marker = join(home, 'ran-once');
+    const body =
+      process.platform === 'win32'
+        ? `@echo off\r\nif not exist "${marker}" (echo.> "${marker}" & ping -n 31 127.0.0.1 >nul)\r\necho codex-cli ${tested}\r\n`
+        : `#!/bin/sh\nif [ ! -f "${marker}" ]; then touch "${marker}"; sleep 30; fi\necho "codex-cli ${tested}"\n`;
+    const slow = scriptedSource(home, tested, 'slow', body);
+    const { fetch } = countingFetch(slow.routes);
+    const runtime = new CodexOnPath([slow.source], { paths, fetchImpl: fetch, probeTimeouts: { primaryMs: 1500, followUpMs: 5000 } }, null);
+
+    const result = await runtime.install();
+    assert.equal(result.health.healthy, true);
+    assert.equal(result.manifest.version, tested);
+    assert.equal((await runtime.detect()).origin, 'managed');
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

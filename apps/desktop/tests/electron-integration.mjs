@@ -246,6 +246,11 @@ test('the onboarding screen renders the runtime checklist from diagnose()', asyn
   assert.match(text, /Claude Code/);
   assert.match(text, /Git/);
   assert.match(text, /AI Orchestrator/);
+
+  // No Codex on this machine: the step says so in words, next to "Continuar",
+  // rather than letting the person walk on as if the orchestrator could run.
+  const note = await waitForText(window, /Codex indisponível/, 15_000);
+  assert.match(note, /o orquestrador não executa nenhuma tarefa até o Codex ficar Pronto/);
 });
 
 test('the interface reports the real Electron and Chromium it is running on', async () => {

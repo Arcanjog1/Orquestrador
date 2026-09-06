@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Check, ChevronRight, Folder, Loader2, Sparkles, X } from "lucide-react";
+import { Check, ChevronRight, Copy, Folder, Loader2, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AddProjectDialog, LoginDialog } from "@/components/orch/dialogs";
@@ -61,6 +61,16 @@ export function OnboardingPage({
   const [error, setError] = useState<string | null>(null);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [showDetail, setShowDetail] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  // The record behind "Detalhes" is what a retest sends back; one click copies
+  // it whole. The page's own clipboard API, on a user gesture, no bridge.
+  const copyDetail = (key: string, text: string) => {
+    void navigator.clipboard
+      ?.writeText(text)
+      .then(() => setCopied(key))
+      .catch(() => setCopied(null));
+  };
   const [progress, setProgress] = useState<Record<string, RuntimeProgressEvent>>({});
   const [addProject, setAddProject] = useState(false);
   // The first project - the real entity conversations are filed under -
@@ -292,12 +302,21 @@ export function OnboardingPage({
                     )}
                   </p>
                   {showDetail && errorDetail && (
-                    <pre
-                      className="mt-2 max-h-48 overflow-auto rounded-md border border-border bg-surface p-2 text-[11px] whitespace-pre-wrap break-all text-muted-foreground"
-                      data-testid="runtime-error-detail"
-                    >
-                      {errorDetail}
-                    </pre>
+                    <>
+                      <pre
+                        className="mt-2 max-h-48 overflow-auto rounded-md border border-border bg-surface p-2 text-[11px] whitespace-pre-wrap break-all text-muted-foreground"
+                        data-testid="runtime-error-detail"
+                      >
+                        {errorDetail}
+                      </pre>
+                      <button
+                        className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground underline"
+                        onClick={() => copyDetail("error", errorDetail)}
+                        data-testid="runtime-error-copy"
+                      >
+                        <Copy className="size-3" /> {copied === "error" ? "Copiado" : "Copiar detalhes"}
+                      </button>
+                    </>
                   )}
                 </div>
               )}
@@ -315,10 +334,23 @@ export function OnboardingPage({
                           <pre className="mt-2 max-h-48 overflow-auto rounded-md border border-border bg-surface p-2 text-[11px] whitespace-pre-wrap break-all">
                             {r.lastFailure!.detail}
                           </pre>
+                          <button
+                            className="mt-1 inline-flex items-center gap-1 text-xs underline"
+                            onClick={() => copyDetail(r.runtimeId, r.lastFailure!.detail)}
+                            data-testid={`runtime-failure-copy-${r.runtimeId}`}
+                          >
+                            <Copy className="size-3" /> {copied === r.runtimeId ? "Copiado" : "Copiar detalhes"}
+                          </button>
                         </details>
                       ))}
                   </div>
                 )}
+              {runtimes.some((r) => r.runtimeId === "codex" && !r.ready) && busy === null && (
+                <p className="mt-3 text-xs text-attention" data-testid="codex-unavailable">
+                  Codex indisponível: o orquestrador não executa nenhuma tarefa até o Codex ficar Pronto.
+                  Você pode continuar a configuração e voltar a este passo em Configurações → Componentes.
+                </p>
+              )}
               <Button className="mt-6" data-testid="continue" onClick={() => setStep(2)}>
                 Continuar
               </Button>

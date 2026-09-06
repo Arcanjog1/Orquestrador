@@ -19,6 +19,7 @@ export class CodexRuntime extends ManagedRuntime {
   readonly displayName = 'Codex';
   readonly sources: readonly RuntimeSource[];
   protected readonly systemExecutableNames = ['codex'] as const;
+  protected override readonly homeEnvVar = 'CODEX_HOME';
 
   constructor(options: ManagedRuntimeOptions = {}) {
     super(options);
@@ -31,6 +32,7 @@ export class ClaudeCodeRuntime extends ManagedRuntime {
   readonly displayName = 'Claude Code';
   readonly sources: readonly RuntimeSource[];
   protected readonly systemExecutableNames = ['claude'] as const;
+  protected override readonly homeEnvVar = 'CLAUDE_CONFIG_DIR';
 
   constructor(options: ManagedRuntimeOptions = {}) {
     super(options);

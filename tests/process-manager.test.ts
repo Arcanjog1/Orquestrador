@@ -223,3 +223,71 @@ test('truncates output beyond the cap instead of growing without bound', async (
   assert.equal(result.truncated, true);
   assert.ok(result.stdout.includes('truncated'));
 });
+
+// ---------------------------------------------------------------------------
+// The lifecycle trace: what a person reads when a child "did not answer".
+// ---------------------------------------------------------------------------
+
+test('the trace records PID, start, first output, exit and close for an ordinary run', async () => {
+  const pm = new ProcessManager();
+  const result = await pm.run({
+    command: process.execPath,
+    args: ['-e', 'process.stdout.write("hello"); process.stderr.write("warn")'],
+    cwd: process.cwd(),
+  });
+  const t = result.trace;
+  assert.equal(t.pid, typeof t.pid === 'number' ? t.pid : null);
+  assert.equal(typeof t.pid, 'number');
+  assert.ok(t.startedAt, 'the spawn event was seen');
+  assert.ok(t.firstStdoutAt && t.firstStderrAt);
+  assert.equal(t.stdoutBytes, 5);
+  assert.equal(t.stderrBytes, 4);
+  assert.ok(t.exitedAt && t.closedAt, 'exit and close both arrived');
+  assert.equal(t.streamsLingered, false);
+  assert.equal(t.termination, null);
+  assert.equal(t.errorCode, null);
+});
+
+test('a refused spawn carries the error code in the trace', async () => {
+  const pm = new ProcessManager();
+  const result = await pm.run({ command: join(tmpdir(), 'no-such-program-xyz'), cwd: process.cwd() });
+  assert.equal(result.outcome, 'spawn-error');
+  assert.equal(result.trace.errorCode, 'ENOENT');
+  assert.equal(result.trace.pid === null || typeof result.trace.pid === 'number', true);
+  assert.ok(result.trace.errorAt);
+});
+
+test('a timeout records every stop attempt and whether the child was gone', async () => {
+  const pm = new ProcessManager();
+  const result = await pm.run({
+    command: process.execPath,
+    args: ['-e', 'setInterval(() => {}, 1000)'],
+    cwd: process.cwd(),
+    timeoutMs: 500,
+    graceMs: 2000,
+  });
+  assert.equal(result.outcome, 'timeout');
+  const termination = result.trace.termination;
+  assert.ok(termination, 'the trace says how the child was stopped');
+  assert.equal(termination.reason, 'timeout');
+  assert.ok(termination.attempts.length >= 1);
+  assert.equal(termination.attempts[termination.attempts.length - 1]!.exited, true, 'the last attempt found the child gone');
+  assert.equal(result.trace.survivedTermination, false);
+});
+
+test('a child that exits while a grandchild keeps its pipes still settles, with the output so far', async () => {
+  const pm = new ProcessManager();
+  // The grandchild inherits stdout and lives on, so `close` would wait for it.
+  const grandchild = 'setTimeout(() => {}, 20000)';
+  const parent = `process.stdout.write("codex-cli 0.153.4\\n"); require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: ['ignore', 'inherit', 'inherit'], detached: true }).unref();`;
+  const started = Date.now();
+  const result = await pm.run({ command: process.execPath, args: ['-e', parent], cwd: process.cwd(), timeoutMs: 15_000 });
+  const took = Date.now() - started;
+  assert.equal(result.outcome, 'completed');
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, 'codex-cli 0.153.4\n');
+  assert.equal(result.trace.streamsLingered, true, 'exit came, close did not');
+  assert.ok(result.trace.exitedAt && !result.trace.closedAt);
+  assert.ok(took >= 4500 && took < 14_000, `settled after the exit/close grace, not the timeout: ${took} ms`);
+  await pm.cancelAll();
+});

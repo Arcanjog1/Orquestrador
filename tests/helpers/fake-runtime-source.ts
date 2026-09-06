@@ -81,6 +81,8 @@ export function buildFakeArchive(
   workDir: string,
   executableBaseName: string,
   version = 'fake 1.2.3',
+  /** The executable's script, when printing `version` is not what the test needs. */
+  body?: string,
 ): FakeArchive {
   const stage = join(workDir, 'archive-src');
   const binDir = join(stage, 'package', 'vendor', 'bin');
@@ -89,7 +91,7 @@ export function buildFakeArchive(
   mkdirSync(resourceDir, { recursive: true });
 
   const executableName = fakeExecutableName(executableBaseName);
-  writeFileSync(join(binDir, executableName), fakeExecutableBody(version), { mode: 0o755 });
+  writeFileSync(join(binDir, executableName), body ?? fakeExecutableBody(version), { mode: 0o755 });
   writeFileSync(join(resourceDir, 'data.txt'), 'the executable needs this sibling\n');
 
   const tarballPath = join(workDir, 'fake.tgz');

@@ -58,7 +58,11 @@ export class RuntimeService {
             message: status.lastFailure.message,
             detail: redact(status.lastFailure.detail),
           }
-        : null,
+        : !status.health.healthy && status.health.detail
+          ? // An installed build that stopped answering: the same record, so
+            // "Detalhes" says what the executable did rather than only "não respondeu".
+            { at: report.checkedAt, message: status.health.problem ?? 'Não respondeu', detail: redact(status.health.detail) }
+          : null,
     }));
     return {
       ready: report.ready,

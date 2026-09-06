@@ -35,6 +35,9 @@ for (let i = 0; i < argv.length; i += 1) {
 const runtimes = requested.length > 0 ? requested : ['codex', 'claude-code'];
 /** Also drive the product's adapter against the binary it just installed. */
 const withAdapters = argv.includes('--adapters');
+/** Also install from every other source and compare the executables' SHA-256. */
+const compareSources = argv.includes('--compare-sources');
+const { describeProbe, inspectExecutable, rawSpawn, versionLineOf } = await load('runtime/execution-probe.js');
 
 /**
  * The adapters, loaded from the desktop build.
@@ -137,6 +140,49 @@ for (const runtimeId of runtimes) {
 
     if (!m.integrity.verified) throw new Error('integrity was not verified');
     if (!install.health.healthy) throw new Error('health check failed');
+
+    // The execution record the product writes behind "Detalhes", on the
+    // binary just installed: static facts, the product's own path, and the
+    // direct child_process spawn beside it, so the two can be compared on a
+    // real Windows runner and on a person's machine alike.
+    const probe = await runtime.probe(install.executablePath, 120_000, { thorough: true });
+    const exeFacts = probe.static;
+    say('executable bytes', String(exeFacts.bytes));
+    say('executable sha256', exeFacts.sha256 ?? '(not hashed)');
+    if (exeFacts.pe) say('executable PE', `${exeFacts.pe.machine} ${exeFacts.pe.subsystem} signed=${exeFacts.pe.signed}`);
+    say('executable MOTW', exeFacts.zoneIdentifier ?? 'none');
+    say('executable open r+', String(exeFacts.openForWrite));
+    for (const run of probe.runs) {
+      say(`run: ${run.label}`, `${run.state} in ${run.durationMs} ms, pid ${run.pid}, exit ${run.exitCode}, stdout ${run.stdoutBytes} B, stderr ${run.stderrBytes} B`);
+    }
+    const direct = await rawSpawn({ executablePath: install.executablePath, args: ['--version'], cwd: home, env: process.env, timeoutMs: 120_000 });
+    say('run: child_process direct', `${direct.outcome} in ${direct.durationMs} ms, pid ${direct.trace.pid}, exit ${direct.exitCode}, "${versionLineOf(direct.stdout, direct.stderr) ?? ''}"`);
+    const again = await runtime.probe(install.executablePath, 120_000, { thorough: false, hash: false });
+    say('run: second start', `${again.state} in ${again.runs[0]?.durationMs} ms`);
+    if (process.env.AI_ORCHESTRATOR_PROBE_DUMP_HELP === '1') console.log(describeProbe(probe));
+    if (probe.state !== 'OK') throw new Error(`execution probe: ${probe.state}`);
+
+    // Do the other sources ship the same executable? Then a second download
+    // after a local execution failure could never have helped.
+    if (compareSources) {
+      for (const other of runtime.sources.filter((source) => source.id !== m.sourceId)) {
+        try {
+          const otherHome = mkdtempSync(join(tmpdir(), 'lao-probe-src-'));
+          const otherPaths = ensureAppPaths(appPaths({ ...process.env, AI_ORCHESTRATOR_HOME: otherHome }));
+          const otherManager = new RuntimeManager({ paths: otherPaths });
+          const otherRuntime = otherManager.get(runtimeId);
+          Object.defineProperty(otherRuntime, 'sources', { value: [other] });
+          const otherInstall = await otherManager.install(runtimeId);
+          const otherFacts = await inspectExecutable(otherInstall.executablePath);
+          const same = otherFacts.sha256 === exeFacts.sha256;
+          say(`source ${other.id}: executable sha256`, `${otherFacts.sha256} (${same ? 'SAME as' : 'DIFFERS from'} ${m.sourceId})`);
+          say(`source ${other.id}: bytes`, String(otherFacts.bytes));
+          rmSync(otherHome, { recursive: true, force: true });
+        } catch (error) {
+          say(`source ${other.id}`, `could not compare: ${error?.userMessage ?? error?.message ?? error}`);
+        }
+      }
+    }
 
     // What the binary really is, and what it really offers.
     const version = await processManager.run({

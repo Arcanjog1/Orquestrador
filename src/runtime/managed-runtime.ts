@@ -24,6 +24,7 @@ import { scanPath } from '../preflight/preflight.js';
 import { extractArchive, findExecutable, planPromotion } from './archive.js';
 import { downloadAndVerify } from './downloader.js';
 import { moveDirectoryWithRetry, removeTreeWithRetry } from './fs-retry.js';
+import { describeProbe, probeExecution, probeFailedLocally, type ExecutionProbe } from './execution-probe.js';
 import {
   judgeAuthenticode,
   readAuthenticode,
@@ -65,6 +66,12 @@ export interface ManagedRuntimeOptions {
   fetchImpl?: typeof fetch;
   /** Overrides the compiled-in policy. Used by tests. */
   compatibility?: RuntimeCompatibility;
+  /**
+   * How long the staged build gets to answer `--version`, and how long each
+   * comparison run gets after a failure. Tests shorten them; the product's
+   * values are the defaults.
+   */
+  probeTimeouts?: { primaryMs: number; followUpMs: number };
 }
 
 /** One step of one install attempt, as the record a person can open shows it. */
@@ -88,6 +95,12 @@ class InstallStepError extends Error {
   constructor(
     readonly phase: InstallPhase,
     message: string,
+    /**
+     * True when the bytes were fine and this machine could not run them. A
+     * second source ships the same build, so trying it downloads 136 MB to
+     * reach the same place; the record says so instead.
+     */
+    readonly local = false,
   ) {
     super(message);
     this.name = 'InstallStepError';
@@ -96,6 +109,8 @@ class InstallStepError extends Error {
 
 /** A downloaded executable's first run: the antivirus scans it first. */
 const STAGED_VERSION_TIMEOUT_MS = 180_000;
+/** Each comparison run after a failed first run; a start held by a scan is fast by then. */
+const FOLLOW_UP_TIMEOUT_MS = 30_000;
 
 /** Filenames inside a runtime's directory. */
 const CURRENT = 'current';
@@ -108,6 +123,8 @@ export abstract class ManagedRuntime {
   abstract readonly displayName: string;
   abstract readonly sources: readonly RuntimeSource[];
   protected readonly versionArgs: string[] = ['--version'];
+  /** The variable naming this runtime's profile directory (`CODEX_HOME`), if any. */
+  protected readonly homeEnvVar: string | null = null;
   protected abstract readonly systemExecutableNames: readonly string[];
 
   protected readonly paths: AppPaths;
@@ -115,6 +132,7 @@ export abstract class ManagedRuntime {
   protected readonly target: RuntimeTarget;
   protected readonly fetchImpl: typeof fetch | undefined;
   private readonly compatibilityOverride: RuntimeCompatibility | undefined;
+  private readonly probeTimeouts: { primaryMs: number; followUpMs: number };
   /** The last failed install, kept so the interface can show its steps. */
   lastFailure: InstallFailure | null = null;
 
@@ -127,6 +145,10 @@ export abstract class ManagedRuntime {
     };
     this.fetchImpl = options.fetchImpl;
     this.compatibilityOverride = options.compatibility;
+    this.probeTimeouts = options.probeTimeouts ?? {
+      primaryMs: STAGED_VERSION_TIMEOUT_MS,
+      followUpMs: FOLLOW_UP_TIMEOUT_MS,
+    };
   }
 
   get installDir(): string {
@@ -300,29 +322,67 @@ export abstract class ManagedRuntime {
     }
     const version = await this.readVersion(detection.executablePath, versionTimeoutMs);
     if (version === null) {
+      // Only now, and briefly: what the executable did, in the record's words.
+      const probe = await this.probe(detection.executablePath, Math.min(versionTimeoutMs ?? 60_000, 30_000), {
+        thorough: false,
+        hash: false,
+      });
       return {
         healthy: false,
         executablePath: detection.executablePath,
         problem: `${this.displayName} está instalado, mas não respondeu.`,
         remedy: 'Reparar instalação',
+        detail: describeProbe(probe, this.target.platform),
       };
     }
     return { healthy: true, version, executablePath: detection.executablePath };
   }
 
   /**
+   * Static check, then `--version` through the product's own ProcessManager;
+   * with `thorough`, the comparison runs on a failure. Scratch folders go
+   * under `paths.staging`, which Codex accepts as a profile directory (it
+   * refuses one under the system temp folder).
+   */
+  async probe(
+    executablePath: string,
+    timeoutMs: number,
+    options: { thorough: boolean; hash?: boolean; onStep?: (message: string) => void },
+  ): Promise<ExecutionProbe> {
+    return probeExecution({
+      executablePath,
+      args: this.versionArgs,
+      cwd: this.paths.root,
+      processManager: this.processManager,
+      timeoutMs,
+      followUpTimeoutMs: this.probeTimeouts.followUpMs,
+      scratchRoot: this.paths.staging,
+      homeEnvVar: this.homeEnvVar,
+      platform: this.target.platform,
+      arch: this.target.arch,
+      thorough: options.thorough,
+      hash: options.hash !== false,
+      ...(options.onStep ? { onStep: options.onStep } : {}),
+    });
+  }
+
+  /**
    * A check the adapter can extend to confirm the build speaks the interface it
    * relies on. Runs against the staged build before anything is promoted.
    */
-  async capabilityCheck(executablePath: string): Promise<{ ok: boolean; detail: string }> {
-    const version = await this.readVersion(executablePath, STAGED_VERSION_TIMEOUT_MS);
-    if (version === null) {
-      return {
-        ok: false,
-        detail: `the executable did not report a version within ${STAGED_VERSION_TIMEOUT_MS / 1000} s (${executablePath})`,
-      };
+  async capabilityCheck(
+    executablePath: string,
+    onStep?: (message: string) => void,
+  ): Promise<{ ok: boolean; detail: string; local: boolean; probe: ExecutionProbe }> {
+    const probe = await this.probe(executablePath, this.probeTimeouts.primaryMs, {
+      thorough: true,
+      ...(onStep ? { onStep } : {}),
+    });
+    const detail = describeProbe(probe, this.target.platform);
+    if (probe.state === 'OK' || probe.recovered) {
+      return { ok: true, detail, local: false, probe };
     }
-    return { ok: true, detail: `reported "${version}"` };
+    return { ok: false, detail, local: probeFailedLocally(probe), probe };
   }
 
   /**
@@ -472,6 +532,18 @@ export abstract class ManagedRuntime {
         if (err instanceof RuntimeInstallCancelledError) throw err;
         const phase = err instanceof InstallStepError ? err.phase : 'installing';
         trail.push({ source: source.id, phase, message: `${(err as Error).message} (url: ${resolved.url})` });
+        if (err instanceof InstallStepError && err.local) {
+          // The download, the checksum and the extraction were fine; the
+          // machine could not run the result. Another source ships the same
+          // build, so the failure is reported as local, not tried again.
+          trail.push({
+            source: source.id,
+            phase,
+            message:
+              'falha local de execução, não da fonte: as outras fontes entregam o mesmo executável e não foram baixadas',
+          });
+          break;
+        }
       }
     }
 
@@ -573,9 +645,15 @@ export abstract class ManagedRuntime {
       // Prove the staged build works BEFORE it replaces a working one.
       phase = 'staging-health-check';
       report('staging-health-check', 'Testando...');
-      const capability = await this.capabilityCheck(stagedExecutable);
+      const capability = await this.capabilityCheck(stagedExecutable, (message) =>
+        report('staging-health-check', message),
+      );
       if (!capability.ok) {
-        throw new Error(`the downloaded build failed its capability check: ${capability.detail}`);
+        throw new InstallStepError(
+          'staging-health-check',
+          `the downloaded build failed its capability check:\n${capability.detail}`,
+          capability.local,
+        );
       }
 
       const promotion = planPromotion(extractedRoot, stagedExecutable);
@@ -610,7 +688,7 @@ export abstract class ManagedRuntime {
 
       phase = 'health-check';
       report('health-check', 'Testando...');
-      const health = await this.healthCheck(STAGED_VERSION_TIMEOUT_MS);
+      const health = await this.healthCheck(this.probeTimeouts.primaryMs);
 
       // A promoted build that fails its health check is undone immediately.
       if (!health.healthy && this.canRollBack) {

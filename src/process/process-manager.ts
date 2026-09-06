@@ -30,6 +30,48 @@ export interface ProcessResult {
   /** True when output hit `maxOutputBytes` and was cut short. */
   truncated: boolean;
   error?: string;
+  /** What happened to the child, step by step: for a record a person can read. */
+  trace: ProcessTrace;
+}
+
+/** One attempt to stop a child, and whether the child was gone afterwards. */
+export interface TerminationAttempt {
+  method: string;
+  at: string;
+  exited: boolean;
+}
+
+/**
+ * The lifecycle of one child, with timestamps, so "it did not answer" can be
+ * told apart from "it never started", "it started and printed nothing", "it
+ * died with an access violation" and "it exited but something kept its pipes".
+ */
+export interface ProcessTrace {
+  /** Null when the operating system refused to create the process. */
+  pid: number | null;
+  /** When `spawn()` returned. */
+  spawnedAt: string;
+  /** The `spawn` event: the process really exists. Null if it never did. */
+  startedAt: string | null;
+  firstStdoutAt: string | null;
+  firstStderrAt: string | null;
+  stdoutBytes: number;
+  stderrBytes: number;
+  /** The `exit` event. */
+  exitedAt: string | null;
+  /** The `close` event: exit and every pipe closed. */
+  closedAt: string | null;
+  errorAt: string | null;
+  errorCode: string | null;
+  /**
+   * True when the child exited but its pipes stayed open past the grace
+   * period: another process inherited them (on Windows, a handle leaked to a
+   * concurrently spawned child). The result carries what had arrived.
+   */
+  streamsLingered: boolean;
+  /** True when the child was still alive after every stop attempt. */
+  survivedTermination: boolean;
+  termination: { reason: ProcessOutcome; attempts: TerminationAttempt[] } | null;
 }
 
 export interface RunProcessOptions {
@@ -59,6 +101,8 @@ export interface RunProcessOptions {
 }
 
 export const DEFAULT_GRACE_MS = 5_000;
+/** How long `close` may lag `exit` before the result is settled without it. */
+export const EXIT_CLOSE_GRACE_MS = 5_000;
 export const DEFAULT_MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 
 /** What will actually be handed to `child_process.spawn`. */
@@ -158,6 +202,8 @@ export class ProcessManager {
    * a perfectly ordinary `completed` outcome.
    */
   private readonly terminationReason = new WeakMap<ChildProcess, ProcessOutcome>();
+  /** Every stop attempt made on a child, for its trace. */
+  private readonly terminationLog = new WeakMap<ChildProcess, TerminationAttempt[]>();
   private cancelled = false;
 
   /** Number of child processes currently running. */
@@ -173,6 +219,22 @@ export class ProcessManager {
   async run(options: RunProcessOptions): Promise<ProcessResult> {
     const startedAt = new Date();
     const start = Date.now();
+    const trace: ProcessTrace = {
+      pid: null,
+      spawnedAt: startedAt.toISOString(),
+      startedAt: null,
+      firstStdoutAt: null,
+      firstStderrAt: null,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      exitedAt: null,
+      closedAt: null,
+      errorAt: null,
+      errorCode: null,
+      streamsLingered: false,
+      survivedTermination: false,
+      termination: null,
+    };
     const finish = (
       outcome: ProcessOutcome,
       partial: Partial<ProcessResult> = {},
@@ -186,6 +248,7 @@ export class ProcessManager {
       durationMs: Date.now() - start,
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
+      trace,
       ...partial,
     });
 
@@ -220,10 +283,17 @@ export class ProcessManager {
         stdio: stdio === 'inherit' ? 'inherit' : ['pipe', 'pipe', 'pipe'],
       });
     } catch (err) {
+      trace.errorAt = new Date().toISOString();
+      trace.errorCode = (err as NodeJS.ErrnoException)?.code ?? null;
       return finish('spawn-error', { error: describeSpawnError(err, options.command) });
     }
 
     this.live.add(child);
+    trace.pid = child.pid ?? null;
+    trace.spawnedAt = new Date().toISOString();
+    child.once('spawn', () => {
+      trace.startedAt = new Date().toISOString();
+    });
 
     const out = new OutputBuffer(maxBytes);
     const err = new OutputBuffer(maxBytes);
@@ -234,10 +304,14 @@ export class ProcessManager {
       child.stdout?.setEncoding('utf8');
       child.stderr?.setEncoding('utf8');
       child.stdout?.on('data', (chunk: string) => {
+        trace.firstStdoutAt ??= new Date().toISOString();
+        trace.stdoutBytes += Buffer.byteLength(chunk, 'utf8');
         out.push(chunk);
         options.onStdout?.(chunk);
       });
       child.stderr?.on('data', (chunk: string) => {
+        trace.firstStderrAt ??= new Date().toISOString();
+        trace.stderrBytes += Buffer.byteLength(chunk, 'utf8');
         err.push(chunk);
         options.onStderr?.(chunk);
       });
@@ -255,6 +329,7 @@ export class ProcessManager {
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
 
+    let lingerTimer: NodeJS.Timeout | undefined;
     const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
       (resolvePromise) => {
         let settled = false;
@@ -264,20 +339,45 @@ export class ProcessManager {
           resolvePromise({ code, signal: sig });
         };
 
+        // A stop that leaves the child alive must still let `run` return:
+        // the result says the child survived, and the trace says what was
+        // tried. Waiting for a `close` that never comes helps nobody.
+        const stop = async (reason: ProcessOutcome): Promise<void> => {
+          await this.terminate(child, graceMs, reason);
+          if (!settled && child.exitCode === null && child.signalCode === null) {
+            trace.survivedTermination = true;
+            settle(null, null);
+          }
+        };
+
         child.on('error', (e: Error) => {
+          trace.errorAt = new Date().toISOString();
+          trace.errorCode = (e as NodeJS.ErrnoException).code ?? null;
           if (outcome === 'completed') {
             outcome = 'spawn-error';
             errorMessage = describeSpawnError(e, options.command);
           }
           settle(null, null);
         });
-        child.on('close', (code, sig) => settle(code, sig));
+        child.on('exit', (code, sig) => {
+          trace.exitedAt = new Date().toISOString();
+          // `close` normally follows within milliseconds. When it does not,
+          // something else holds the pipes; the output so far is the answer.
+          lingerTimer = setTimeout(() => {
+            trace.streamsLingered = true;
+            settle(code, sig);
+          }, EXIT_CLOSE_GRACE_MS);
+        });
+        child.on('close', (code, sig) => {
+          trace.closedAt = new Date().toISOString();
+          settle(code, sig);
+        });
 
         if (options.timeoutMs && options.timeoutMs > 0) {
           timer = setTimeout(() => {
             outcome = 'timeout';
             errorMessage = `Process exceeded its ${Math.round(options.timeoutMs! / 1000)}s timeout.`;
-            void this.terminate(child, graceMs, 'timeout');
+            void stop('timeout');
           }, options.timeoutMs);
         }
 
@@ -287,7 +387,7 @@ export class ProcessManager {
               outcome = 'cancelled';
               errorMessage = 'Cancelled by the orchestrator.';
             }
-            void this.terminate(child, graceMs, 'cancelled');
+            void stop('cancelled');
           };
           options.signal.addEventListener('abort', onAbort, { once: true });
         }
@@ -295,6 +395,10 @@ export class ProcessManager {
     );
 
     if (timer) clearTimeout(timer);
+    if (lingerTimer) clearTimeout(lingerTimer);
+    const attempts = this.terminationLog.get(child);
+    const reason = this.terminationReason.get(child);
+    if (reason && attempts) trace.termination = { reason, attempts };
     if (onAbort && options.signal) options.signal.removeEventListener('abort', onAbort);
     this.live.delete(child);
 
@@ -348,22 +452,31 @@ export class ProcessManager {
     const pid = child.pid;
     if (pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
     this.terminationReason.set(child, reason);
+    const attempts: TerminationAttempt[] = [];
+    this.terminationLog.set(child, attempts);
+    const record = (method: string, exited: boolean): void => {
+      attempts.push({ method, at: new Date().toISOString(), exited });
+    };
 
     if (process.platform === 'win32') {
       // Ask politely first (no /F), then force the tree.
       await runTaskkill(['/pid', String(pid), '/T']);
-      if (await waitForExit(child, graceMs)) return;
+      const polite = await waitForExit(child, graceMs);
+      record(`taskkill /pid ${pid} /T`, polite);
+      if (polite) return;
       await runTaskkill(['/pid', String(pid), '/T', '/F']);
-      await waitForExit(child, graceMs);
+      record(`taskkill /pid ${pid} /T /F`, await waitForExit(child, graceMs));
       return;
     }
 
     // POSIX: signal the whole process group (negative pid). `detached: true`
     // at spawn time made the child a group leader.
     killGroup(pid, 'SIGTERM');
-    if (await waitForExit(child, graceMs)) return;
+    const term = await waitForExit(child, graceMs);
+    record('SIGTERM (process group)', term);
+    if (term) return;
     killGroup(pid, 'SIGKILL');
-    await waitForExit(child, graceMs);
+    record('SIGKILL (process group)', await waitForExit(child, graceMs));
   }
 }
 
@@ -421,14 +534,16 @@ function waitForExit(child: ChildProcess, ms: number): Promise<boolean> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
   return new Promise<boolean>((resolvePromise) => {
     const timer = setTimeout(() => {
-      child.off('close', onClose);
+      child.off('exit', onExit);
       resolvePromise(false);
     }, ms);
-    const onClose = (): void => {
+    // `exit` is the process being gone, which is the question here; `close`
+    // also needs the pipes, which another process may be holding.
+    const onExit = (): void => {
       clearTimeout(timer);
       resolvePromise(true);
     };
-    child.once('close', onClose);
+    child.once('exit', onExit);
   });
 }
 

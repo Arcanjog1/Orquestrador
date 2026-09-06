@@ -40,6 +40,77 @@ parado que desiste. A sonda real (`probe-real-runtimes --runtime codex`)
 continua instalando o 0.153.4 e atravessando o catálogo com `max` e o
 esquema estrito.
 
+## Bloco A2 — o `codex.exe` extraído não responde no Windows real
+
+**Visto (build f6cc402):** as duas fontes (releases do GitHub e registro npm)
+baixaram, verificaram e extraíram; as duas terminaram em
+`staging-health-check: the executable did not report a version within 180 s`.
+
+**O que essa frase escondia:** ela era emitida para *qualquer* falha de
+`readVersion` — processo recusado pelo Windows, processo que morreu com
+0xC0000005, saída diferente de zero, saída vazia, ou um travamento real. O
+"180 s" não era uma medição; era o teto do timeout copiado para a mensagem.
+Nada dizia qual dos casos aconteceu.
+
+**Provado aqui (sem o PC do usuário):**
+
+| fato | como |
+|---|---|
+| GitHub e npm entregam o **mesmo** `codex.exe` 0.153.4 (SHA-256 `444a3f00…518b`, 295.408.944 bytes) | os dois pacotes baixados e comparados byte a byte; o CI do Windows repete a comparação (`--compare-sources`) |
+| o executável é PE x64, subsistema console, CRT estático (sem `vcruntime140.dll`), assinado (Authenticode) | cabeçalho PE e tabela de importação lidos do arquivo |
+| nem o download por Node nem o `tar.exe` gravam `Zone.Identifier` | mecanismo: só o navegador/Explorer marcam; o probe confere o ADS em cada instalação |
+| nenhum handle nosso fica aberto: o download fecha o arquivo antes de extrair, o `tar.exe` e o PowerShell (Authenticode) são processos que já saíram | leitura do pipeline; o probe tenta abrir o arquivo para escrita antes de executar |
+| antes de `--version` ser tratado, o `codex.exe` 0.153.4 executa `arg0_dispatch`: lê `CODEX_HOME/.env`, cria `CODEX_HOME/tmp/arg0/`, faz limpeza de diretórios antigos e grava `apply_patch.bat` | fonte do Codex (`codex-rs/arg0`, `install-context`) na tag `rust-v0.153.4` |
+| a segunda fonte era um download de 141 MB para chegar ao mesmo resultado | mesmo hash acima |
+
+**O que só o PC do usuário pode responder — e agora responde.** O health
+check do staging virou duas camadas:
+
+1. *Estático:* existe, tamanho estável (duas leituras), SHA-256, cabeçalho
+   MZ/PE, máquina (x64/arm64), subsistema, assinatura, abrir para escrita
+   (handle alheio), `Zone.Identifier`.
+2. *Execução:* `codex.exe --version` pelo ProcessManager, com registro de
+   PID, evento de criação, primeiro byte em stdout/stderr, `exit`, `close`,
+   erro de spawn (código), cada tentativa de encerrar (`taskkill /T`, depois
+   `/T /F`) e se o processo saiu.
+
+Cada resultado tem seu estado: `ACCESS_DENIED`, `FILE_LOCKED`,
+`FILE_MISSING`, `INVALID_EXECUTABLE`, `SPAWN_FAILED`,
+`PROCESS_STARTED_NO_OUTPUT`, `PROCESS_STARTED_STDERR_ONLY`,
+`PROCESS_HUNG`, `PROCESS_EXITED_NO_VERSION`, `PROCESS_EXITED_NONZERO`,
+`PROCESS_CRASHED` (com o nome do NTSTATUS), `PROCESS_KILLED`.
+
+Se a primeira execução falha, o mesmo arquivo é executado de mais quatro
+formas, cada uma para separar um suspeito: **segunda execução** (30 s — um
+primeiro início retido pelo antivírus responde agora), **child_process
+direto** sem o ProcessManager (nosso wrapper?), **sem janela de console**
+(`windowsHide`, só no Windows), **`CODEX_HOME` vazio** (o conteúdo do
+`~/.codex` atual?) e **cópia em pasta controlada** (a pasta de staging?). A
+conclusão de cada comparação vai para o registro. Se a segunda execução
+responde, o build é instalado e o registro diz que o primeiro início demorou.
+
+**Fonte × máquina:** quando o download, o hash e a extração passaram e a
+máquina não executou, a instalação para na primeira fonte e diz: "falha local
+de execução, não da fonte: as outras fontes entregam o mesmo executável e não
+foram baixadas". Uma fonte que falha de verdade (404, hash errado, arquivo
+que não extrai) continua caindo para a próxima.
+
+**Detalhes → Copiar detalhes:** o bloco inteiro (estado, executável com
+bytes/SHA/PE/assinatura/MOTW, argv, cwd, ambiente com nomes e valores seguros,
+cada execução com PID/saída/encerramento, conclusões) copia com um clique,
+no onboarding e no diálogo de login. Sem segredos: proxies aparecem como
+"definido", tokens nunca aparecem.
+
+**ProcessManager:** o registro (`trace`) faz parte de todo resultado; um filho
+que sai mas cujos pipes ficam presos por outro processo (handle herdado no
+Windows) agora conclui em 5 s com a saída que chegou, marcado
+`streamsLingered`, em vez de esperar o timeout inteiro.
+
+**O que não mudou:** 180 s continua sendo o teto da primeira execução; o
+gerenciado só é promovido quando o caminho do produto executou o binário;
+`detect()` continua preferindo o gerenciado; o Codex do PATH continua
+intocado.
+
 ## Bloco B — GitHub Device Flow
 
 **Visto:** "O GitHub não iniciou o login: resposta inesperada".
@@ -122,7 +193,8 @@ Projeto ≠ pasta: o projeto organiza conversas e pode apontar para uma pasta
 3. Abrir o aplicativo: o passo 1 mostra o Codex antigo e prepara o gerenciado
    sozinho (ou pelo botão *Atualizar*): Preparando → Baixando N MB →
    Verificando → Extraindo → Testando → Instalando → Pronto. Se falhar,
-   **Detalhes** diz a fase e o motivo — anote e envie.
+   **Detalhes** diz a fase e o motivo; **Copiar detalhes** copia o registro
+   inteiro (estado, PID, saída, encerramento, comparações) — cole e envie.
 4. Passo 1 fica *Pronto* com Codex 0.153.4 (gerenciado pelo aplicativo).
 5. Contas Codex e Claude conectadas.
 6. GitHub: colar o Client ID do GitHub App (Iv1…/Iv23li…), **Conectar**.

@@ -77,8 +77,11 @@ jobs:
       # and a real `codex --version`. This is the step that answers "No Codex
       # source produced a working binary", so it is required, not advisory.
       - name: Prove the Codex runtime installs for real
-        timeout-minutes: 20
-        run: node scripts/probe-real-runtimes.mjs --runtime codex --adapters
+        timeout-minutes: 25
+        # `--compare-sources` also installs from the npm registry and compares
+        # the two codex.exe by SHA-256: the fact behind "a second source cannot
+        # fix a local execution failure".
+        run: node scripts/probe-real-runtimes.mjs --runtime codex --adapters --compare-sources
 
       # Read Anthropic's real installer before trying to use it, so the
       # resolver is written against what it does rather than a guess. Purely

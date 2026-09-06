@@ -142,6 +142,8 @@ export interface HealthStatus {
   problem?: string;
   /** What the application can do about it, shown next to an action button. */
   remedy?: string;
+  /** The record behind "Detalhes": what the executable did when run. */
+  detail?: string;
 }
 
 /** Phases reported while a runtime is being prepared, for the progress UI. */

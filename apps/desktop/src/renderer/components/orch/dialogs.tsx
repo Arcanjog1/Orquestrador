@@ -516,12 +516,26 @@ export function LoginDialog({
                   {showDetail ? "Ocultar detalhes" : "Detalhes"}
                 </button>
                 {showDetail && (
-                  <pre
-                    className="mt-2 max-h-40 overflow-auto rounded-md border border-border bg-surface p-2 text-[11px] whitespace-pre-wrap break-all text-muted-foreground"
-                    data-testid="login-failure-detail"
-                  >
-                    {progress.detail}
-                  </pre>
+                  <>
+                    <pre
+                      className="mt-2 max-h-40 overflow-auto rounded-md border border-border bg-surface p-2 text-[11px] whitespace-pre-wrap break-all text-muted-foreground"
+                      data-testid="login-failure-detail"
+                    >
+                      {progress.detail}
+                    </pre>
+                    <button
+                      className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground underline"
+                      onClick={() => {
+                        void navigator.clipboard
+                          ?.writeText(progress.detail ?? "")
+                          .then(() => setCopied(true))
+                          .catch(() => setCopied(false));
+                      }}
+                      data-testid="login-failure-copy"
+                    >
+                      <Copy className="size-3" /> {copied ? "Copiado" : "Copiar detalhes"}
+                    </button>
+                  </>
                 )}
               </div>
             )}
