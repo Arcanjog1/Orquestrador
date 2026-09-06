@@ -5,7 +5,7 @@ Orchestrator no Windows. Nenhum passo pede PowerShell, CMD, `npm` ou editor de
 texto: as duas verificações abaixo são linhas de comando que se colam no próprio
 aplicativo.
 
-Escrito em 2026-09-05, para a branch `claude/lovable-on-latest-core`.
+Escrito em 2026-09-05 e atualizado em 2026-09-06, para a branch `claude/lovable-on-latest-core`.
 
 ---
 
@@ -44,6 +44,12 @@ registrada no fim do documento.
 3. Crie um projeto descartável numa pasta vazia — nunca a Modulação Automática,
    nunca um projeto Revit real, nunca o repositório do próprio Orquestrador.
    A pasta precisa ser um repositório git para a evidência ser coletada.
+   Na barra superior, **Orquestrador → Editar equipe**: escolha a conta
+   OpenAI em *Orchestrator* e a conta Anthropic em *Coding worker* (as contas
+   aparecem pelo nome que você deu, por exemplo *Codex Trabalho* e *Claude
+   Trabalho*; modelo e raciocínio são opcionais) e clique em **Salvar equipe**.
+   O envio é recusado, dizendo qual conta falta, enquanto a equipe não estiver
+   completa.
 4. **Settings → Verificações do projeto → Adicionar verificação**, e preencha:
 
    | campo | valor |
