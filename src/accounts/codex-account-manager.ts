@@ -265,6 +265,31 @@ export class CodexAccountManager {
       settled = true;
     });
 
+    // What the person needs from the CLI's output - the page to open and the
+    // one-time code to type there - read from everything received so far, not
+    // from any single chunk: the two are printed together, but a pipe hands
+    // them over in whatever pieces it likes, sometimes with an escape sequence
+    // cut in half. Every progress report from here on carries both, so no one
+    // event is load-bearing and a later report can only add what was missing.
+    let reportedCode: string | null = null;
+    const details = (): { url?: string; code?: string } => {
+      const url = capturedUrl ?? extractUrl(output);
+      // Not a secret - the page is useless without the account's own login -
+      // but it is never written to a log or a database either.
+      const code = extractDeviceCode(output);
+      return { ...(url ? { url } : {}), ...(code ? { code } : {}) };
+    };
+    const waiting = (): void => {
+      const known = details();
+      if (known.code) reportedCode = known.code;
+      report({
+        accountId: account.id,
+        phase: 'waiting-for-completion',
+        message: 'Aguardando você concluir o login...',
+        ...known,
+      });
+    };
+
     const urlDeadline = Date.now() + (options.urlTimeoutMs ?? 45_000);
     while (!capturedUrl && !settled && Date.now() < urlDeadline) {
       capturedUrl = extractUrl(output);
@@ -273,23 +298,27 @@ export class CodexAccountManager {
     }
 
     if (capturedUrl) {
+      const known = details();
+      if (known.code) reportedCode = known.code;
       report({
         accountId: account.id,
         phase: 'awaiting-browser',
         message: 'Abrindo o navegador para você entrar...',
-        url: capturedUrl,
-        // A device flow shows a short code the user must confirm; it is not a
-        // secret, and without it the browser page cannot be completed.
-        ...(extractDeviceCode(output) ? { code: extractDeviceCode(output)! } : {}),
+        ...known,
       });
       await options.openUrl?.(capturedUrl);
     }
 
-    report({
-      accountId: account.id,
-      phase: 'waiting-for-completion',
-      message: 'Aguardando você concluir o login...',
-    });
+    waiting();
+
+    // The code usually follows the URL within the same write; when it does not,
+    // give it a few seconds at a fast cadence rather than the status check's
+    // slower one, and report again as soon as it is there.
+    const codeDeadline = Date.now() + 5_000;
+    while (!reportedCode && !settled && Date.now() < codeDeadline && !options.signal?.aborted) {
+      await sleep(200);
+      if (extractDeviceCode(output)) waiting();
+    }
 
     const completionDeadline = Date.now() + completionTimeoutMs;
     let status = await this.getStatus(account);
@@ -299,6 +328,9 @@ export class CodexAccountManager {
       !options.signal?.aborted
     ) {
       await sleep(2000);
+      // Still worth a look on each pass: a code that only now appeared in the
+      // output must still reach the interface.
+      if (!reportedCode && extractDeviceCode(output)) waiting();
       status = await this.getStatus(account);
       if (settled && status.state !== 'connected') {
         status = await this.getStatus(account);
@@ -344,22 +376,32 @@ export class CodexAccountManager {
   }
 }
 
-/** Removes ANSI escape sequences (colours, cursor moves) from CLI output. */
+/**
+ * Removes ANSI escape sequences (colours, cursor moves) from CLI output.
+ *
+ * Output is read as it streams, so the text may end in the middle of a
+ * sequence - `ESC [` with the final byte still to come. That fragment is
+ * dropped too; left in, its `[` would be taken for part of whatever precedes it.
+ */
 export function stripAnsi(text: string): string {
-  // CSI sequences (ESC [ ... final byte) and the odd lone ESC.
-  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\x1b/g, '');
+  return text
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\[[0-9;?]*[ -/]*$/, '')
+    .replace(/\x1b/g, '');
 }
 
 /**
  * The sign-in URL in some CLI output. Never logged: it can carry a code.
  *
- * An https URL is preferred over an http one: the browser flow announces its
- * local callback server (`http://localhost:1455`) before the address the
- * person must actually visit, and opening the callback is not signing in.
+ * Two rules, both learned from a pipe. An https URL is preferred over an http
+ * one: the browser flow announces its local callback server
+ * (`http://localhost:1455`) before the address the person must actually visit.
+ * And a URL counts only once the character after it has arrived - the text
+ * may end mid-address, and an address cut short is not one to open.
  */
 export function extractUrl(text: string): string | null {
   const clean = stripAnsi(text);
-  const all = clean.match(/https?:\/\/[^\s"'<>)\]\x00-\x1f]+/g) ?? [];
+  const all = clean.match(/https?:\/\/[^\s"'<>)\]\x00-\x1f]+(?=[\s"'<>)\]])/g) ?? [];
   const chosen = all.find((u) => u.startsWith('https://')) ?? all[0];
   return chosen ? chosen.replace(/[.,;]+$/, '') : null;
 }
@@ -369,10 +411,11 @@ export function extractUrl(text: string): string | null {
  *
  * Read from the text with its colour codes removed: the CLI wraps the code in
  * them, and the escape sequence ends in a letter, so on the raw text there is
- * no word boundary in front of the code and nothing would match.
+ * no word boundary in front of the code and nothing would match. As with the
+ * URL, the code counts only once something follows it.
  */
 export function extractDeviceCode(text: string): string | null {
-  const match = /\b([A-Z0-9]{4,8}-[A-Z0-9]{4,8})\b/.exec(stripAnsi(text));
+  const match = /\b([A-Z0-9]{4,8}-[A-Z0-9]{4,8})(?=[\s.,;)\]"'])/.exec(stripAnsi(text));
   return match ? match[1]! : null;
 }
 
