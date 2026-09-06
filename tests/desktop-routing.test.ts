@@ -411,7 +411,7 @@ test('manual selection saved on the team is sent exactly, and the default is aut
   try {
     const before = prepared.fixture.services.workspaces.list().find((w) => w.id === prepared.workspaceId)!;
     assert.equal(before.team.worker.selection, 'auto', 'automatic unless the person says otherwise');
-    assert.equal(before.team.orchestrator.selection, null, 'the orchestrator has no selection');
+    assert.equal(before.team.orchestrator.selection, 'auto', 'the orchestrator runs on the CLI default');
 
     const codexAccount = prepared.fixture.services.database.accounts
       .list()

@@ -215,6 +215,12 @@ export interface WorkspaceWithAgents extends WorkspaceRecord {
   orchestrator_model: string | null;
   /** Reasoning level for the orchestrator (`low` | `medium` | `high`), or null. */
   orchestrator_reasoning: string | null;
+  /**
+   * `auto` (the CLI's own default; model and reasoning ignored) or `manual`
+   * (the person's pinned model and level). Null on rows from before the
+   * column existed: read as manual when a model or level was saved.
+   */
+  orchestrator_selection: string | null;
   worker_model: string | null;
   worker_reasoning: string | null;
   /** `auto` | `speed` | `quality` | `manual`; null is auto. */
@@ -359,6 +365,7 @@ export class WorkspaceRepository extends Repository {
       worker_agent_id: worker?.agent_id ?? null,
       orchestrator_model: orchestrator?.model ?? null,
       orchestrator_reasoning: orchestrator?.reasoning ?? null,
+      orchestrator_selection: orchestrator?.selection ?? null,
       worker_model: worker?.model ?? null,
       worker_reasoning: worker?.reasoning ?? null,
       worker_selection: worker?.selection ?? null,

@@ -52,10 +52,12 @@ test('the team is bound by account, keeps model and reasoning, and survives a re
     const bound = value<WorkspaceView>(
       await fixture.router.handle('workspace.setTeam', {
         workspaceId: workspace.id,
-        orchestrator: { accountId: codex.id, model: 'gpt-5.1-codex', reasoning: 'high' },
-        worker: { accountId: claude.id, model: 'claude-opus-5' },
+        // A pinned orchestrator: model and level are kept only under manual.
+        orchestrator: { accountId: codex.id, model: 'gpt-5.1-codex', reasoning: 'high', selection: 'manual' },
+        worker: { accountId: claude.id, model: 'claude-opus-5', selection: 'manual' },
       }),
     );
+    assert.equal(bound.team.orchestrator.selection, 'manual');
     assert.equal(bound.team.orchestrator.accountName, 'Codex Trabalho');
     assert.equal(bound.team.orchestrator.accountId, codex.id);
     assert.equal(bound.team.orchestrator.model, 'gpt-5.1-codex');
@@ -75,6 +77,7 @@ test('the team is bound by account, keeps model and reasoning, and survives a re
     try {
       const again = reopened.workspaces.list().find((w) => w.id === workspace.id)!;
       assert.equal(again.team.orchestrator.accountName, 'Codex Trabalho');
+      assert.equal(again.team.orchestrator.selection, 'manual');
       assert.equal(again.team.orchestrator.model, 'gpt-5.1-codex');
       assert.equal(again.team.orchestrator.reasoning, 'high');
       assert.equal(again.team.worker.accountName, 'Claude Trabalho');
@@ -255,6 +258,75 @@ test('readiness names the missing account, then the account that is not connecte
     const text = await explanationOf();
     assert.match(text, /A conta "Codex Trabalho" não está conectada/);
     assert.match(text, /Conecte a conta/);
+  } finally {
+    await fixture.cleanup();
+    repo.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------------ *
+ * The orchestrator's model: the Codex CLI's own default unless pinned.
+ * ------------------------------------------------------------------------ */
+
+test('the orchestrator is "Padrão do CLI" unless pinned; a pinned model is kept and an old row reads as pinned', async () => {
+  const repo = createGitFixture();
+  const fixture = createDesktopFixture();
+  try {
+    const workspace = value<WorkspaceView>(
+      await fixture.router.handle('workspace.create', { name: 'Projeto', localPath: repo.dir }),
+    );
+    const codex = value<{ id: string }>(
+      await fixture.router.handle('accounts.create', { name: 'Codex Trabalho', provider: 'openai' }),
+    );
+    const claude = value<{ id: string }>(
+      await fixture.router.handle('accounts.create', { name: 'Claude Trabalho', provider: 'anthropic' }),
+    );
+
+    // Default: auto, and a model typed without choosing manual is not kept.
+    let saved = value<WorkspaceView>(
+      await fixture.router.handle('workspace.setTeam', {
+        workspaceId: workspace.id,
+        orchestrator: { accountId: codex.id, model: 'gpt-5.1-codex' },
+        worker: { accountId: claude.id },
+      }),
+    );
+    assert.equal(saved.team.orchestrator.selection, 'auto');
+    assert.equal(saved.team.orchestrator.model, null, 'the CLI default ignores a stray model');
+    let record = fixture.services.database.workspaces.require(workspace.id);
+    assert.equal(record.orchestrator_selection, 'auto');
+    assert.equal(record.orchestrator_model, null);
+
+    // Pinned: kept, with the level.
+    saved = value(
+      await fixture.router.handle('workspace.setTeam', {
+        workspaceId: workspace.id,
+        orchestrator: { accountId: codex.id, model: 'gpt-5.1-codex', reasoning: 'xhigh', selection: 'manual' },
+        worker: { accountId: claude.id },
+      }),
+    );
+    assert.equal(saved.team.orchestrator.selection, 'manual');
+    assert.equal(saved.team.orchestrator.model, 'gpt-5.1-codex');
+    assert.equal(saved.team.orchestrator.reasoning, 'xhigh');
+
+    // The worker's strategies are not the orchestrator's.
+    const refused = await fixture.router.handle('workspace.setTeam', {
+      workspaceId: workspace.id,
+      orchestrator: { accountId: codex.id, selection: 'speed' },
+      worker: { accountId: claude.id },
+    });
+    assert.equal(refused.ok, false);
+    assert.match((refused as { ok: false; error: { message: string } }).error.message, /Padrão do CLI.*Manual/);
+
+    // A row from before the column existed, with a model: still pinned.
+    fixture.services.database.driver.run(
+      "UPDATE workspace_agents SET selection = NULL WHERE workspace_id = ? AND role = 'ORCHESTRATOR'",
+      [workspace.id],
+    );
+    record = fixture.services.database.workspaces.require(workspace.id);
+    assert.equal(record.orchestrator_selection, null);
+    const again = fixture.services.workspaces.list().find((w) => w.id === workspace.id)!;
+    assert.equal(again.team.orchestrator.selection, 'manual');
+    assert.equal(again.team.orchestrator.model, 'gpt-5.1-codex');
   } finally {
     await fixture.cleanup();
     repo.cleanup();

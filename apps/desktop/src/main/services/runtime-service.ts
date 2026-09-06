@@ -8,7 +8,8 @@
  */
 
 import type { Database, InstallPhase, InstallProgress, RuntimeId, RuntimeManager } from '../core.js';
-import { redact } from '../core.js';
+import { codexSupportedEfforts, redact } from '../core.js';
+import { REASONING_LEVELS } from '../../shared/ipc-contract.js';
 import type {
   DiagnosticView,
   InstallResultView,
@@ -50,6 +51,7 @@ export class RuntimeService {
       detail: describe(status.health.healthy, status.detection.origin, status.health.problem),
       outdated: status.outdated,
       needsManaged: status.needsManaged,
+      reasoningLevels: reasoningLevelsFor(status.runtimeId, status.health.healthy ? status.detection.version : null),
       lastFailure: status.lastFailure
         ? {
             at: status.lastFailure.at,
@@ -170,6 +172,19 @@ export class RuntimeService {
   async executablePath(runtimeId: RuntimeId): Promise<string> {
     return this.runtimeManager.getExecutablePath(runtimeId);
   }
+}
+
+/**
+ * The levels the team form may offer for a runtime: for Codex, what its
+ * version deserialises (`max` only from 0.140.0), intersected with the
+ * levels the interface names. Recomputed on every diagnostic, so an updated
+ * runtime changes the picker.
+ */
+function reasoningLevelsFor(runtimeId: RuntimeId, version: string | null): readonly string[] | null {
+  if (runtimeId !== 'codex' || !version) return null;
+  const supported = codexSupportedEfforts(version);
+  if (!supported) return null;
+  return REASONING_LEVELS.filter((level) => supported.includes(level));
 }
 
 function describe(healthy: boolean, origin: string, problem: string | undefined): string {

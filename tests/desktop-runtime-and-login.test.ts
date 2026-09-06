@@ -412,3 +412,45 @@ test('an ambient credential is never reported as connected', async () => {
     database.close();
   }
 });
+
+test('the diagnostic offers the reasoning levels the installed Codex accepts, and none for an unknown build', async () => {
+  const statuses = (version: string | null, healthy = true) => ({
+    ready: healthy,
+    pending: healthy ? [] : ['codex'],
+    checkedAt: 'now',
+    runtimes: [
+      {
+        runtimeId: 'codex',
+        displayName: 'Codex',
+        detection: { runtimeId: 'codex', origin: 'managed', executablePath: '/x', version, manifest: null },
+        health: { healthy, version: version ?? undefined },
+        canAutoConfigure: true,
+        outdated: null,
+        needsManaged: false,
+        lastFailure: null,
+      },
+      {
+        runtimeId: 'claude-code',
+        displayName: 'Claude Code',
+        detection: { runtimeId: 'claude-code', origin: 'system', executablePath: '/c', version: '2.1.252', manifest: null },
+        health: { healthy: true, version: '2.1.252' },
+        canAutoConfigure: true,
+        outdated: null,
+        needsManaged: false,
+        lastFailure: null,
+      },
+    ],
+  });
+  for (const [version, expected] of [
+    ['0.153.4', ['low', 'medium', 'high', 'xhigh', 'max']],
+    ['0.130.0', ['low', 'medium', 'high', 'xhigh']],
+    [null, null],
+  ] as const) {
+    const manager = { async diagnose() { return statuses(version); } } as unknown as RuntimeManager;
+    const service = new RuntimeService(manager, new EventBus(), null);
+    const view = await service.diagnose();
+    const codex = view.runtimes.find((r) => r.runtimeId === 'codex')!;
+    assert.deepEqual(codex.reasoningLevels, expected === null ? null : [...expected], `version ${version}`);
+    assert.equal(view.runtimes.find((r) => r.runtimeId === 'claude-code')!.reasoningLevels, null, 'read from --help per invocation, not guessed here');
+  }
+});

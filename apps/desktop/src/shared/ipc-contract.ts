@@ -133,6 +133,11 @@ export interface RuntimeStatusView {
   readonly detail: string;
   /** The only build is an incompatible one on the PATH; the app installs its own beside it. */
   readonly needsManaged: boolean;
+  /**
+   * Reasoning levels this build accepts by name, for the team form's picker;
+   * null when the runtime does not take a level or its version is unknown.
+   */
+  readonly reasoningLevels: readonly string[] | null;
   /** Why the last install failed, step by step, until one succeeds. */
   readonly lastFailure: { readonly at: string; readonly message: string; readonly detail: string } | null;
 }
@@ -258,18 +263,19 @@ export interface TeamMemberView {
   readonly model: string | null;
   readonly reasoning: ReasoningLevel | null;
   /**
-   * How the model is chosen. For the worker: `auto` unless the person chose
-   * otherwise; `model` and `reasoning` above apply only under `manual`. Null
-   * for the orchestrator, whose model and reasoning are fixed by the person.
+   * How the model is chosen. Worker: `auto` (the router, per task), `speed`,
+   * `quality` or `manual`. Orchestrator: `auto` (the Codex CLI's own default)
+   * or `manual` (the pinned model and level). `model` and `reasoning` above
+   * apply only under `manual`.
    */
-  readonly selection: WorkerSelection | null;
+  readonly selection: WorkerSelection;
 }
 
 export interface TeamMemberInput {
   readonly accountId: string;
   readonly model?: string;
   readonly reasoning?: ReasoningLevel;
-  /** Worker only; ignored for the orchestrator. Absent means `auto`. */
+  /** Absent means `auto`. The orchestrator accepts `auto` and `manual` only. */
   readonly selection?: WorkerSelection;
 }
 

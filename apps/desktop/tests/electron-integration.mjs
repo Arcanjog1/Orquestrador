@@ -524,7 +524,14 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
     );
     assert.equal(selection.trim(), 'Automático');
 
-    // Choose a model for the orchestrator and save.
+    // The orchestrator runs on the Codex CLI's own default until a model is
+    // pinned under "Configuração avançada" - no invented catalogue.
+    const orchestratorDefault = await window.webContents.executeJavaScript(
+      `document.querySelector('[data-testid="team-orchestrator-model-default"]').textContent`,
+    );
+    assert.equal(orchestratorDefault.trim(), 'Padrão do Codex CLI');
+    await click(window, 'team-orchestrator-advanced');
+    await waitForText(window, /Voltar para o padrão do CLI/, 5_000);
     await type(window, 'team-orchestrator-model', 'gpt-5.1-codex');
     await click(window, 'team-save');
     const closed = Date.now() + 10_000;
@@ -543,6 +550,7 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
     assert.ok(openaiNames.includes(saved.team.orchestrator.accountName));
     assert.ok(orchestratorPick.includes(saved.team.orchestrator.accountName), 'the shown account is the saved one');
     assert.equal(saved.team.orchestrator.model, 'gpt-5.1-codex');
+    assert.equal(saved.team.orchestrator.selection, 'manual');
     assert.equal(saved.team.worker.accountName, 'Claude Trabalho');
     assert.equal(saved.team.worker.provider, 'anthropic');
     assert.equal(saved.team.worker.selection, 'auto', 'automatic unless the person opened the advanced settings');

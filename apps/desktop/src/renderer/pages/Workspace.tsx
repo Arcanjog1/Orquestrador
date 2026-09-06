@@ -383,8 +383,15 @@ export function WorkspacePage({
     return {
       orchestratorName: team?.orchestrator.agentId ? "Codex" : null,
       orchestratorAccount: team?.orchestrator.accountName ?? null,
-      orchestratorModel: team?.orchestrator.model ?? null,
-      orchestratorReasoning: reasoningLabel(team?.orchestrator.reasoning),
+      // "Padrão do CLI" unless a model was pinned under Configuração avançada.
+      orchestratorModel:
+        team?.orchestrator.selection === "manual"
+          ? (team.orchestrator.model ?? "Padrão do CLI")
+          : team?.orchestrator.agentId
+            ? "Padrão do CLI"
+            : null,
+      orchestratorReasoning:
+        team?.orchestrator.selection === "manual" ? reasoningLabel(team.orchestrator.reasoning) : null,
       workerName: team?.worker.agentId ? "Claude Code" : null,
       workerAccount: team?.worker.accountName ?? null,
       // Under automatic selection the worker has no fixed model: the badge

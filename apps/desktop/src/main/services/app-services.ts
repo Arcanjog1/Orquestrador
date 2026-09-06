@@ -32,7 +32,7 @@ import {
 } from './orchestration-service.js';
 import { RuntimeService } from './runtime-service.js';
 import { VerificationService } from './verification-service.js';
-import { WorkspaceService } from './workspace-service.js';
+import { WorkspaceService, orchestratorSelectionOf } from './workspace-service.js';
 import { GitHubService, type SecretStore } from './github-service.js';
 import type { GitHubClientOptions } from '../core.js';
 import { CodexAdapter } from '../adapters/codex-adapter.js';
@@ -261,9 +261,10 @@ export class AppServices {
         orchestratorAccountId
           ? this.codexAccountManager.buildEnvironment(orchestratorAccountId)
           : {},
-      // The team's choices for this role; null leaves the CLI's default alone.
-      model: workspace.orchestrator_model,
-      reasoningEffort: workspace.orchestrator_reasoning,
+      // The person's pinned choice, only under manual selection; "Padrão do
+      // CLI" leaves both alone, whatever an older row still carries.
+      model: orchestratorSelectionOf(workspace) === 'manual' ? workspace.orchestrator_model : null,
+      reasoningEffort: orchestratorSelectionOf(workspace) === 'manual' ? workspace.orchestrator_reasoning : null,
     });
     // The worker's model and reasoning are chosen per delegation by the
     // loop's router, from what the orchestrator asks and what this account's

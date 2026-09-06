@@ -16,6 +16,7 @@ import type {
   AccountView,
   ProviderName,
   ReasoningLevel,
+  RuntimeStatusView,
   TeamMemberView,
   WorkerSelection,
   WorkspaceView,
@@ -25,14 +26,16 @@ import type {
  * The team of one project: who supervises, who executes, with which account -
  * and how each one's model is chosen.
  *
- *   Orchestrator  Provider fixed (OpenAI · Codex); account by name; model and
- *                 reasoning are the person's fixed choice, blank meaning the
- *                 CLI's default.
+ *   Orchestrator  Provider fixed (OpenAI · Codex); account by name. Model and
+ *                 reasoning are the Codex CLI's own default unless the person
+ *                 pins them under "Configuração avançada" - there is no
+ *                 reliable model catalogue to offer, so none is invented, and
+ *                 the reasoning levels offered are the ones the installed
+ *                 Codex build accepts.
  *   Worker        Provider fixed (Anthropic · Claude Code); account by name;
  *                 the model and reasoning are chosen by the AI Orchestrator
  *                 for each task ("Automático"), with a strategy to lean on.
- *                 "Configuração avançada" opens the manual override: a model
- *                 and a level typed by the person, sent exactly.
+ *                 "Configuração avançada" opens the manual override.
  *
  * Saving is `workspace.setTeam`, which is what the loop reads on its next run
  * and what a restart shows again.
@@ -64,12 +67,8 @@ const ROLES: ReadonlyArray<{
   },
 ];
 
-/**
- * Levels a person can pick by name. Each is checked against the installed
- * CLI before it is sent; one the CLI does not support is replaced by the
- * strongest it does, and the run says so.
- */
-const LEVELS: ReasoningLevel[] = ["low", "medium", "high", "xhigh", "max"];
+/** Every level the interface can name; a runtime narrows it (see `levelsFor`). */
+const ALL_LEVELS: ReasoningLevel[] = ["low", "medium", "high", "xhigh", "max"];
 
 /** The automatic strategies, in the order the picker shows them. */
 const STRATEGIES: WorkerSelection[] = ["auto", "speed", "quality"];
@@ -96,12 +95,15 @@ function draftOf(member: TeamMemberView | undefined, fallback: AccountView | und
 export function TeamForm({
   workspace,
   accounts,
+  runtimes = [],
   onSaved,
   onCancel,
   submitLabel = "Salvar equipe",
 }: {
   workspace: WorkspaceView | null;
   accounts: readonly AccountView[];
+  /** The runtime diagnostic, so the reasoning picker offers what the build takes. */
+  runtimes?: readonly RuntimeStatusView[];
   onSaved: () => void;
   onCancel?: () => void;
   submitLabel?: string;
@@ -126,6 +128,23 @@ export function TeamForm({
   }));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // The runtime diagnostic, read here when the caller has none: the
+  // reasoning picker must offer what the installed build takes.
+  const [diagnosed, setDiagnosed] = useState<readonly RuntimeStatusView[]>([]);
+  useEffect(() => {
+    if (runtimes.length > 0) return;
+    let cancelled = false;
+    void api.runtime
+      .diagnose()
+      .then((view) => {
+        if (!cancelled) setDiagnosed(view.runtimes);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [runtimes.length]);
+  const known = runtimes.length > 0 ? runtimes : diagnosed;
 
   // Re-seed when the project or the accounts change under the form.
   useEffect(() => {
@@ -141,11 +160,11 @@ export function TeamForm({
   const update = (role: TeamMemberView["role"], patch: Partial<MemberDraft>) =>
     setDrafts((prev) => ({ ...prev, [role]: { ...prev[role], ...patch } }));
 
-  const toInput = (role: TeamMemberView["role"], draft: MemberDraft) => ({
+  const toInput = (draft: MemberDraft) => ({
     accountId: draft.accountId,
     ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
     ...(draft.reasoning !== DEFAULT ? { reasoning: draft.reasoning as ReasoningLevel } : {}),
-    ...(role === "CODING_WORKER" ? { selection: draft.selection } : {}),
+    selection: draft.selection,
   });
 
   const save = async () => {
@@ -155,8 +174,8 @@ export function TeamForm({
     try {
       await api.workspace.setTeam({
         workspaceId: workspace.id,
-        orchestrator: toInput("ORCHESTRATOR", drafts.ORCHESTRATOR),
-        worker: toInput("CODING_WORKER", drafts.CODING_WORKER),
+        orchestrator: toInput(drafts.ORCHESTRATOR),
+        worker: toInput(drafts.CODING_WORKER),
       });
       onSaved();
     } catch (e) {
@@ -166,6 +185,20 @@ export function TeamForm({
     }
   };
 
+  /**
+   * The reasoning levels a role may pin: what the installed runtime accepts
+   * when the diagnostic says, every named level otherwise. A saved level the
+   * runtime no longer takes stays selectable so the person sees it - the
+   * run replaces it and says so.
+   */
+  const levelsFor = (role: TeamMemberView["role"], saved: string): string[] => {
+    const runtime = known.find((r) => r.runtimeId === (role === "ORCHESTRATOR" ? "codex" : "claude-code"));
+    const offered: string[] = runtime?.reasoningLevels
+      ? ALL_LEVELS.filter((l) => runtime.reasoningLevels!.includes(l))
+      : [...ALL_LEVELS];
+    return saved !== DEFAULT && !offered.includes(saved) ? [...offered, saved] : offered;
+  };
+
   return (
     <div className="space-y-3" data-testid="team-form">
       {ROLES.map((spec) => {
@@ -173,7 +206,8 @@ export function TeamForm({
         const draft = drafts[spec.role];
         const prefix = spec.role === "ORCHESTRATOR" ? "orchestrator" : "worker";
         const isWorker = spec.role === "CODING_WORKER";
-        const manual = isWorker && draft.selection === "manual";
+        const manual = draft.selection === "manual";
+        const runtime = known.find((r) => r.runtimeId === (isWorker ? "claude-code" : "codex"));
         return (
           <div
             key={spec.role}
@@ -185,6 +219,7 @@ export function TeamForm({
               <SectionLabel>{spec.title}</SectionLabel>
               <span className="ml-auto text-[11px] text-muted-foreground">
                 {spec.providerLabel} · {spec.agentLabel}
+                {runtime?.version ? ` ${runtime.version}` : ""}
               </span>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-3">
@@ -226,6 +261,29 @@ export function TeamForm({
                 )}
               </Labeled>
 
+              {/* Orchestrator, CLI default: two read-only cells that say so. */}
+              {!isWorker && !manual && (
+                <>
+                  <Labeled label="Model">
+                    <div
+                      className="mt-1 rounded-md border border-border bg-surface px-2 py-1.5 text-xs"
+                      data-testid="team-orchestrator-model-default"
+                    >
+                      Padrão do Codex CLI
+                    </div>
+                  </Labeled>
+                  <Labeled label="Reasoning">
+                    <div
+                      className="mt-1 rounded-md border border-border bg-surface px-2 py-1.5 text-xs"
+                      data-testid="team-orchestrator-reasoning-default"
+                    >
+                      Padrão do Codex CLI
+                    </div>
+                  </Labeled>
+                </>
+              )}
+
+              {/* Worker, automatic: selection and strategy. */}
               {isWorker && !manual && (
                 <>
                   <Labeled label="Seleção">
@@ -258,7 +316,8 @@ export function TeamForm({
                 </>
               )}
 
-              {(!isWorker || manual) && (
+              {/* Either role, manual: the pinned model and level. */}
+              {manual && (
                 <>
                   <Labeled label="Model">
                     <Input
@@ -282,9 +341,9 @@ export function TeamForm({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value={DEFAULT}>Padrão do CLI</SelectItem>
-                        {LEVELS.map((level) => (
-                          <SelectItem key={level} value={level}>
-                            {reasoningLabel(level)}
+                        {levelsFor(spec.role, draft.reasoning).map((level) => (
+                          <SelectItem key={level} value={level} data-testid={`team-${prefix}-level-${level}`}>
+                            {reasoningLabel(level) ?? level}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -294,43 +353,44 @@ export function TeamForm({
               )}
             </div>
 
-            {isWorker && (
-              <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
-                {manual ? (
-                  <>
-                    <span data-testid="team-worker-manual-hint">
-                      Seleção manual: o modelo e o nível acima são enviados exatamente como
-                      digitados. Um nível que a versão instalada não suporta é substituído, e a
-                      execução avisa.
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="ml-auto h-6 shrink-0 text-[11px]"
-                      onClick={() => update(spec.role, { selection: "auto" })}
-                      data-testid="team-worker-automatic"
-                    >
-                      Voltar para automático
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <span data-testid="team-worker-auto-hint">
-                      O AI Orchestrator escolhe o modelo e o nível de raciocínio para cada tarefa.
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="ml-auto h-6 shrink-0 text-[11px]"
-                      onClick={() => update(spec.role, { selection: "manual" })}
-                      data-testid="team-worker-advanced"
-                    >
-                      Configuração avançada
-                    </Button>
-                  </>
-                )}
-              </div>
-            )}
+            <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+              {manual ? (
+                <>
+                  <span data-testid={`team-${prefix}-manual-hint`}>
+                    {isWorker
+                      ? "Seleção manual: o modelo e o nível acima são enviados exatamente como digitados."
+                      : "Modelo e nível fixos para o orquestrador, enviados ao Codex CLI exatamente como digitados."}{" "}
+                    Um nível que a versão instalada não suporta é substituído, e a execução avisa.
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="ml-auto h-6 shrink-0 text-[11px]"
+                    onClick={() => update(spec.role, { selection: "auto" })}
+                    data-testid={`team-${prefix}-automatic`}
+                  >
+                    {isWorker ? "Voltar para automático" : "Voltar para o padrão do CLI"}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <span data-testid={`team-${prefix}-auto-hint`}>
+                    {isWorker
+                      ? "O AI Orchestrator escolhe o modelo e o nível de raciocínio para cada tarefa."
+                      : "O Codex CLI usa o modelo e o nível configurados na própria conta. Fixe um em Configuração avançada se quiser."}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="ml-auto h-6 shrink-0 text-[11px]"
+                    onClick={() => update(spec.role, { selection: "manual" })}
+                    data-testid={`team-${prefix}-advanced`}
+                  >
+                    Configuração avançada
+                  </Button>
+                </>
+              )}
+            </div>
           </div>
         );
       })}

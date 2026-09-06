@@ -317,12 +317,19 @@ export class WorkspaceService {
     const workerAccount = this.accountForRole('CODING_WORKER', worker.accountId);
     // Makes sure the per-account agents exist before they are bound.
     this.agents.sync();
+    // The orchestrator is either the CLI's default or a pinned choice; the
+    // worker's strategies do not apply to it.
+    const orchestratorSelection = orchestrator.selection === 'manual' ? 'manual' : 'auto';
+    if (orchestrator.selection && !['auto', 'manual'].includes(orchestrator.selection)) {
+      throw new WorkspaceError('O orquestrador aceita apenas "Padrão do CLI" ou "Manual".');
+    }
     const record = this.database.workspaces.setTeam(
       workspaceId,
       {
         agentId: orchestratorAgentIdFor(orchestratorAccount.id),
-        model: orchestrator.model ?? null,
-        reasoning: reasoningOrNull(orchestrator.reasoning),
+        model: orchestratorSelection === 'manual' ? (orchestrator.model ?? null) : null,
+        reasoning: orchestratorSelection === 'manual' ? reasoningOrNull(orchestrator.reasoning) : null,
+        selection: orchestratorSelection,
       },
       {
         agentId: workerAgentIdFor(workerAccount.id),
@@ -616,6 +623,7 @@ export class WorkspaceService {
           record.orchestrator_agent_id,
           record.orchestrator_model,
           record.orchestrator_reasoning,
+          orchestratorSelectionOf(record),
         ),
         worker: this.memberView(
           'CODING_WORKER',
@@ -635,7 +643,7 @@ export class WorkspaceService {
     agentId: string | null,
     model: string | null,
     reasoning: string | null,
-    selection: WorkerSelection | null = null,
+    selection: WorkerSelection,
   ): TeamMemberView {
     const agent = agentId ? this.database.agents.find(agentId) : undefined;
     const account = agent?.account_id ? this.database.accounts.find(agent.account_id) : undefined;
@@ -673,6 +681,21 @@ function readTextIfSmall(path: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The orchestrator's selection, read from its row: `manual` when saved so,
+ * or - on a row from before the column existed - when a model or a level was
+ * pinned, so an older team keeps behaving as it did.
+ */
+export function orchestratorSelectionOf(record: {
+  orchestrator_selection: string | null;
+  orchestrator_model: string | null;
+  orchestrator_reasoning: string | null;
+}): 'auto' | 'manual' {
+  if (record.orchestrator_selection === 'manual') return 'manual';
+  if (record.orchestrator_selection === null && (record.orchestrator_model || record.orchestrator_reasoning)) return 'manual';
+  return 'auto';
 }
 
 function reasoningOrNull(value: string | null | undefined): ReasoningLevel | null {
