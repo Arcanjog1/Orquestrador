@@ -271,6 +271,8 @@ test('a timeout records every stop attempt and whether the child was gone', asyn
   assert.ok(termination, 'the trace says how the child was stopped');
   assert.equal(termination.reason, 'timeout');
   assert.ok(termination.attempts.length >= 1);
+  // Windows: the polite taskkill may not reach a console child; the forced
+  // one does, and both are on record because `run` waits for the stop.
   assert.equal(termination.attempts[termination.attempts.length - 1]!.exited, true, 'the last attempt found the child gone');
   assert.equal(result.trace.survivedTermination, false);
 });

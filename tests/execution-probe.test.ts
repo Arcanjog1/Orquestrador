@@ -217,7 +217,9 @@ test('a working executable: OK, the version line, PID, exit 0, argv exactly --ve
     assert.equal(typeof run.pid, 'number');
     assert.equal(run.exitCode, 0);
     assert.equal(run.cwd, dir);
-    assert.equal(readFileSync(argvFile, 'utf8').trim(), '--version', 'the process received exactly one argument');
+    // A .exe gets argv straight from CreateProcess; the .cmd fixture on
+    // Windows sees the quotes cmd.exe was handed, so they are peeled here.
+    assert.equal(readFileSync(argvFile, 'utf8').trim().replace(/^"(.*)"$/, '$1'), '--version', 'the process received exactly one argument');
     assert.equal(probe.static.format, 'script');
     const text = describeProbe(probe, process.platform);
     assert.match(text, /^O executável respondeu \(codex-cli 0\.153\.4\)\./m);
@@ -266,7 +268,8 @@ test('a process that starts and never writes: PROCESS_STARTED_NO_OUTPUT, killed,
       assert.ok(run.termination, `${run.label} records how it was stopped`);
     }
     const first = probe.runs[0]!;
-    assert.ok(first.durationMs >= 1400 && first.durationMs < 10_000, `first run took the timeout: ${first.durationMs}`);
+    // The timeout, plus on Windows the polite taskkill's grace before /F.
+    assert.ok(first.durationMs >= 1400 && first.durationMs < 12_000, `first run took the timeout: ${first.durationMs}`);
     assert.match(first.termination!, win ? /taskkill .*→ saiu/ : /SIG(TERM|KILL) \(process group\) → saiu/);
 
     // The empty-profile run really passed the scratch directory to the process.
@@ -283,9 +286,10 @@ test('a process that starts and never writes: PROCESS_STARTED_NO_OUTPUT, killed,
     assert.match(probe.conclusions.join('\n'), /nenhuma variação .* respondeu/);
 
     const text = describeProbe(probe, 'win32');
-    assert.match(text, /^Codex foi baixado e verificado\. O Windows iniciou o executável \(PID \d+\), mas ele permaneceu ativo sem produzir saída por 1\.\d s\./m);
+    assert.match(text, /^Codex foi baixado e verificado\. O Windows iniciou o executável \(PID \d+\), mas ele permaneceu ativo sem produzir saída por \d+(\.\d)? s\./m);
     assert.match(text, /estado: PROCESS_STARTED_NO_OUTPUT/);
-    assert.match(text, /stdout nada · stderr nada · saída nenhuma/);
+    // POSIX: killed by signal, no exit code. Windows: taskkill /F reports 1.
+    assert.match(text, /stdout nada · stderr nada · saída (nenhuma|código 1)/);
     assert.match(text, /encerramento: /);
     assert.match(text, /conclusão: nenhuma variação/);
   } finally {
@@ -315,7 +319,7 @@ test('a first start that is slow and a second that is fast: recovered, antivirus
     assert.equal(probe.antivirusDelaySuspected, true);
     assert.equal(probe.versionLine, 'codex-cli 0.153.4');
     assert.equal(probe.runs.length, 2, 'once the second start answers, no further comparison is needed');
-    assert.match(probe.conclusions[0]!, /a segunda execução respondeu em .* depois de a primeira ficar 1\.\d s sem resposta/);
+    assert.match(probe.conclusions[0]!, /a segunda execução respondeu em .* depois de a primeira ficar \d+(\.\d)? s sem resposta/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

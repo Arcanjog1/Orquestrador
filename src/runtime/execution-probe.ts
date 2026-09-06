@@ -35,7 +35,7 @@ import {
   statSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { ProcessManager, type ProcessResult, type ProcessTrace } from '../process/process-manager.js';
+import { buildSpawnPlan, ProcessManager, type ProcessResult, type ProcessTrace } from '../process/process-manager.js';
 import { removeTreeWithRetry } from './fs-retry.js';
 
 export type ExecutionState =
@@ -538,12 +538,23 @@ export async function rawSpawn(options: {
     ...partial,
   });
 
+  // A real runtime is an .exe and is spawned as is. A .cmd launcher (the
+  // test fixtures on Windows) has to go through cmd.exe - Node refuses it
+  // otherwise - which is the one thing borrowed from the ProcessManager.
+  let plan;
+  try {
+    plan = buildSpawnPlan(options.executablePath, options.args);
+  } catch (error) {
+    trace.errorAt = new Date().toISOString();
+    return base({ outcome: 'spawn-error', error: (error as Error).message });
+  }
   let child;
   try {
-    child = spawn(options.executablePath, options.args, {
+    child = spawn(plan.file, plan.args, {
       cwd: options.cwd,
       env: options.env,
       shell: false,
+      windowsVerbatimArguments: plan.windowsVerbatimArguments,
       windowsHide: options.windowsHide ?? false,
       stdio: ['pipe', 'pipe', 'pipe'],
     });

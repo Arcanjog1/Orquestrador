@@ -458,7 +458,7 @@ test('an executable this machine cannot run stops at the first source: the secon
 
     // The record says what the process did, not "did not report a version within 180 s".
     assert.match(failure.detail, /estado: PROCESS_STARTED_NO_OUTPUT/);
-    assert.match(failure.detail, /PID \d+ · estado PROCESS_STARTED_NO_OUTPUT · stdout nada · stderr nada · saída nenhuma/);
+    assert.match(failure.detail, /PID \d+ · estado PROCESS_STARTED_NO_OUTPUT · stdout nada · stderr nada · saída (nenhuma|código 1)/);
     assert.match(failure.detail, /argv \["--version"\]/);
     assert.match(failure.detail, /child_process direto/);
     assert.match(failure.detail, /CODEX_HOME vazio/);

@@ -330,6 +330,9 @@ export class ProcessManager {
     let onAbort: (() => void) | undefined;
 
     let lingerTimer: NodeJS.Timeout | undefined;
+    // A stop in flight when the child closes: waited for before returning, so
+    // the trace carries every attempt rather than the ones made so far.
+    let pendingStop: Promise<void> | null = null;
     const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
       (resolvePromise) => {
         let settled = false;
@@ -342,12 +345,14 @@ export class ProcessManager {
         // A stop that leaves the child alive must still let `run` return:
         // the result says the child survived, and the trace says what was
         // tried. Waiting for a `close` that never comes helps nobody.
-        const stop = async (reason: ProcessOutcome): Promise<void> => {
-          await this.terminate(child, graceMs, reason);
-          if (!settled && child.exitCode === null && child.signalCode === null) {
-            trace.survivedTermination = true;
-            settle(null, null);
-          }
+        const stop = (reason: ProcessOutcome): void => {
+          pendingStop = (async () => {
+            await this.terminate(child, graceMs, reason);
+            if (!settled && child.exitCode === null && child.signalCode === null) {
+              trace.survivedTermination = true;
+              settle(null, null);
+            }
+          })();
         };
 
         child.on('error', (e: Error) => {
@@ -377,7 +382,7 @@ export class ProcessManager {
           timer = setTimeout(() => {
             outcome = 'timeout';
             errorMessage = `Process exceeded its ${Math.round(options.timeoutMs! / 1000)}s timeout.`;
-            void stop('timeout');
+            stop('timeout');
           }, options.timeoutMs);
         }
 
@@ -387,7 +392,7 @@ export class ProcessManager {
               outcome = 'cancelled';
               errorMessage = 'Cancelled by the orchestrator.';
             }
-            void stop('cancelled');
+            stop('cancelled');
           };
           options.signal.addEventListener('abort', onAbort, { once: true });
         }
@@ -396,6 +401,7 @@ export class ProcessManager {
 
     if (timer) clearTimeout(timer);
     if (lingerTimer) clearTimeout(lingerTimer);
+    if (pendingStop) await pendingStop;
     const attempts = this.terminationLog.get(child);
     const reason = this.terminationReason.get(child);
     if (reason && attempts) trace.termination = { reason, attempts };
