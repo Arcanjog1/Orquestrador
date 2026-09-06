@@ -99,3 +99,19 @@ export type {
 } from '../../../../src/core/types.js';
 export type { AgentRunner } from '../../../../src/agents/agent-runner.js';
 export { makeAgentResult } from '../../../../src/agents/agent-runner.js';
+
+export {
+  GitHubClient,
+  GitHubError,
+  gitAuthEnvironment,
+  isGitHubHttpsRemote,
+  parseGitHubRemote,
+} from '../../../../src/github/github-client.js';
+export type {
+  CheckSummary,
+  DeviceCode,
+  GitHubClientOptions,
+  GitHubRepository,
+  GitHubToken,
+  PullRequest,
+} from '../../../../src/github/github-client.js';

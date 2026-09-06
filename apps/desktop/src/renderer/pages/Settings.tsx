@@ -21,6 +21,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { LoginDialog } from "@/components/orch/dialogs";
+import { GitHubCard } from "@/components/orch/GitHubCard";
 import { ProviderIcon, SectionLabel } from "@/components/orch/primitives";
 import { humanReviewReasons } from "@/lib/orchestrator-data";
 import { cn } from "@/lib/utils";
@@ -28,6 +29,7 @@ import { api, messageOf } from "@/lib/api";
 import { Link, useRouter, useSearch } from "@/router";
 import type {
   AccountView,
+  GitHubStatusView,
   AppInfo,
   DiagnosticView,
   ProviderName,
@@ -74,12 +76,14 @@ const KEY = {
  */
 export function SettingsPage({
   accounts,
+  github,
   workspace,
   diagnostics,
   appInfo,
   reload,
 }: {
   accounts: readonly AccountView[];
+  github: GitHubStatusView | null;
   workspace: WorkspaceView | null;
   diagnostics: DiagnosticView | null;
   appInfo: AppInfo | null;
@@ -201,19 +205,8 @@ export function SettingsPage({
 
               <section className="border-t border-border pt-6">
                 <SectionLabel>Development</SectionLabel>
-                <div className="mt-3 rounded-lg border border-border bg-surface p-4">
-                  <div className="flex items-center gap-2">
-                    <ProviderIcon provider="github" />
-                    <span className="text-sm font-semibold">GitHub</span>
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      Sem login próprio
-                    </span>
-                  </div>
-                  <div className="mt-3 text-sm text-muted-foreground">
-                    {workspace?.repositoryUrl
-                      ? `Remoto do projeto: ${workspace.repositoryUrl}`
-                      : "Nenhum remoto configurado no projeto atual."}
-                  </div>
+                <div className="mt-3">
+                  <GitHubCard status={github} onChanged={reload} />
                 </div>
               </section>
 

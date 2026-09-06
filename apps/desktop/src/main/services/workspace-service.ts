@@ -18,12 +18,17 @@ import {
   type TeamMemberView,
   type TeamRole,
   type CheckoutResult,
+  type GitOperationResult,
+  type PullRequestStatusView,
+  type PullRequestView,
   type WorkspaceBranchesView,
   type WorkspaceChangesView,
   type WorkspaceView,
 } from '../../shared/ipc-contract.js';
 import type { RuntimeService } from './runtime-service.js';
 import { AgentService, orchestratorAgentIdFor, workerAgentIdFor } from './agent-service.js';
+import type { GitHubService } from './github-service.js';
+import { parseGitHubRemote, redact } from '../core.js';
 
 /** Which provider each role runs on. Fixed: Codex supervises, Claude Code executes. */
 const PROVIDER_OF_ROLE: Record<TeamRole, ProviderName> = {
@@ -49,9 +54,15 @@ export class WorkspaceService {
 
   /** Whether a run is going in a workspace; set by the container once the loop exists. */
   private isBusy: (workspaceId: string) => boolean = () => false;
+  /** The GitHub login, for remotes on github.com. Absent in tests that do not need it. */
+  private github: GitHubService | null = null;
 
   bindActivity(isBusy: (workspaceId: string) => boolean): void {
     this.isBusy = isBusy;
+  }
+
+  bindGitHub(github: GitHubService): void {
+    this.github = github;
   }
 
   list(): WorkspaceView[] {
@@ -258,6 +269,9 @@ export class WorkspaceService {
       args: ['clone', '--', input.repositoryUrl, destination],
       cwd: parent,
       timeoutMs: 30 * 60_000,
+      // The GitHub login rides in the environment as a per-process header:
+      // never in the URL, so `.git/config` holds the plain remote.
+      env: this.gitEnvironmentFor(input.repositoryUrl),
     });
 
     if (result.outcome !== 'completed' || result.exitCode !== 0) {
@@ -380,6 +394,180 @@ export class WorkspaceService {
       diff: truncated ? `${text.slice(0, DIFF_LIMIT)}\n… (diff truncado)` : text,
       truncated,
     };
+  }
+
+  // -- git on the project: fetch, branch, commit, push ------------------------
+
+  /** The remote git actually has, read from the working copy; the recorded URL is the fallback. */
+  private async remoteUrl(workspace: WorkspaceWithAgents): Promise<string | null> {
+    try {
+      const git = await this.runtimes.executablePath('git');
+      const collector = new GitEvidenceCollector(workspace.local_path, this.processManager, git);
+      const result = await collector.git(['config', '--get', 'remote.origin.url']);
+      const url = result.ok ? result.stdout.trim() : '';
+      return url.length > 0 ? url : workspace.repository_url;
+    } catch {
+      return workspace.repository_url;
+    }
+  }
+
+  private gitEnvironmentFor(remoteUrl: string | null): Record<string, string> {
+    return { GIT_TERMINAL_PROMPT: '0', ...(this.github?.gitEnvironmentFor(remoteUrl) ?? {}) };
+  }
+
+  /**
+   * Runs one mutating git command on the project and reports it. Every
+   * argument is fixed here; the only user text that reaches argv is a branch
+   * name the validator accepted or a commit message after `-m`.
+   */
+  private async runGit(
+    workspaceId: string,
+    args: string[],
+    summaryOk: string,
+    summaryFail: string,
+    options: { timeoutMs?: number; extraEnv?: Record<string, string> } = {},
+  ): Promise<GitOperationResult> {
+    const workspace = this.database.workspaces.require(workspaceId);
+    if (this.isBusy(workspaceId)) {
+      throw new WorkspaceError('Cancele a execução em andamento antes de mexer no git do projeto.');
+    }
+    const git = await this.runtimes.executablePath('git');
+    const remote = await this.remoteUrl(workspace);
+    const result = await this.processManager.run({
+      command: git,
+      args,
+      cwd: workspace.local_path,
+      timeoutMs: options.timeoutMs ?? 10 * 60_000,
+      env: { ...this.gitEnvironmentFor(remote), ...(options.extraEnv ?? {}) },
+    });
+    const ok = result.outcome === 'completed' && result.exitCode === 0;
+    const output = redact(`${result.stdout}\n${result.stderr}`.trim()).slice(0, 4000);
+    if (ok) this.database.workspaces.touch(workspaceId);
+    return {
+      ok,
+      summary: ok ? summaryOk : `${summaryFail}${firstLine(result.stderr || result.stdout)}`,
+      output,
+      workspace: {
+        ...this.toView(this.database.workspaces.require(workspaceId)),
+        branch: await this.currentBranch(workspace.local_path),
+      },
+    };
+  }
+
+  fetch(workspaceId: string): Promise<GitOperationResult> {
+    return this.runGit(workspaceId, ['fetch', '--prune'], 'Remoto atualizado.', 'O fetch falhou.');
+  }
+
+  createBranch(workspaceId: string, name: string): Promise<GitOperationResult> {
+    return this.runGit(
+      workspaceId,
+      ['switch', '--create', name],
+      `Branch "${name}" criada e ativa.`,
+      'Não foi possível criar a branch.',
+    );
+  }
+
+  /**
+   * Stages everything and commits. Author identity comes from the repository
+   * or the person's git config; when neither has one, the GitHub login is
+   * used with GitHub's no-reply address, so the commit is still theirs.
+   */
+  async commit(workspaceId: string, message: string): Promise<GitOperationResult> {
+    const staged = await this.runGit(workspaceId, ['add', '--all'], 'Alterações preparadas.', 'Não foi possível preparar as alterações.');
+    if (!staged.ok) return staged;
+    const login = this.github?.status().login ?? null;
+    const identity: Record<string, string> = login
+      ? {
+          GIT_AUTHOR_NAME: login,
+          GIT_AUTHOR_EMAIL: `${login}@users.noreply.github.com`,
+          GIT_COMMITTER_NAME: login,
+          GIT_COMMITTER_EMAIL: `${login}@users.noreply.github.com`,
+        }
+      : {};
+    // The repository's own identity wins when it has one: the environment
+    // is only consulted by git when config has nothing.
+    const configured = await this.hasIdentity(workspaceId);
+    return this.runGit(
+      workspaceId,
+      ['commit', '--message', message],
+      'Commit criado.',
+      'O commit não foi criado.',
+      { extraEnv: configured ? {} : identity },
+    );
+  }
+
+  private async hasIdentity(workspaceId: string): Promise<boolean> {
+    const workspace = this.database.workspaces.require(workspaceId);
+    try {
+      const git = await this.runtimes.executablePath('git');
+      const collector = new GitEvidenceCollector(workspace.local_path, this.processManager, git);
+      const [name, email] = await Promise.all([
+        collector.git(['config', '--get', 'user.name']),
+        collector.git(['config', '--get', 'user.email']),
+      ]);
+      return name.ok && email.ok && name.stdout.trim().length > 0 && email.stdout.trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Pushes the current branch, setting its upstream the first time. */
+  push(workspaceId: string): Promise<GitOperationResult> {
+    return this.runGit(
+      workspaceId,
+      ['push', '--set-upstream', 'origin', 'HEAD'],
+      'Push concluído.',
+      'O push falhou.',
+    );
+  }
+
+  async pullRequestStatus(workspaceId: string): Promise<PullRequestStatusView> {
+    const workspace = this.database.workspaces.require(workspaceId);
+    const remoteUrl = await this.remoteUrl(workspace);
+    const remote = parseGitHubRemote(remoteUrl);
+    const branch = await this.currentBranch(workspace.local_path);
+    if (!remote || !this.github || !branch || !this.github.status().connected) {
+      return { repository: remote ? `${remote.owner}/${remote.repo}` : null, branch, pullRequests: [], checks: null };
+    }
+    const [pullRequests, checks] = await Promise.all([
+      this.github.pullRequestsFor(remoteUrl!, branch),
+      this.github.checksFor(remoteUrl!, branch).catch(() => null),
+    ]);
+    return { repository: `${remote.owner}/${remote.repo}`, branch, pullRequests, checks };
+  }
+
+  async createPullRequest(input: {
+    workspaceId: string;
+    title: string;
+    body?: string;
+    base?: string;
+  }): Promise<PullRequestView> {
+    const workspace = this.database.workspaces.require(input.workspaceId);
+    if (!this.github) throw new WorkspaceError('O GitHub não está disponível.');
+    const remoteUrl = await this.remoteUrl(workspace);
+    if (!remoteUrl) throw new WorkspaceError('Este projeto não tem um remoto configurado.');
+    const head = await this.currentBranch(workspace.local_path);
+    if (!head) throw new WorkspaceError('O projeto não está em uma branch.');
+    const base = input.base ?? workspace.default_branch ?? (await this.defaultBranchOf(workspace)) ?? 'main';
+    if (base === head) throw new WorkspaceError(`A branch atual já é "${base}"; crie uma branch para o pull request.`);
+    return this.github.createPullRequest({
+      remoteUrl,
+      head,
+      base,
+      title: input.title,
+      body: input.body ?? '',
+    });
+  }
+
+  private async defaultBranchOf(workspace: WorkspaceWithAgents): Promise<string | null> {
+    try {
+      const git = await this.runtimes.executablePath('git');
+      const collector = new GitEvidenceCollector(workspace.local_path, this.processManager, git);
+      const result = await collector.git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+      return result.ok ? result.stdout.trim().replace(/^origin\//, '') || null : null;
+    } catch {
+      return null;
+    }
   }
 
   private accountForRole(role: TeamRole, accountId: string) {

@@ -262,6 +262,28 @@ export const REQUEST_VALIDATORS: {
   'accounts.status': obj({ accountId: id }),
   'accounts.remove': obj({ accountId: id }),
 
+  'github.status': noArgs,
+  'github.configure': obj({ clientId: str({ min: 4, max: 100, pattern: /^[A-Za-z0-9._-]+$/, what: 'a client id' }) }),
+  'github.connect': noArgs,
+  'github.cancelConnect': noArgs,
+  'github.disconnect': noArgs,
+  'github.repositories': noArgs,
+  'github.pullRequestStatus': obj({ workspaceId: id }),
+  'github.createPullRequest': obj(
+    {
+      workspaceId: id,
+      title: str({ min: 1, max: 256 }),
+      body: str({ min: 0, max: 20_000 }),
+      base: branchName,
+    },
+    { optional: ['body', 'base'] },
+  ),
+
+  'workspace.fetch': obj({ workspaceId: id }),
+  'workspace.createBranch': obj({ workspaceId: id, name: branchName }),
+  'workspace.commit': obj({ workspaceId: id, message: str({ min: 1, max: 5000 }) }),
+  'workspace.push': obj({ workspaceId: id }),
+
   'agents.list': noArgs,
 
   'workspace.list': noArgs,

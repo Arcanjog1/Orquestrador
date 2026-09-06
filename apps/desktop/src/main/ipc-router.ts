@@ -87,9 +87,14 @@ export class IpcRouter {
 
     // The settings table already exists; these two channels are the interface's
     // read and write of it. No new storage, no second source of truth.
-    this.handlers.set('settings.all', () => s.database.settings.all());
+    // Encrypted secrets (`*.enc`) stay in the main process: the renderer has
+    // no key for them and no reason to hold them.
+    this.handlers.set('settings.all', () =>
+      Object.fromEntries(Object.entries(s.database.settings.all()).filter(([key]) => !key.endsWith('.enc'))),
+    );
     this.handlers.set('settings.set', (p) => {
       const { key, value } = p as { key: string; value: string };
+      if (key.endsWith('.enc')) throw new IpcValidationError('payload.key is not a setting the interface may write');
       s.database.settings.set(key, value);
       return { saved: true };
     });
@@ -119,6 +124,30 @@ export class IpcRouter {
     this.handlers.set('accounts.remove', (p) => ({
       removed: s.accounts.remove((p as { accountId: string }).accountId),
     }));
+
+    this.handlers.set('github.status', () => s.github.status());
+    this.handlers.set('github.configure', (p) => s.github.configure((p as { clientId: string }).clientId));
+    this.handlers.set('github.connect', () => s.github.connect());
+    this.handlers.set('github.cancelConnect', () => ({ cancelled: s.github.cancelConnect() }));
+    this.handlers.set('github.disconnect', () => s.github.disconnect());
+    this.handlers.set('github.repositories', () => s.github.repositories());
+    this.handlers.set('github.pullRequestStatus', (p) =>
+      s.workspaces.pullRequestStatus((p as { workspaceId: string }).workspaceId),
+    );
+    this.handlers.set('github.createPullRequest', (p) => {
+      const input = p as IpcMap['github.createPullRequest']['request'];
+      return s.workspaces.createPullRequest(input);
+    });
+    this.handlers.set('workspace.fetch', (p) => s.workspaces.fetch((p as { workspaceId: string }).workspaceId));
+    this.handlers.set('workspace.createBranch', (p) => {
+      const input = p as { workspaceId: string; name: string };
+      return s.workspaces.createBranch(input.workspaceId, input.name);
+    });
+    this.handlers.set('workspace.commit', (p) => {
+      const input = p as { workspaceId: string; message: string };
+      return s.workspaces.commit(input.workspaceId, input.message);
+    });
+    this.handlers.set('workspace.push', (p) => s.workspaces.push((p as { workspaceId: string }).workspaceId));
 
     this.handlers.set('agents.list', () => s.agents.list());
 

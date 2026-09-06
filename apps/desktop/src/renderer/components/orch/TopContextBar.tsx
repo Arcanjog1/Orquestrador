@@ -18,7 +18,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { Agent, RunState } from "@/lib/orchestrator-data";
-import type { WorkspaceBranchesView, WorkspaceView } from "@shared/ipc-contract";
+import type {
+  GitHubStatusView,
+  PullRequestStatusView,
+  WorkspaceBranchesView,
+  WorkspaceView,
+} from "@shared/ipc-contract";
 import {
   AgentIdentity,
   ProviderIcon,
@@ -78,6 +83,15 @@ export function TopContextBar({
   onRefreshBranches,
   onCheckout,
   switching = null,
+  github,
+  pullRequest,
+  onRefreshPullRequest,
+  onOpenGitHubSettings,
+  onFetch,
+  onCreateBranch,
+  onCommit,
+  onPush,
+  onPullRequest,
 }: {
   state: RunState;
   iteration: number;
@@ -97,6 +111,16 @@ export function TopContextBar({
   onCheckout: (branch: string) => void;
   /** The branch being switched to, while git works. */
   switching?: string | null;
+  github: GitHubStatusView | null;
+  /** Pull requests and checks for the current branch; null until read. */
+  pullRequest: PullRequestStatusView | null;
+  onRefreshPullRequest: () => void;
+  onOpenGitHubSettings: () => void;
+  onFetch: () => void;
+  onCreateBranch: () => void;
+  onCommit: () => void;
+  onPush: () => void;
+  onPullRequest: () => void;
 }) {
   const [query, setQuery] = useState("");
 
@@ -108,16 +132,29 @@ export function TopContextBar({
 
   return (
     <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border bg-chrome px-4">
-      {/* GitHub chip */}
-      <Popover>
+      {/* GitHub chip: who is signed in, this project's remote, and the git actions */}
+      <Popover onOpenChange={(open) => open && onRefreshPullRequest()}>
         <PopoverTrigger asChild>
-          <button>
+          <button data-testid="github-chip">
             <Chip>
               <ProviderIcon provider="github" className="size-3.5" />
               GitHub
               <span className="text-muted-foreground">
-                · {repository ? repository.split("/")[0] : "sem remoto"}
+                · {github?.connected ? github.login : repository ? repository.split("/")[0] : "sem login"}
               </span>
+              {pullRequest?.checks && pullRequest.checks.total > 0 && (
+                <span
+                  className={cn(
+                    "size-2 rounded-full",
+                    pullRequest.checks.failure > 0
+                      ? "bg-danger"
+                      : pullRequest.checks.completed === pullRequest.checks.total
+                        ? "bg-success"
+                        : "bg-running",
+                  )}
+                  aria-label="Estado dos checks"
+                />
+              )}
               <ChevronDown className="size-3 text-muted-foreground" />
             </Chip>
           </button>
@@ -129,38 +166,86 @@ export function TopContextBar({
             <span
               className={cn(
                 "ml-auto inline-flex items-center gap-1 text-xs",
-                repository ? "text-success" : "text-muted-foreground",
+                github?.connected ? "text-success" : "text-muted-foreground",
               )}
             >
-              {repository ? (
+              {github?.connected ? (
                 <>
-                  <Check className="size-3" /> Remoto configurado
+                  <Check className="size-3" /> {github.login}
                 </>
               ) : (
-                "Sem remoto"
+                <button onClick={onOpenGitHubSettings} className="text-primary hover:underline">
+                  Conectar em Contas
+                </button>
               )}
             </span>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <StatBlock label="Conta" value={repository ? repository.split("/")[0] : "—"} />
+            <StatBlock
+              label="Repository"
+              value={<span className="font-mono text-xs">{pullRequest?.repository ?? repository ?? "sem remoto"}</span>}
+            />
             <StatBlock
               label="Branch"
               value={<span className="font-mono text-xs">{branch}</span>}
             />
           </div>
-          <StatBlock
-            label="Repository"
-            value={<span className="font-mono text-xs">{repository ?? "—"}</span>}
-          />
+          {pullRequest && pullRequest.repository && (
+            <div className="rounded-md border border-border bg-surface-raised p-2.5 text-xs">
+              {pullRequest.pullRequests.length > 0 ? (
+                pullRequest.pullRequests.map((pr) => (
+                  <button
+                    key={pr.number}
+                    onClick={() => onOpenExternal(pr.htmlUrl)}
+                    className="flex w-full items-center gap-2 text-left hover:underline"
+                  >
+                    <span className="font-mono text-primary">#{pr.number}</span>
+                    <span className="truncate">{pr.title}</span>
+                  </button>
+                ))
+              ) : (
+                <span className="text-muted-foreground">
+                  {github?.connected ? "Nenhum pull request aberto para esta branch." : "Conecte o GitHub para ver pull requests e checks."}
+                </span>
+              )}
+              {pullRequest.checks && pullRequest.checks.total > 0 && (
+                <div className="mt-1.5 text-muted-foreground">
+                  Checks: {pullRequest.checks.success} ok · {pullRequest.checks.failure} falhas ·{" "}
+                  {pullRequest.checks.total - pullRequest.checks.completed} em andamento
+                </div>
+              )}
+            </div>
+          )}
           <div className="flex flex-wrap gap-2 border-t border-border pt-3">
-            <Button size="sm" variant="secondary" onClick={onAddProject}>
-              Trocar repositório
+            <Button size="sm" variant="secondary" onClick={onFetch} disabled={!workspace} data-testid="git-fetch">
+              Fetch
+            </Button>
+            <Button size="sm" variant="secondary" onClick={onCreateBranch} disabled={!workspace} data-testid="git-branch">
+              Nova branch
+            </Button>
+            <Button size="sm" variant="secondary" onClick={onCommit} disabled={!workspace} data-testid="git-commit">
+              Commit
+            </Button>
+            <Button size="sm" onClick={onPush} disabled={!workspace} data-testid="git-push">
+              Push
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={onPullRequest}
+              disabled={!github?.connected || !(pullRequest?.repository ?? repository)}
+              data-testid="git-pr"
+            >
+              Abrir PR
             </Button>
             <Button
               size="sm"
               variant="ghost"
-              disabled={!repository}
-              onClick={() => repository && onOpenExternal(`https://github.com/${repository}`)}
+              disabled={!(pullRequest?.repository ?? repository)}
+              onClick={() => {
+                const target = pullRequest?.repository ?? repository;
+                if (target) onOpenExternal(`https://github.com/${target}`);
+              }}
             >
               <ExternalLink className="size-3.5" /> Abrir no GitHub
             </Button>

@@ -216,6 +216,10 @@ export class SettingsRepository extends Repository {
     );
   }
 
+  remove(key: string): boolean {
+    return Number(this.db.run('DELETE FROM settings WHERE key = ?', [key]).changes) > 0;
+  }
+
   all(): Record<string, string> {
     const rows = this.db.all<{ key: string; value: string }>('SELECT key, value FROM settings');
     return Object.fromEntries(rows.map((r) => [r.key, r.value]));

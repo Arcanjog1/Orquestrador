@@ -7,6 +7,7 @@ import { TimelineView } from "@/components/orch/Timeline";
 import { ActivityPanel, type Step } from "@/components/orch/ActivityPanel";
 import { Composer } from "@/components/orch/Composer";
 import { DiffDialog, EvidenceDialog, RunDetailDialog } from "@/components/orch/RunDialogs";
+import { CommitDialog, CreateBranchDialog, PullRequestDialog } from "@/components/orch/GitDialogs";
 import {
   AddProjectDialog,
   AgentDetailDialog,
@@ -30,6 +31,8 @@ import { api, messageOf } from "@/lib/api";
 import { Link, useRouter } from "@/router";
 import type {
   AccountView,
+  GitHubStatusView,
+  PullRequestStatusView,
   ChatMessageView,
   RunDetailView,
   WorkspaceBranchesView,
@@ -53,12 +56,14 @@ export function WorkspacePage({
   workspaces,
   workspace,
   accounts,
+  github,
   reload,
   onSelectWorkspace,
 }: {
   workspaces: readonly WorkspaceView[];
   workspace: WorkspaceView | null;
   accounts: readonly AccountView[];
+  github: GitHubStatusView | null;
   reload: () => void;
   onSelectWorkspace: (id: string) => void;
 }) {
@@ -77,6 +82,8 @@ export function WorkspacePage({
   const [dirtySwitch, setDirtySwitch] = useState<{ branch: string; message: string } | null>(null);
   const [renamingWorkspace, setRenamingWorkspace] = useState(false);
   const [removingWorkspace, setRemovingWorkspace] = useState(false);
+  const [pullRequest, setPullRequest] = useState<PullRequestStatusView | null>(null);
+  const [gitDialog, setGitDialog] = useState<"commit" | "branch" | "pr" | null>(null);
   const [teamOpen, setTeamOpen] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -261,6 +268,44 @@ export function WorkspacePage({
       fail(error);
     } finally {
       setSwitching(null);
+    }
+  }
+
+  // -- GitHub: pull requests and checks for the current branch ------------
+
+  const refreshPullRequest = useCallback(async () => {
+    if (!workspace) {
+      setPullRequest(null);
+      return;
+    }
+    try {
+      setPullRequest(await api.github.pullRequestStatus({ workspaceId: workspace.id }));
+    } catch {
+      setPullRequest(null);
+    }
+  }, [workspace?.id]);
+
+  useEffect(() => {
+    setPullRequest(null);
+    void refreshPullRequest();
+  }, [refreshPullRequest, github?.connected]);
+
+  /** A git action's outcome, as a toast and a refresh of what it changed. */
+  async function afterGit(result: { ok: boolean; summary: string; output: string }) {
+    toast(result.summary);
+    reload();
+    await Promise.all([refreshBranches(), refreshChanges(), refreshPullRequest()]);
+  }
+
+  async function runGit(action: "fetch" | "push") {
+    if (!workspace) return;
+    try {
+      const result = await (action === "fetch"
+        ? api.workspace.fetch({ workspaceId: workspace.id })
+        : api.workspace.push({ workspaceId: workspace.id }));
+      await afterGit(result);
+    } catch (error) {
+      fail(error);
     }
   }
 
@@ -551,6 +596,15 @@ export function WorkspacePage({
           onRefreshBranches={() => void refreshBranches()}
           onCheckout={(branch) => void checkout(branch)}
           switching={switching}
+          github={github}
+          pullRequest={pullRequest}
+          onRefreshPullRequest={() => void refreshPullRequest()}
+          onOpenGitHubSettings={() => router.navigate("/configuracoes", { tab: "accounts" })}
+          onFetch={() => void runGit("fetch")}
+          onCreateBranch={() => setGitDialog("branch")}
+          onCommit={() => setGitDialog("commit")}
+          onPush={() => void runGit("push")}
+          onPullRequest={() => setGitDialog("pr")}
         />
 
         <div className="relative flex min-h-0 flex-1">
@@ -626,6 +680,28 @@ export function WorkspacePage({
         runId={run?.id ?? null}
       />
       <RunDetailDialog runId={detailRunId} onOpenChange={(v) => !v && setDetailRunId(null)} />
+      <CommitDialog
+        open={gitDialog === "commit"}
+        onOpenChange={(v) => !v && setGitDialog(null)}
+        workspace={workspace}
+        onDone={(result) => void afterGit(result)}
+      />
+      <CreateBranchDialog
+        open={gitDialog === "branch"}
+        onOpenChange={(v) => !v && setGitDialog(null)}
+        workspace={workspace}
+        onDone={(result) => void afterGit(result)}
+      />
+      <PullRequestDialog
+        open={gitDialog === "pr"}
+        onOpenChange={(v) => !v && setGitDialog(null)}
+        workspace={workspace}
+        base={workspace.defaultBranch}
+        onDone={(pr) => {
+          toast(`Pull request #${pr.number} aberto`);
+          void refreshPullRequest();
+        }}
+      />
       <RenameDialog
         open={renamingWorkspace}
         title="Renomear projeto"
@@ -699,6 +775,7 @@ export function WorkspacePage({
       <AddProjectDialog
         open={addProjectOpen}
         onOpenChange={setAddProjectOpen}
+        githubConnected={github?.connected ?? false}
         onAdded={(id) => {
           reload();
           onSelectWorkspace(id);

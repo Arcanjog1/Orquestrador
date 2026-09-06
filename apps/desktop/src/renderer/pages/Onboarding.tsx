@@ -4,12 +4,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AddProjectDialog, LoginDialog } from "@/components/orch/dialogs";
 import { TeamForm } from "@/components/orch/TeamForm";
+import { GitHubCard } from "@/components/orch/GitHubCard";
 import { ProviderIcon, SectionLabel } from "@/components/orch/primitives";
 import { cn } from "@/lib/utils";
 import { api, messageOf } from "@/lib/api";
 import { Link, useRouter } from "@/router";
 import type {
   AccountView,
+  GitHubStatusView,
   DiagnosticView,
   ProviderName,
   RuntimeId,
@@ -35,6 +37,7 @@ export function OnboardingPage({
   accounts,
   workspaces,
   workspace,
+  github,
   reload,
   onSelectWorkspace,
 }: {
@@ -42,6 +45,7 @@ export function OnboardingPage({
   accounts: readonly AccountView[];
   workspaces: readonly WorkspaceView[];
   workspace: WorkspaceView | null;
+  github: GitHubStatusView | null;
   reload: () => void;
   onSelectWorkspace: (id: string) => void;
 }) {
@@ -259,19 +263,16 @@ export function OnboardingPage({
             <>
               <SectionLabel>Passo 3</SectionLabel>
               <h2 className="mt-1 text-lg font-semibold">GitHub</h2>
-              <div className="mt-4 flex items-center gap-2 rounded-lg border border-dashed border-border px-3 py-2.5">
-                <ProviderIcon provider="github" />
-                <span className="text-sm">GitHub</span>
-                <span className="ml-auto text-xs text-muted-foreground">
-                  Sem login próprio
-                </span>
-              </div>
-              <p className="mt-3 text-xs text-muted-foreground">
-                O Orquestrador não intermedia o GitHub: ele lê o remoto do projeto que você
-                escolher, e clonar usa o Git da sua máquina.
+              <p className="mt-2 text-sm text-muted-foreground">
+                Opcional. Conectado, o Orquestrador lista seus repositórios (privados inclusive),
+                clona, faz push e abre pull requests com o seu login. Sem ele, o Git da máquina
+                continua funcionando como sempre.
               </p>
+              <div className="mt-4">
+                <GitHubCard status={github} onChanged={reload} />
+              </div>
               <div className="mt-6 flex gap-2">
-                <Button onClick={() => setStep(4)}>Continuar</Button>
+                <Button onClick={() => setStep(4)}>{github?.connected ? "Continuar" : "Pular por agora"}</Button>
               </div>
             </>
           )}

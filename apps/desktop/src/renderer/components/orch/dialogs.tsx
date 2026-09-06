@@ -28,7 +28,12 @@ import {
 import { cn } from "@/lib/utils";
 import type { Agent } from "@/lib/orchestrator-data";
 import type { TimelineEntry } from "@/lib/timeline";
-import type { AccountProgressEvent, AccountView, WorkspaceView } from "@shared/ipc-contract";
+import type {
+  AccountProgressEvent,
+  AccountView,
+  GitHubRepositoryView,
+  WorkspaceView,
+} from "@shared/ipc-contract";
 import { api, messageOf } from "@/lib/api";
 import { AgentIdentity, ProviderIcon, SectionLabel, StatBlock } from "./primitives";
 import { TeamForm } from "./TeamForm";
@@ -511,15 +516,43 @@ export function AddProjectDialog({
   open,
   onOpenChange,
   onAdded,
+  githubConnected = false,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onAdded: (workspaceId: string) => void;
+  /** With a GitHub login the person picks from their repositories. */
+  githubConnected?: boolean;
 }) {
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState<"folder" | "clone" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [repos, setRepos] = useState<readonly GitHubRepositoryView[] | null>(null);
+  const [reposError, setReposError] = useState<string | null>(null);
+  const [repoQuery, setRepoQuery] = useState("");
+
+  // The person's repositories, read once per opening, private ones included.
+  useEffect(() => {
+    if (!open || !githubConnected) {
+      setRepos(null);
+      setReposError(null);
+      setRepoQuery("");
+      return;
+    }
+    let alive = true;
+    api.github
+      .repositories()
+      .then((list) => alive && setRepos(list))
+      .catch((e: unknown) => alive && setReposError(messageOf(e)));
+    return () => {
+      alive = false;
+    };
+  }, [open, githubConnected]);
+
+  const visibleRepos = (repos ?? [])
+    .filter((r) => r.fullName.toLowerCase().includes(repoQuery.trim().toLowerCase()))
+    .slice(0, 50);
 
   const fail = (e: unknown) =>
     setError(e instanceof Error ? e.message : "Não foi possível adicionar o projeto.");
@@ -586,13 +619,57 @@ export function AddProjectDialog({
             Selecionar pasta local
           </button>
 
+          {githubConnected && (
+            <div className="border-t border-border pt-4">
+              <SectionLabel>Seus repositórios no GitHub</SectionLabel>
+              <Input
+                value={repoQuery}
+                onChange={(e) => setRepoQuery(e.target.value)}
+                placeholder="Buscar repositório"
+                className="mt-2 h-8 text-xs"
+                data-testid="repo-search"
+              />
+              <div className="mt-2 max-h-40 space-y-0.5 overflow-y-auto" data-testid="repo-list">
+                {repos === null && !reposError && (
+                  <p className="px-2 py-1.5 text-xs text-muted-foreground">Lendo seus repositórios…</p>
+                )}
+                {reposError && <p className="px-2 py-1.5 text-xs text-danger">{reposError}</p>}
+                {repos !== null && visibleRepos.length === 0 && (
+                  <p className="px-2 py-1.5 text-xs text-muted-foreground">Nenhum repositório encontrado.</p>
+                )}
+                {visibleRepos.map((repo) => (
+                  <button
+                    key={repo.fullName}
+                    onClick={() => {
+                      setUrl(repo.cloneUrl);
+                      setName(repo.name);
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
+                      url === repo.cloneUrl && "bg-accent",
+                    )}
+                    data-testid={`repo-${repo.fullName}`}
+                  >
+                    <span className="truncate font-mono">{repo.fullName}</span>
+                    {repo.private && (
+                      <span className="ml-auto shrink-0 rounded bg-muted px-1 text-[10px] uppercase text-muted-foreground">
+                        privado
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="border-t border-border pt-4">
-            <SectionLabel>Ou clonar do GitHub</SectionLabel>
+            <SectionLabel>{githubConnected ? "Ou informe a URL" : "Ou clonar do GitHub"}</SectionLabel>
             <div className="mt-2 space-y-2">
               <Input
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 placeholder="https://github.com/…"
+                data-testid="clone-url"
               />
               <Input
                 value={name}

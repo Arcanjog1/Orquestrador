@@ -35,6 +35,18 @@ export const REQUEST_CHANNELS = [
   'accounts.cancelConnect',
   'accounts.status',
   'accounts.remove',
+  'github.status',
+  'github.configure',
+  'github.connect',
+  'github.cancelConnect',
+  'github.disconnect',
+  'github.repositories',
+  'github.pullRequestStatus',
+  'github.createPullRequest',
+  'workspace.fetch',
+  'workspace.createBranch',
+  'workspace.commit',
+  'workspace.push',
 
   'agents.list',
 
@@ -364,6 +376,67 @@ export type CheckoutResult =
   | { readonly switched: true; readonly workspace: WorkspaceView }
   | { readonly switched: false; readonly dirtyFiles: number; readonly message: string };
 
+export interface GitHubStatusView {
+  /** A Client ID was entered. */
+  readonly configured: boolean;
+  readonly clientId: string | null;
+  /** The OS offers protected storage; without it no token is ever kept. */
+  readonly storageAvailable: boolean;
+  readonly connected: boolean;
+  readonly connecting: boolean;
+  readonly login: string | null;
+  readonly name: string | null;
+  readonly avatarUrl: string | null;
+}
+
+export interface GitHubRepositoryView {
+  readonly fullName: string;
+  readonly owner: string;
+  readonly name: string;
+  readonly private: boolean;
+  readonly description: string | null;
+  readonly defaultBranch: string;
+  readonly htmlUrl: string;
+  readonly cloneUrl: string;
+  readonly updatedAt: string;
+  readonly permissions: { readonly push: boolean; readonly admin: boolean };
+}
+
+export interface PullRequestView {
+  readonly number: number;
+  readonly htmlUrl: string;
+  readonly title: string;
+  readonly state: string;
+}
+
+export interface PullRequestStatusView {
+  /** `owner/repo` when the project's remote is on GitHub. */
+  readonly repository: string | null;
+  readonly branch: string | null;
+  readonly pullRequests: readonly PullRequestView[];
+  readonly checks: {
+    readonly total: number;
+    readonly completed: number;
+    readonly success: number;
+    readonly failure: number;
+    readonly checks: ReadonlyArray<{
+      readonly name: string;
+      readonly status: string;
+      readonly conclusion: string | null;
+      readonly htmlUrl: string | null;
+    }>;
+  } | null;
+}
+
+/** What one git command did, in the words of the interface and of git. */
+export interface GitOperationResult {
+  readonly ok: boolean;
+  readonly summary: string;
+  /** git's own output, bounded and redacted, for "Detalhes". */
+  readonly output: string;
+  readonly workspace: WorkspaceView;
+}
+
 /** The branches git knows in this working copy. */
 export interface WorkspaceBranchesView {
   readonly isRepository: boolean;
@@ -415,6 +488,30 @@ export interface IpcMap {
   'accounts.cancelConnect': { request: { accountId: string }; response: { cancelled: boolean } };
   'accounts.status': { request: { accountId: string }; response: AccountView };
   'accounts.remove': { request: { accountId: string }; response: { removed: boolean } };
+
+  /**
+   * GitHub, one login for the application, by OAuth device flow.
+   *
+   * The token never crosses this boundary: what the renderer gets is who is
+   * signed in. Progress goes out on `account:progress` with the id `github`.
+   */
+  'github.status': { request: void; response: GitHubStatusView };
+  'github.configure': { request: { clientId: string }; response: GitHubStatusView };
+  'github.connect': { request: void; response: GitHubStatusView };
+  'github.cancelConnect': { request: void; response: { cancelled: boolean } };
+  'github.disconnect': { request: void; response: GitHubStatusView };
+  'github.repositories': { request: void; response: readonly GitHubRepositoryView[] };
+  'github.pullRequestStatus': { request: { workspaceId: string }; response: PullRequestStatusView };
+  'github.createPullRequest': {
+    request: { workspaceId: string; title: string; body?: string; base?: string };
+    response: PullRequestView;
+  };
+
+  /** Git, on the project, with the GitHub login when the remote is github.com. */
+  'workspace.fetch': { request: { workspaceId: string }; response: GitOperationResult };
+  'workspace.createBranch': { request: { workspaceId: string; name: string }; response: GitOperationResult };
+  'workspace.commit': { request: { workspaceId: string; message: string }; response: GitOperationResult };
+  'workspace.push': { request: { workspaceId: string }; response: GitOperationResult };
 
   'agents.list': { request: void; response: readonly AgentView[] };
 

@@ -8,6 +8,7 @@ import { HistoryPage } from "@/pages/History";
 import { api, messageOf } from "@/lib/api";
 import type {
   AccountView,
+  GitHubStatusView,
   AgentView,
   AppInfo,
   DiagnosticView,
@@ -36,6 +37,7 @@ interface AppState {
   accounts: readonly AccountView[];
   agents: readonly AgentView[];
   workspaces: readonly WorkspaceView[];
+  github: GitHubStatusView | null;
 }
 
 const EMPTY: AppState = {
@@ -44,6 +46,7 @@ const EMPTY: AppState = {
   accounts: [],
   agents: [],
   workspaces: [],
+  github: null,
 };
 
 function Shell() {
@@ -57,14 +60,15 @@ function Shell() {
   const reload = useCallback(() => {
     void (async () => {
       try {
-        const [appInfo, diagnostics, accounts, agents, workspaces] = await Promise.all([
+        const [appInfo, diagnostics, accounts, agents, workspaces, github] = await Promise.all([
           api.app.info(),
           api.runtime.diagnose(),
           api.accounts.list(),
           api.agents.list(),
           api.workspace.list(),
+          api.github.status(),
         ]);
-        setState({ appInfo, diagnostics, accounts, agents, workspaces });
+        setState({ appInfo, diagnostics, accounts, agents, workspaces, github });
         setWorkspaceId((current) =>
           current && workspaces.some((w) => w.id === current) ? current : workspaces[0]?.id ?? null,
         );
@@ -119,6 +123,7 @@ function Shell() {
           accounts={state.accounts}
           workspaces={state.workspaces}
           workspace={workspace}
+          github={state.github}
           reload={reload}
           onSelectWorkspace={setWorkspaceId}
         />
@@ -127,6 +132,7 @@ function Shell() {
       return (
         <SettingsPage
           accounts={state.accounts}
+          github={state.github}
           workspace={workspace}
           diagnostics={state.diagnostics}
           appInfo={state.appInfo}
@@ -141,6 +147,7 @@ function Shell() {
           workspaces={state.workspaces}
           workspace={workspace}
           accounts={state.accounts}
+          github={state.github}
           reload={reload}
           onSelectWorkspace={setWorkspaceId}
         />

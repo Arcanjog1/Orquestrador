@@ -14,6 +14,8 @@ import { AppServices } from '../../apps/desktop/src/main/services/app-services.j
 import type { RunnerFactory } from '../../apps/desktop/src/main/services/orchestration-service.js';
 import { IpcRouter, type ShellBridge } from '../../apps/desktop/src/main/ipc-router.js';
 import type { AppPaths } from '../../src/runtime/paths.js';
+import type { GitHubClientOptions } from '../../src/github/github-client.js';
+import type { SecretStore } from '../../apps/desktop/src/main/services/github-service.js';
 import type { EventMap } from '../../apps/desktop/src/shared/ipc-contract.js';
 import type { AgentInput, AgentResult, HealthStatus } from '../../src/core/types.js';
 import { makeAgentResult, type AgentRunner } from '../../src/agents/agent-runner.js';
@@ -35,6 +37,25 @@ export interface DesktopFixtureOptions {
   selectFolder?: () => Promise<string | null>;
   maxIterations?: number;
   allowNoChanges?: boolean;
+  /** Where the GitHub client talks; tests run a local fake. */
+  github?: GitHubClientOptions;
+  /** Off by default; a test that needs the login sets it on. */
+  secrets?: SecretStore;
+}
+
+/**
+ * A store that is reversible and visibly not the plain text: enough to prove
+ * what is written at rest is not the token, without an OS keyring.
+ */
+export function fakeSecretStore(): SecretStore {
+  return {
+    available: true,
+    encrypt: (plain) => `enc:${Buffer.from(plain, 'utf8').toString('base64')}`,
+    decrypt: (cipher) => {
+      if (!cipher.startsWith('enc:')) throw new Error('not ours');
+      return Buffer.from(cipher.slice(4), 'base64').toString('utf8');
+    },
+  };
 }
 
 export function createDesktopFixture(options: DesktopFixtureOptions = {}): DesktopFixture {
@@ -62,6 +83,8 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
       ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {}),
       ...(options.allowNoChanges !== undefined ? { allowNoChanges: options.allowNoChanges } : {}),
     },
+    ...(options.github ? { github: options.github } : {}),
+    ...(options.secrets ? { secrets: options.secrets } : {}),
   });
 
   const events: DesktopFixture['events'] = [];

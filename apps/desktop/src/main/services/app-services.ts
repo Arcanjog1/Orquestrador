@@ -32,6 +32,8 @@ import {
 import { RuntimeService } from './runtime-service.js';
 import { VerificationService } from './verification-service.js';
 import { WorkspaceService } from './workspace-service.js';
+import { GitHubService, type SecretStore } from './github-service.js';
+import type { GitHubClientOptions } from '../core.js';
 import { CodexAdapter } from '../adapters/codex-adapter.js';
 import { DECISION_JSON_SCHEMA } from '../core.js';
 import { ClaudeCodeAdapter } from '../adapters/claude-adapter.js';
@@ -45,7 +47,22 @@ export interface AppServicesOptions {
   /** Overrides how a workspace's agents are built. Tests pass fakes. */
   createRunners?: RunnerFactory;
   orchestration?: OrchestrationOptions;
+  /** Encrypts the GitHub token at rest. Electron passes `safeStorage`; absent means no storage. */
+  secrets?: SecretStore;
+  /** Endpoints and transport for GitHub; tests point them at a local fake. */
+  github?: GitHubClientOptions;
 }
+
+/** The store used when the shell offers none: nothing can be kept. */
+const NO_SECRET_STORE: SecretStore = {
+  available: false,
+  encrypt() {
+    throw new Error('no secret store');
+  },
+  decrypt() {
+    throw new Error('no secret store');
+  },
+};
 
 export class AppServices {
   readonly events = new EventBus();
@@ -64,6 +81,7 @@ export class AppServices {
   readonly verifications: VerificationService;
   readonly orchestration: OrchestrationService;
   readonly chat: ChatService;
+  readonly github: GitHubService;
 
   constructor(options: AppServicesOptions = {}) {
     this.paths = options.paths ?? appPaths();
@@ -115,6 +133,14 @@ export class AppServices {
     );
     this.chat = new ChatService(this.database, this.orchestration);
     this.workspaces.bindActivity((workspaceId) => this.orchestration.hasActiveRunInWorkspace(workspaceId));
+    this.github = new GitHubService(
+      this.database,
+      options.secrets ?? NO_SECRET_STORE,
+      this.events,
+      options.openUrl ?? (() => {}),
+      options.github ?? {},
+    );
+    this.workspaces.bindGitHub(this.github);
 
     this.database.providers.ensureSeeded();
     this.agents.sync();

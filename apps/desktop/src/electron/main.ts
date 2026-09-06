@@ -6,7 +6,7 @@
  * renderer. Any real logic here would be logic the tests cannot reach.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { REQUEST_CHANNELS } from '../shared/ipc-contract.js';
@@ -99,6 +99,16 @@ async function boot(): Promise<void> {
   services = new AppServices({
     openUrl: (url) => {
       void shell.openExternal(url);
+    },
+    // Electron's safeStorage: DPAPI on Windows, Keychain on macOS, the
+    // desktop keyring on Linux. Without one, the GitHub login is refused
+    // rather than written in the clear.
+    secrets: {
+      get available() {
+        return safeStorage.isEncryptionAvailable();
+      },
+      encrypt: (plain) => safeStorage.encryptString(plain).toString('base64'),
+      decrypt: (cipher) => safeStorage.decryptString(Buffer.from(cipher, 'base64')),
     },
   });
 

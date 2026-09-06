@@ -755,9 +755,122 @@ test('the header renames the project and switches branches the git way, asking w
   }
 });
 
+test('GitHub: the card takes a client id, signs in with the device code shown, and the picker lists a private repo', async () => {
+  const window = await openWindow();
+  await window.webContents.executeJavaScript(
+    `(() => { location.hash = '#/configuracoes?tab=accounts'; return true; })()`,
+  );
+  await reloadWindow(window);
+  let text = await waitForText(window, /GitHub/, 15_000);
+  assert.match(text, /Não configurado/);
+  assert.doesNotMatch(text, /Sem login próprio/, 'the placeholder is gone');
+
+  // The Client ID is the one thing the person must bring; the steps to get
+  // it are on the card.
+  await click(window, 'github-help');
+  text = await waitForText(window, /Enable Device Flow/, 10_000);
+  assert.match(text, /New GitHub\s+App/);
+  await type(window, 'github-client-id', 'Iv1.testclientid');
+  await click(window, 'github-save-client-id');
+  await waitForText(window, /Não conectado/, 10_000);
+
+  // Connect: the same dialog as the CLI sign-ins, with GitHub's code in it.
+  await click(window, 'github-connect');
+  text = await waitForText(window, /WDJB-MJHT/, 15_000);
+  assert.match(text, /Código do dispositivo/);
+  assert.ok(openedUrls.some((u) => u.endsWith('/login/device')), 'the browser was sent to the device page');
+  await waitForText(window, /Conectado como octocat/, 15_000);
+
+  // What the window can read never contains the token.
+  const settings = await window.webContents.executeJavaScript('window.api.settings.all()');
+  assert.ok(!('github.token.enc' in settings));
+  assert.ok(!JSON.stringify(settings).includes('gho_electrontesttoken'));
+  const status = await window.webContents.executeJavaScript('window.api.github.status()');
+  assert.equal(status.login, 'octocat');
+  assert.ok(!JSON.stringify(status).includes('gho_'));
+
+  // The project picker offers the person's repositories, private ones marked.
+  await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+  await reloadWindow(window);
+  await waitForText(window, /Pular onboarding/, 15_000);
+  await click(window, 'skip-onboarding');
+  await waitForText(window, /Recentes/i, 15_000);
+  await window.webContents.executeJavaScript(`
+    document.querySelector('button[aria-label="Adicionar projeto"]').click()
+  `);
+  text = await waitForText(window, /octocat\/private-thing/, 15_000);
+  assert.match(text, /privado/i);
+  await click(window, 'repo-octocat/private-thing');
+  const url = await window.webContents.executeJavaScript(
+    `document.querySelector('[data-testid="clone-url"]').value`,
+  );
+  assert.equal(url, 'https://github.com/octocat/private-thing.git', 'the clone URL carries no credential');
+
+  // The header knows who is signed in.
+  await window.webContents.executeJavaScript(`
+    document.querySelector('[data-state="open"] [aria-label], [role="dialog"] button')?.click?.()
+  `);
+  await click(window, 'github-chip');
+  await waitForText(window, /octocat/, 10_000);
+
+  // Disconnect forgets the login.
+  await window.webContents.executeJavaScript(
+    `(() => { location.hash = '#/configuracoes?tab=accounts'; return true; })()`,
+  );
+  await reloadWindow(window);
+  await waitForText(window, /Conectado como octocat/, 15_000);
+  await click(window, 'github-disconnect');
+  await waitForText(window, /Não conectado/, 10_000);
+  const after = await window.webContents.executeJavaScript('window.api.github.status()');
+  assert.equal(after.connected, false);
+  assert.equal(after.configured, true, 'the client id stays');
+});
+
 /* ------------------------------------------------------------------ helpers */
 
 let sharedWindow = null;
+let fakeGitHub = null;
+const openedUrls = [];
+
+/**
+ * The parts of github.com and api.github.com the card and the picker use,
+ * on localhost: device code, token, who am I, my repositories.
+ */
+async function startFakeGitHub() {
+  const { createServer } = await import('node:http');
+  const TOKEN = 'gho_electrontesttoken';
+  let polls = 0;
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const json = (status, payload) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      };
+      const url = new URL(req.url, 'http://localhost');
+      if (url.pathname === '/login/device/code') {
+        return json(200, { device_code: 'dc', user_code: 'WDJB-MJHT', verification_uri: `${base}/login/device`, expires_in: 900, interval: 1 });
+      }
+      if (url.pathname === '/login/oauth/access_token') {
+        polls += 1;
+        if (polls < 2) return json(200, { error: 'authorization_pending' });
+        return json(200, { access_token: TOKEN, token_type: 'bearer', scope: 'repo' });
+      }
+      if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) return json(401, { message: 'Bad credentials' });
+      if (url.pathname === '/user') return json(200, { login: 'octocat', name: 'The Octocat', avatar_url: '', html_url: 'https://github.com/octocat' });
+      if (url.pathname === '/user/repos') {
+        return json(200, [
+          { full_name: 'octocat/private-thing', name: 'private-thing', owner: { login: 'octocat' }, private: true, default_branch: 'main', html_url: 'https://github.com/octocat/private-thing', clone_url: 'https://github.com/octocat/private-thing.git', updated_at: '2026-09-01T00:00:00Z', permissions: { push: true, admin: true } },
+        ]);
+      }
+      return json(404, { message: 'no route' });
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  return { endpoints: { oauthBase: base, apiBase: base }, close: () => new Promise((r) => server.close(r)) };
+}
 
 async function openWindow() {
   if (sharedWindow && !sharedWindow.isDestroyed()) return sharedWindow;
@@ -774,7 +887,24 @@ async function openWindow() {
     staging: join(appRoot, 'staging'),
   };
 
-  services = new AppServices({ paths, openUrl: () => {} });
+  fakeGitHub = await startFakeGitHub();
+  services = new AppServices({
+    paths,
+    openUrl: (url) => openedUrls.push(url),
+    // The GitHub on localhost, and a reversible secret store: enough to run
+    // the real login through the real card without a keyring.
+    // Polls a little apart, so the code is on screen the way it is for a
+    // person; the real interval is what GitHub says (seconds).
+    github: {
+      endpoints: fakeGitHub.endpoints,
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 600))),
+    },
+    secrets: {
+      available: true,
+      encrypt: (plain) => `enc:${Buffer.from(plain, 'utf8').toString('base64')}`,
+      decrypt: (cipher) => Buffer.from(cipher.slice(4), 'base64').toString('utf8'),
+    },
+  });
   const router = new IpcRouter(services, {
     selectFolder: async () => null,
     openExternal: async () => true,
@@ -913,6 +1043,7 @@ app.whenReady().then(async () => {
 
   try {
     if (services) await services.shutdown();
+    if (fakeGitHub) await fakeGitHub.close();
     if (appRoot) rmSync(appRoot, { recursive: true, force: true });
   } catch {
     /* teardown must never change the verdict */
