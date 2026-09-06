@@ -209,8 +209,13 @@ export class AppServices {
       const runtimeId = agent.adapter_id === 'codex-cli' ? 'codex' : 'claude-code';
       try {
         await this.runtimeManager.getExecutablePath(runtimeId);
-      } catch {
-        return `${agent.display_name} ainda não está configurado. Configure os runtimes primeiro.`;
+      } catch (error) {
+        // "Codex 0.130.0 is not compatible" and "Codex is not configured" are
+        // different problems with different fixes; the runtime says which.
+        const message = (error as { userMessage?: unknown }).userMessage;
+        return typeof message === 'string'
+          ? `${message} Abra Configurações → Componentes e atualize.`
+          : `${agent.display_name} ainda não está configurado. Configure os runtimes primeiro.`;
       }
 
       const managers = { anthropic: this.accountManager, openai: this.codexAccountManager };

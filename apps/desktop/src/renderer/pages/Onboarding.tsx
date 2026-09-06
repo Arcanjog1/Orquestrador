@@ -182,6 +182,16 @@ export function OnboardingPage({
                           {r.version}
                         </span>
                       )}
+                      {r.outdated && (
+                        <span className="text-[11px] text-attention" data-testid={`outdated-${r.runtimeId}`}>
+                          atualizando para {r.outdated.tested}
+                        </span>
+                      )}
+                      {!r.ready && !installing && r.detail && (
+                        <span className="min-w-0 truncate text-[11px] text-muted-foreground" title={r.detail}>
+                          {r.detail}
+                        </span>
+                      )}
                       {r.ready ? (
                         <span className="ml-auto text-xs text-success">Pronto</span>
                       ) : installing ? (
@@ -207,7 +217,7 @@ export function OnboardingPage({
                           disabled={!r.canAutoConfigure || busy !== null}
                           onClick={() => void installRuntime(r.runtimeId)}
                         >
-                          Configurar
+                          {r.version ? "Atualizar" : "Configurar"}
                         </Button>
                       )}
                     </div>

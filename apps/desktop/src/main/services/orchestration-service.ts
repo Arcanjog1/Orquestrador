@@ -559,6 +559,7 @@ export class OrchestrationService {
         outcome: result.outcome,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
+        ...(result.executable ? { executable: result.executable } : {}),
         stdoutExcerpt: excerpt(result.stdout),
         stderrExcerpt: excerpt(result.stderr),
         ...(result.error ? { error: result.error } : {}),
@@ -569,8 +570,8 @@ export class OrchestrationService {
           result.outcome === 'timeout'
             ? `o Codex não respondeu em ${Math.round((this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs) / 60_000)} min`
             : `o Codex não concluiu (${result.outcome}${result.exitCode !== null ? `, código ${result.exitCode}` : ''})`;
-        const said = firstLine(result.stderr) || firstLine(result.stdout) || result.error || '';
-        this.step(runId, iteration, 'orchestrator', result.outcome, problem, diagnostics);
+        const said = errorLine(result.stderr) || errorLine(result.stdout) || result.error || '';
+        this.step(runId, iteration, 'orchestrator', 'cli-failed', problem, diagnostics);
         return {
           decision: null,
           failure: `${capitalize(problem)}${said ? `: ${redact(said)}` : '.'}`,
@@ -578,6 +579,21 @@ export class OrchestrationService {
       }
 
       const parsed = parseDecision(result.stdout);
+      if (!parsed.ok && result.exitCode !== 0) {
+        // The CLI itself failed - a crashed models refresh, a refused login,
+        // a missing flag. That is what the person must read, in the CLI's
+        // own words; a repair prompt would only re-run the same crash.
+        const problem = `o Codex saiu com código ${result.exitCode}`;
+        const said = errorLine(result.stderr) || errorLine(result.stdout) || '';
+        this.step(runId, iteration, 'orchestrator', 'cli-failed', problem, {
+          ...diagnostics,
+          parseError: parsed.error,
+        });
+        return {
+          decision: null,
+          failure: `${capitalize(problem)}${said ? `: ${redact(said)}` : '.'}`,
+        };
+      }
       if (parsed.ok) {
         this.step(runId, iteration, 'orchestrator', 'ok', parsed.decision.action, {
           attempt,
@@ -778,6 +794,21 @@ function describeFiles(evidence: GitEvidence): string {
 function excerpt(text: string, max = 600): string {
   const trimmed = text.replace(/\r/g, '').trim();
   return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
+}
+
+/**
+ * The line a person should read first: the CLI's own ERROR line when it
+ * printed one, otherwise the first non-empty line. A crashing Codex prints
+ * warnings before the error that explains the exit, and the warning is not
+ * the story.
+ */
+function errorLine(text: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const error = lines.find((l) => /\b(ERROR|error:|Error:|panicked)\b/.test(l));
+  return (error ?? lines[0] ?? '').slice(0, 400);
 }
 
 function firstLine(text: string): string {

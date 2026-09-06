@@ -79,6 +79,8 @@ export interface AgentResult {
   truncated: boolean;
   /** Human-readable failure description when `outcome !== 'completed'`. */
   error?: string;
+  /** The executable that ran, so a failure names the binary it came from. */
+  executable?: string;
 }
 
 /** Health of an agent CLI, produced by `AgentRunner.healthCheck`. */

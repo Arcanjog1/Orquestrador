@@ -122,6 +122,8 @@ export interface AppInfo {
 export interface RuntimeStatusView {
   readonly runtimeId: RuntimeId;
   readonly displayName: string;
+  /** A managed install behind the tested version; the app updates it itself. */
+  readonly outdated: { readonly installed: string; readonly tested: string } | null;
   /** `managed` | `system` | `missing`. */
   readonly origin: string;
   readonly version: string | null;
@@ -302,7 +304,8 @@ export interface RunView {
   /**
    * Why a FAILED run failed, from the last step the loop recorded:
    * `readiness` (an account or runtime was not ready), `decision` (the
-   * orchestrator's CLI did not return a usable decision), `limit` (the
+   * orchestrator answered but not with a usable decision), `cli` (the
+   * orchestrator's CLI failed on its own), `limit` (the
    * iteration limit was reached), `interrupted` (the application closed),
    * `error` (an exception). Null for any other status.
    */
@@ -311,7 +314,12 @@ export interface RunView {
   readonly finishedAt: string | null;
 }
 
-export type RunFailureKind = 'readiness' | 'decision' | 'limit' | 'interrupted' | 'error';
+/**
+ * `cli` is the orchestrator's CLI failing on its own (non-zero exit, timeout,
+ * spawn error) - distinct from `decision`, where the CLI answered but not
+ * with a usable decision.
+ */
+export type RunFailureKind = 'readiness' | 'cli' | 'decision' | 'limit' | 'interrupted' | 'error';
 
 /** One recorded step of a run, with its diagnostics when it left any. */
 export interface RunStepView {

@@ -60,6 +60,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
         stdout: result.stdout,
         stderr: result.stderr,
         truncated: result.truncated,
+        executable,
         ...(result.error ? { error: result.error } : {}),
       });
     } finally {

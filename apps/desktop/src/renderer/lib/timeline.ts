@@ -301,6 +301,7 @@ export function buildTimeline(input: TimelineInput): TimelineEntry[] {
 }
 
 const FAILURE_TITLE: Record<string, string> = {
+  cli: 'O Codex CLI falhou',
   decision: 'O orquestrador não devolveu uma decisão',
   readiness: 'A execução não pôde começar',
   interrupted: 'Execução interrompida',

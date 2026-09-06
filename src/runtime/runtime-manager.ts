@@ -33,6 +33,8 @@ export interface RuntimeStatus {
   health: HealthStatus;
   /** True when the application can fix this without the user leaving the app. */
   canAutoConfigure: boolean;
+  /** A managed install older than the tested version; `upgradeOutdated` moves it. */
+  outdated: { installed: string; tested: string } | null;
 }
 
 /** What the onboarding screen renders. */
@@ -77,6 +79,22 @@ export class RuntimeManager {
    * Throws `RuntimeNotReadyError`, which carries a user-facing message and the
    * label for the button that fixes it.
    */
+  /**
+   * Moves every managed install that is older than its tested version up to
+   * it. Called at start-up, in the background: a person who installed Codex
+   * 0.153.0 through the application gets 0.153.4 without doing anything, and
+   * their accounts (kept under `paths.profiles`) are not touched.
+   */
+  async upgradeOutdated(onProgress?: ProgressReporter, options: InstallOptions = {}): Promise<InstallResult[]> {
+    const results: InstallResult[] = [];
+    for (const runtime of this.list()) {
+      if (!runtime.outdatedManagedVersion()) continue;
+      const result = await runtime.ensureTested(onProgress, options);
+      if (result) results.push(result);
+    }
+    return results;
+  }
+
   async getExecutablePath(runtimeId: RuntimeId): Promise<string> {
     return this.get(runtimeId).getExecutablePath();
   }
@@ -107,6 +125,7 @@ export class RuntimeManager {
         detection,
         health,
         canAutoConfigure: runtime.sources.length > 0,
+        outdated: runtime.outdatedManagedVersion(),
       });
     }
 

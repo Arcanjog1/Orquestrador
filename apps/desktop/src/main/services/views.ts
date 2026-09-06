@@ -66,7 +66,7 @@ function failureKindOf(steps: readonly RunStepRecord[]): RunFailureKind {
     case 'readiness':
       return 'readiness';
     case 'orchestrator':
-      return 'decision';
+      return last.status === 'cli-failed' ? 'cli' : 'decision';
     case 'limit':
       return 'limit';
     case 'interrupted':

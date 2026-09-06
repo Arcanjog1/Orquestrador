@@ -55,6 +55,8 @@ async function loadAdapters() {
   }
 }
 
+const { probeCodexCatalog } = await import('./probe-codex-catalog.mjs');
+
 const home = mkdtempSync(join(tmpdir(), 'lao-probe-'));
 const paths = ensureAppPaths(appPaths({ ...process.env, AI_ORCHESTRATOR_HOME: home }));
 const processManager = new ProcessManager();
@@ -188,6 +190,19 @@ for (const runtimeId of runtimes) {
       if (process.env.AI_ORCHESTRATOR_PROBE_DUMP_HELP === '1') {
         console.log(`\n----- ${runtimeId} ${sub} --help -----\n${subText}\n-----`);
       }
+    }
+
+    // The incident check: the binary the application just installed is put
+    // in front of a model catalogue that carries `max` and `ultra`, as the
+    // real backend serves, and must accept it and complete a structured turn.
+    if (runtimeId === 'codex') {
+      const catalogue = await probeCodexCatalog(install.executablePath);
+      say('catalogue with max: unknown variant', String(catalogue.unknownVariant));
+      say('catalogue with max: catalogue requested', String(catalogue.catalogueRequested));
+      say('catalogue with max: turn completed', String(catalogue.turnRequested && catalogue.producedDecision));
+      say('catalogue with max: exit', `${catalogue.exitCode}`);
+      for (const line of catalogue.stderrTail.slice(-3)) say('catalogue with max: stderr', line);
+      if (!catalogue.pass) throw new Error('the installed Codex did not survive a catalogue with max');
     }
 
     for (const check of POST_INSTALL_CHECKS[runtimeId] ?? []) {

@@ -62,7 +62,15 @@ export interface CompatibilityDecision {
 export const RUNTIME_COMPATIBILITY: Record<RuntimeId, RuntimeCompatibility> = {
   codex: {
     runtimeId: 'codex',
-    testedVersion: '0.153.0',
+    // 0.153.4 is the `latest` dist-tag of @openai/codex (published 2026-09-04)
+    // and the rust-v0.153.4 GitHub release; verified with the official
+    // SHA-256 manifest and driven end to end by scripts/probe-codex-catalog.mjs.
+    testedVersion: '0.153.4',
+    // Releases before 0.145 deserialise the model catalogue with a closed
+    // reasoning-effort enum; the backend now serves `max` and `ultra`, which
+    // such a build refuses ("unknown variant `max`") and then cannot run.
+    // 0.150 is the first line this project exercised; nothing older is used,
+    // not even one found on the PATH.
     minVersion: '0.150.0',
     updatePolicy: 'compatible',
     note:

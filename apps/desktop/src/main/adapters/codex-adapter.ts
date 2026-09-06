@@ -94,6 +94,7 @@ export class CodexAdapter implements AgentRunner {
         stdout,
         stderr: result.stderr,
         truncated: result.truncated,
+        executable,
         ...(result.error ? { error: result.error } : {}),
       });
     } finally {

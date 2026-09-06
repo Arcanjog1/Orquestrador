@@ -78,6 +78,10 @@ vê todos os repositórios do usuário sem instalação por organização.
 
 ## 4. Limitações conhecidas
 
+- **Runtime Codex**: a versão testada é 0.153.4; um Codex antigo no `PATH`
+  é recusado e o gerenciado é instalado/atualizado sozinho. Registro do
+  incidente em `docs/INCIDENTE_CODEX_MAX.md`.
+
 - **Verificações** só chamam executáveis no `PATH` ou por caminho absoluto; os
   runtimes gerenciados (Codex, Claude Code, MinGit) não são alcançáveis pelo
   nome (limitação registrada em `docs/PROVA_LOOP_REAL.md`).

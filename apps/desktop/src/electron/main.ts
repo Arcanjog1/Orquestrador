@@ -138,6 +138,14 @@ async function boot(): Promise<void> {
   assertHardened(mainWindow);
   await mainWindow.loadFile(INDEX_HTML);
 
+  // A runtime the application installed earlier may be behind the version
+  // this build was tested with (Codex 0.153.0 -> 0.153.4). It is brought up
+  // in the background, with the same progress the first-run screen shows;
+  // account profiles are outside the runtime directory and untouched.
+  if (!smokeRequested()) {
+    void services.runtimes.upgradeOutdated().catch(() => undefined);
+  }
+
   // The packaged build can be asked to check itself and quit. Never in normal
   // use: it only happens when AI_ORCHESTRATOR_SMOKE is set, which CI sets.
   if (smokeRequested()) {

@@ -42,6 +42,7 @@ import { appPaths, runtimeDir, type AppPaths } from './paths.js';
 import {
   RuntimeError,
   RuntimeInstallCancelledError,
+  RuntimeIncompatibleError,
   RuntimeNotReadyError,
   type HealthStatus,
   type InstallOptions,
@@ -130,28 +131,98 @@ export abstract class ManagedRuntime {
     return existsSync(join(this.previousDir, manifest.executableRelativePath));
   }
 
+  /**
+   * What is on this machine, and whether it may be used.
+   *
+   * A managed install wins over anything on the PATH. Either one is then held
+   * to the compatibility window: an executable below the minimum version is
+   * reported as found *and* incompatible, so the interface can say "Codex
+   * 0.130.0 is too old" and install the tested build, rather than running a
+   * binary the adapters were never written against. That is how a machine
+   * with an old global Codex ended up refusing the model catalogue with
+   * "unknown variant `max`" while the application believed it was ready.
+   */
   async detect(): Promise<RuntimeDetection> {
     const manifest = this.readManifest();
     if (manifest) {
       const executablePath = join(this.currentDir, manifest.executableRelativePath);
       if (existsSync(executablePath)) {
-        return { runtimeId: this.id, origin: 'managed', executablePath, version: manifest.version, manifest };
+        return this.withWindow({
+          runtimeId: this.id,
+          origin: 'managed',
+          executablePath,
+          version: manifest.version,
+          manifest,
+        });
       }
     }
 
     const systemPath = this.findSystemInstallation();
     if (systemPath) {
       const version = await this.readVersion(systemPath);
-      return { runtimeId: this.id, origin: 'system', executablePath: systemPath, version, manifest: null };
+      return this.withWindow({
+        runtimeId: this.id,
+        origin: 'system',
+        executablePath: systemPath,
+        version: versionNumberOf(version),
+        manifest: null,
+      });
     }
 
     return { runtimeId: this.id, origin: 'missing', executablePath: null, version: null, manifest: null };
   }
 
+  private withWindow(detection: RuntimeDetection): RuntimeDetection {
+    if (!detection.version) return detection;
+    const decision = evaluateCompatibility(this.compatibility, detection.version);
+    // Only the lower bound refuses an executable: a build newer than the
+    // tested one still speaks the interface (the window's upper bound only
+    // holds *updates* back), and an unparseable version is left to the health
+    // check, which reports it in its own words.
+    if (decision.verdict === 'below-minimum') {
+      return { ...detection, incompatible: decision.reason };
+    }
+    return detection;
+  }
+
   async getExecutablePath(): Promise<string> {
     const detection = await this.detect();
     if (!detection.executablePath) throw new RuntimeNotReadyError(this.id, this.displayName);
+    if (detection.incompatible) {
+      throw new RuntimeIncompatibleError(
+        this.id,
+        this.displayName,
+        detection.version ?? '?',
+        detection.incompatible,
+      );
+    }
     return detection.executablePath;
+  }
+
+  /**
+   * True when a managed install is older than the version this build was
+   * tested with. Nothing is downloaded here; `ensureTested` does that.
+   */
+  outdatedManagedVersion(): { installed: string; tested: string } | null {
+    const manifest = this.readManifest();
+    if (!manifest) return null;
+    if (compareVersions(manifest.version, this.compatibility.testedVersion) >= 0) return null;
+    return { installed: manifest.version, tested: this.compatibility.testedVersion };
+  }
+
+  /**
+   * Brings a managed install that is older than the tested version up to it.
+   *
+   * The tested version is requested by its own tag - not "latest" - and the
+   * install goes through staging, the capability check and promotion like a
+   * first install, keeping the replaced build as `previous`. The runtime
+   * directory is the only thing touched: account profiles (CODEX_HOME,
+   * CLAUDE_CONFIG_DIR) live under `paths.profiles` and are never in play.
+   */
+  async ensureTested(onProgress?: ProgressReporter, options: InstallOptions = {}): Promise<InstallResult | null> {
+    const outdated = this.outdatedManagedVersion();
+    if (!outdated) return null;
+    return this.acquire(firstInstallRequest(this.compatibility), onProgress, options);
   }
 
   async getVersion(): Promise<string | null> {
@@ -165,6 +236,16 @@ export abstract class ManagedRuntime {
         healthy: false,
         problem: `${this.displayName} ainda não está configurado.`,
         remedy: 'Configurar automaticamente',
+      };
+    }
+    if (detection.incompatible) {
+      const where = detection.origin === 'system' ? 'encontrado no PATH' : 'instalado';
+      return {
+        healthy: false,
+        ...(detection.version ? { version: detection.version } : {}),
+        executablePath: detection.executablePath,
+        problem: `${this.displayName} ${detection.version ?? ''} ${where} é anterior à versão mínima ${this.compatibility.minVersion ?? ''}. O aplicativo instala a versão testada (${this.compatibility.testedVersion}) sem mexer nas suas contas.`,
+        remedy: 'Atualizar automaticamente',
       };
     }
     const version = await this.readVersion(detection.executablePath);
@@ -548,4 +629,14 @@ function safeHost(url: string): string {
  */
 function throwIfCancelled(runtimeId: RuntimeId, signal?: AbortSignal): void {
   if (signal?.aborted) throw new RuntimeInstallCancelledError(runtimeId);
+}
+
+/**
+ * The version number inside a `--version` line: "codex-cli 0.130.0" gives
+ * "0.130.0". Null when the line carries no version at all.
+ */
+export function versionNumberOf(line: string | null): string | null {
+  if (!line) return null;
+  const match = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(line);
+  return match ? match[1]! : null;
 }

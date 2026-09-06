@@ -100,6 +100,11 @@ export interface RuntimeDetection {
   version: string | null;
   /** Present when `origin === 'managed'`. */
   manifest: RuntimeManifest | null;
+  /**
+   * Why the executable found may not be used, when it may not: a version
+   * outside the compatibility window. Absent when it is usable or missing.
+   */
+  incompatible?: string;
 }
 
 /** What the application records about a runtime it installed. */
@@ -196,6 +201,24 @@ export class RuntimeError extends Error {
   ) {
     super(`${runtimeId}: ${userMessage}${detail ? ` (${detail})` : ''}`);
     this.name = 'RuntimeError';
+  }
+}
+
+/**
+ * Raised when the only executable available is outside the compatibility
+ * window - an old build on the PATH, or a managed install the policy has
+ * since moved past. The application installs the tested version instead of
+ * running it.
+ */
+export class RuntimeIncompatibleError extends RuntimeError {
+  constructor(runtimeId: RuntimeId, displayName: string, version: string, reason: string) {
+    super(
+      runtimeId,
+      `${displayName} ${version} não é compatível com esta versão do aplicativo. ${reason}`,
+      'Atualizar automaticamente',
+      `version ${version} is outside the compatibility window`,
+    );
+    this.name = 'RuntimeIncompatibleError';
   }
 }
 

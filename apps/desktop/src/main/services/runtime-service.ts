@@ -47,6 +47,7 @@ export class RuntimeService {
       ready: status.health.healthy,
       canAutoConfigure: status.canAutoConfigure,
       detail: describe(status.health.healthy, status.detection.origin, status.health.problem),
+      outdated: status.outdated,
     }));
     return {
       ready: report.ready,
@@ -54,6 +55,28 @@ export class RuntimeService {
       pending: report.pending,
       checkedAt: report.checkedAt,
     };
+  }
+
+  /**
+   * Moves managed installs older than their tested version up to it, with
+   * the same progress events an install shows. Runs in the background at
+   * start-up; a failure leaves the working build in place and is reported on
+   * the event channel, never thrown at the caller.
+   */
+  async upgradeOutdated(): Promise<InstallResultView[]> {
+    const out: InstallResultView[] = [];
+    for (const status of (await this.runtimeManager.diagnose()).runtimes) {
+      if (!status.outdated || this.running.has(status.runtimeId)) continue;
+      this.events.emit('runtime:progress', {
+        runtimeId: status.runtimeId,
+        phase: 'resolving',
+        label: 'Atualizando',
+        message: `Atualizando ${status.displayName} ${status.outdated.installed} para ${status.outdated.tested}...`,
+        percent: null,
+      });
+      out.push(await this.install(status.runtimeId));
+    }
+    return out;
   }
 
   /** Installs one runtime, reporting progress as it goes. */

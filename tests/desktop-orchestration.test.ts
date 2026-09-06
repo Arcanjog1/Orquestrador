@@ -452,7 +452,7 @@ test('a CLI that exits without answering is reported as that, with its own words
     );
     const run = await prepared.fixture.services.orchestration.waitFor(sent.run.id);
     assert.equal(run.status, 'FAILED');
-    assert.equal(run.failureKind, 'decision');
+    assert.equal(run.failureKind, 'cli', 'the CLI failed; that is not a decision problem');
     assert.match(run.summary ?? '', /saiu com código 1: Error: usage limit reached/);
     const messages = value<Array<{ author: string; text: string }>>(
       await prepared.fixture.router.handle('chat.listMessages', { sessionId: prepared.sessionId }),
@@ -464,6 +464,54 @@ test('a CLI that exits without answering is reported as that, with its own words
     const everything = JSON.stringify(detail);
     assert.doesNotMatch(everything, /abcdefghijklmnop123456/, 'the header value is redacted everywhere');
     assert.match(everything, /usage limit reached/);
+  } finally {
+    await prepared.cleanup();
+  }
+});
+
+test('the incident: a Codex too old for the model catalogue is reported as a CLI failure naming the binary', async () => {
+  // Observed on Windows: the installed Codex refused the catalogue the
+  // backend now serves and exited before answering. The loop then reported
+  // "no JSON object" as if the orchestrator had answered badly. The exit and
+  // the CLI's own ERROR line are the story; the parse error is a footnote.
+  const prepared = await prepare({ orchestratorScript: [], maxIterations: 1 });
+  prepared.orchestrator.run = async () => ({
+    outcome: 'completed',
+    exitCode: 1,
+    signal: null,
+    stdout: '',
+    stderr:
+      'WARNING: proceeding, even though we could not update PATH\n' +
+      '2026-09-06T00:00:00Z ERROR codex_core::models_manager::manager: failed to refresh available models: ' +
+      'stream disconnected before completion: failed to decode models response: unknown variant `max`, ' +
+      'expected one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`\n',
+    durationMs: 2138,
+    truncated: false,
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    executable: 'C:\\Users\\dev\\AppData\\Roaming\\npm\\codex.cmd',
+  });
+  try {
+    const sent = value<{ run: { id: string } }>(
+      await prepared.fixture.router.handle('chat.sendMessage', { sessionId: prepared.sessionId, text: 'crie hello.txt' }),
+    );
+    const run = await prepared.fixture.services.orchestration.waitFor(sent.run.id);
+    assert.equal(run.status, 'FAILED');
+    assert.equal(run.failureKind, 'cli');
+    assert.match(run.summary ?? '', /^O Codex saiu com código 1: .*ERROR codex_core::models_manager.*unknown variant `max`/);
+    assert.doesNotMatch(run.summary ?? '', /WARNING: proceeding/, 'the warning is not the headline');
+    assert.equal(prepared.orchestrator.calls.length, 0, 'no repair prompt: the crash would only repeat');
+
+    const detail = value<{ steps: Array<{ phase: string; status: string; detail: string | null }> }>(
+      await prepared.fixture.router.handle('run.detail', { runId: sent.run.id }),
+    );
+    const step = detail.steps.find((s) => s.phase === 'orchestrator')!;
+    assert.equal(step.status, 'cli-failed');
+    const diagnostics = JSON.parse(step.detail ?? '{}') as Record<string, unknown>;
+    assert.equal(diagnostics.exitCode, 1);
+    assert.match(String(diagnostics.executable), /npm.*codex\.cmd$/, 'the binary that ran is on the record');
+    assert.match(String(diagnostics.stderrExcerpt), /unknown variant `max`/);
+    assert.match(String(diagnostics.parseError), /No JSON object/, 'the parse error is kept, as the footnote it is');
   } finally {
     await prepared.cleanup();
   }
