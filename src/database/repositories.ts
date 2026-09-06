@@ -312,6 +312,25 @@ export class WorkspaceRepository extends Repository {
     this.db.run('UPDATE workspaces SET updated_at = ? WHERE id = ?', [now(), workspaceId]);
   }
 
+  rename(workspaceId: string, name: string): WorkspaceWithAgents {
+    this.db.run('UPDATE workspaces SET display_name = ?, updated_at = ? WHERE id = ?', [
+      name,
+      now(),
+      workspaceId,
+    ]);
+    return this.require(workspaceId);
+  }
+
+  /**
+   * Forgets the workspace: its row, and by cascade its team bindings,
+   * verifications, conversations and runs. The folder on disk is not this
+   * class's to touch, and it never is.
+   */
+  remove(workspaceId: string): boolean {
+    const result = this.db.run('DELETE FROM workspaces WHERE id = ?', [workspaceId]);
+    return Number(result.changes) > 0;
+  }
+
   private withAgents(row: WorkspaceRecord): WorkspaceWithAgents {
     const bindings = this.db.all<{
       agent_id: string;

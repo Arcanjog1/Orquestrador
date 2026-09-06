@@ -79,6 +79,12 @@ function buildShellBridge(): ShellBridge {
       await shell.openExternal(parsed.toString());
       return true;
     },
+    // Only the router calls this, and only with a path it read from the
+    // workspaces table; the renderer never names a path.
+    async openPath(path: string) {
+      const problem = await shell.openPath(path);
+      return problem === '';
+    },
     appInfo: () => ({
       appVersion: app.getVersion(),
       electronVersion: process.versions.electron ?? '',

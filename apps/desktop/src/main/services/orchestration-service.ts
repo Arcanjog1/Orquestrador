@@ -105,6 +105,14 @@ export class OrchestrationService {
     return this.active.has(runId);
   }
 
+  /** True while any run of this workspace is still going. */
+  hasActiveRunInWorkspace(workspaceId: string): boolean {
+    for (const runId of this.active.keys()) {
+      if (this.database.runs.find(runId)?.workspace_id === workspaceId) return true;
+    }
+    return false;
+  }
+
   /**
    * Cancels a run.
    *

@@ -362,3 +362,118 @@ test('workspace.changes reads the working copy with git, read-only, untracked fi
     repo.cleanup();
   }
 });
+
+test('a project is renamed and removed from the list; its folder is never touched', async () => {
+  const repo = createGitFixture('lao-remove-');
+  repo.write('keep.txt', 'still here\n');
+  repo.commitAll('first');
+  const fixture = createDesktopFixture();
+  try {
+    const workspace = value<{ id: string; name: string }>(
+      await fixture.router.handle('workspace.create', { name: 'Antigo', localPath: repo.dir }),
+    );
+    const renamed = value<{ name: string }>(
+      await fixture.router.handle('workspace.rename', { workspaceId: workspace.id, name: 'Novo nome' }),
+    );
+    assert.equal(renamed.name, 'Novo nome');
+    assert.equal(
+      value<Array<{ id: string; name: string }>>(await fixture.router.handle('workspace.list', null)).find(
+        (w) => w.id === workspace.id,
+      )!.name,
+      'Novo nome',
+    );
+    assert.equal(errorOf(await fixture.router.handle('workspace.rename', { workspaceId: workspace.id, name: '   ' })).code, 'WORKSPACE_ERROR');
+
+    // Records that hang off the project go with it; the folder does not.
+    value(await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'c' }));
+    const removed = value<{ removed: boolean }>(
+      await fixture.router.handle('workspace.remove', { workspaceId: workspace.id }),
+    );
+    assert.equal(removed.removed, true);
+    assert.ok(
+      !value<Array<{ id: string }>>(await fixture.router.handle('workspace.list', null)).some((w) => w.id === workspace.id),
+    );
+    assert.equal(fixture.services.database.chat.listSessions(workspace.id).length, 0);
+    assert.equal(readFileSync(join(repo.dir, 'keep.txt'), 'utf8'), 'still here\n');
+    assert.equal(errorOf(await fixture.router.handle('workspace.remove', { workspaceId: workspace.id })).code, 'NOT_FOUND');
+
+    // Opening the folder goes through the shell with the recorded path, by id.
+    const again = value<{ id: string }>(
+      await fixture.router.handle('workspace.create', { name: 'De novo', localPath: repo.dir }),
+    );
+    value(await fixture.router.handle('workspace.openFolder', { workspaceId: again.id }));
+    assert.deepEqual(fixture.openedPaths, [repo.dir]);
+  } finally {
+    await fixture.cleanup();
+    repo.cleanup();
+  }
+});
+
+test('branches are listed from git and switched safely: clean tree, dirty tree, unknown branch', async () => {
+  const repo = createGitFixture('lao-switch-');
+  repo.write('a.txt', 'one\n');
+  repo.commitAll('first');
+  repo.git('branch', 'feature/two');
+  const fixture = createDesktopFixture();
+  try {
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.create', { name: 'P', localPath: repo.dir }),
+    );
+    const branches = value<{
+      isRepository: boolean;
+      current: string | null;
+      local: string[];
+      remote: string[];
+      dirtyFiles: number;
+    }>(await fixture.router.handle('workspace.branches', { workspaceId: workspace.id }));
+    if (!branches.isRepository) return; // no git reachable from the app root
+    assert.equal(branches.current, 'main');
+    assert.deepEqual([...branches.local].sort(), ['feature/two', 'main']);
+    assert.equal(branches.dirtyFiles, 0);
+
+    type Checkout =
+      | { switched: true; workspace: { branch: string | null } }
+      | { switched: false; dirtyFiles: number; message: string };
+
+    // A clean tree switches.
+    const switched = value<Checkout>(
+      await fixture.router.handle('workspace.checkout', { workspaceId: workspace.id, branch: 'feature/two' }),
+    );
+    assert.ok(switched.switched && switched.workspace.branch === 'feature/two');
+    assert.equal(repo.git('branch', '--show-current').trim(), 'feature/two');
+
+    // A dirty tree is held, as an answer the interface can ask about, until
+    // the person allows it.
+    repo.write('a.txt', 'changed\n');
+    const held = value<Checkout>(
+      await fixture.router.handle('workspace.checkout', { workspaceId: workspace.id, branch: 'main' }),
+    );
+    assert.equal(held.switched, false);
+    if (held.switched) throw new Error('unreachable');
+    assert.equal(held.dirtyFiles, 1);
+    assert.match(held.message, /1 alteração/);
+    assert.equal(repo.git('branch', '--show-current').trim(), 'feature/two', 'nothing moved');
+    const allowed = value<Checkout>(
+      await fixture.router.handle('workspace.checkout', { workspaceId: workspace.id, branch: 'main', allowDirty: true }),
+    );
+    assert.ok(allowed.switched && allowed.workspace.branch === 'main');
+    assert.equal(readFileSync(join(repo.dir, 'a.txt'), 'utf8'), 'changed\n', 'the change travelled, as git does');
+
+    // A branch that does not exist, and a name that could be an option.
+    assert.match(
+      errorOf(await fixture.router.handle('workspace.checkout', { workspaceId: workspace.id, branch: 'nope' })).message,
+      /não existe/,
+    );
+    assert.equal(
+      errorOf(await fixture.router.handle('workspace.checkout', { workspaceId: workspace.id, branch: '--orphan' })).code,
+      'INVALID_ARGUMENT',
+    );
+    assert.equal(
+      errorOf(await fixture.router.handle('workspace.checkout', { workspaceId: workspace.id, branch: 'a b' })).code,
+      'INVALID_ARGUMENT',
+    );
+  } finally {
+    await fixture.cleanup();
+    repo.cleanup();
+  }
+});

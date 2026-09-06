@@ -114,6 +114,7 @@ export class AppServices {
       options.createRunners ? async () => null : (workspace) => this.checkAgentsReady(workspace),
     );
     this.chat = new ChatService(this.database, this.orchestration);
+    this.workspaces.bindActivity((workspaceId) => this.orchestration.hasActiveRunInWorkspace(workspaceId));
 
     this.database.providers.ensureSeeded();
     this.agents.sync();

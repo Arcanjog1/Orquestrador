@@ -3,9 +3,14 @@ import {
   Check,
   ChevronDown,
   ExternalLink,
+  FolderOpen,
   GitBranch,
+  Loader2,
+  Pencil,
   Plus,
+  RefreshCw,
   Search,
+  Trash2,
   Users,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -13,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { Agent, RunState } from "@/lib/orchestrator-data";
-import type { WorkspaceView } from "@shared/ipc-contract";
+import type { WorkspaceBranchesView, WorkspaceView } from "@shared/ipc-contract";
 import {
   AgentIdentity,
   ProviderIcon,
@@ -66,6 +71,13 @@ export function TopContextBar({
   onOpenExternal,
   onOpenWorkspace,
   onAddProject,
+  onRenameWorkspace,
+  onRemoveWorkspace,
+  onOpenFolder,
+  branches,
+  onRefreshBranches,
+  onCheckout,
+  switching = null,
 }: {
   state: RunState;
   iteration: number;
@@ -76,6 +88,15 @@ export function TopContextBar({
   onOpenExternal: (url: string) => void;
   onOpenWorkspace: (workspaceId: string) => void;
   onAddProject: () => void;
+  onRenameWorkspace: () => void;
+  onRemoveWorkspace: () => void;
+  onOpenFolder: () => void;
+  /** What git reports for the working copy; null until read. */
+  branches: WorkspaceBranchesView | null;
+  onRefreshBranches: () => void;
+  onCheckout: (branch: string) => void;
+  /** The branch being switched to, while git works. */
+  switching?: string | null;
 }) {
   const [query, setQuery] = useState("");
 
@@ -150,7 +171,7 @@ export function TopContextBar({
       {/* Project chip */}
       <Popover>
         <PopoverTrigger asChild>
-          <button>
+          <button data-testid="project-chip">
             <Chip>
               <span className="truncate">{workspace?.name ?? "Nenhum projeto"}</span>
               <ChevronDown className="size-3 text-muted-foreground" />
@@ -192,6 +213,34 @@ export function TopContextBar({
               </p>
             )}
           </div>
+          {workspace && (
+            <div className="border-t border-border p-1">
+              <div className="px-2 pt-1 pb-0.5 text-[11px] text-muted-foreground">
+                {workspace.name}
+              </div>
+              <button
+                onClick={onRenameWorkspace}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent"
+                data-testid="rename-workspace"
+              >
+                <Pencil className="size-3.5 text-muted-foreground" /> Renomear projeto
+              </button>
+              <button
+                onClick={onOpenFolder}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent"
+                data-testid="open-workspace-folder"
+              >
+                <FolderOpen className="size-3.5 text-muted-foreground" /> Abrir pasta
+              </button>
+              <button
+                onClick={onRemoveWorkspace}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-danger transition-colors hover:bg-accent"
+                data-testid="remove-workspace"
+              >
+                <Trash2 className="size-3.5" /> Remover da lista
+              </button>
+            </div>
+          )}
           <div className="border-t border-border p-1">
             <button
               onClick={onAddProject}
@@ -203,10 +252,10 @@ export function TopContextBar({
         </PopoverContent>
       </Popover>
 
-      {/* Branch chip */}
-      <Popover>
+      {/* Branch chip: the branches git knows, and a switch that asks first */}
+      <Popover onOpenChange={(open) => open && onRefreshBranches()}>
         <PopoverTrigger asChild>
-          <button>
+          <button data-testid="branch-chip">
             <Chip>
               <GitBranch className="size-3.5 text-muted-foreground" />
               <span className="truncate font-mono">{branch}</span>
@@ -214,20 +263,73 @@ export function TopContextBar({
             </Chip>
           </button>
         </PopoverTrigger>
-        <PopoverContent align="start" className="w-80 space-y-3">
-          <SectionLabel>Branch</SectionLabel>
-          <StatBlock
-            label="Working copy"
-            value={<span className="font-mono text-xs">{workspace?.branch ?? "—"}</span>}
-          />
-          <StatBlock
-            label="Branch padrão"
-            value={<span className="font-mono text-xs">{workspace?.defaultBranch ?? "—"}</span>}
-          />
-          <p className="text-xs text-muted-foreground">
-            O Orquestrador nunca troca de branch sozinho. Faça o checkout no projeto e a
-            barra acompanha.
-          </p>
+        <PopoverContent align="start" className="w-80 p-0">
+          <div className="flex items-center justify-between border-b border-border px-3 py-2">
+            <SectionLabel>Branch</SectionLabel>
+            <button
+              onClick={onRefreshBranches}
+              className="grid size-6 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+              aria-label="Reler branches"
+            >
+              <RefreshCw className="size-3.5" />
+            </button>
+          </div>
+          <div className="max-h-64 overflow-y-auto p-1" data-testid="branch-list">
+            {!branches && (
+              <p className="px-2 py-3 text-center text-xs text-muted-foreground">Lendo o git…</p>
+            )}
+            {branches && !branches.isRepository && (
+              <p className="px-2 py-3 text-xs text-muted-foreground">
+                Esta pasta não é um repositório git, ou o Git ainda não está configurado.
+              </p>
+            )}
+            {branches?.isRepository &&
+              branches.local.map((name) => (
+                <button
+                  key={name}
+                  onClick={() => name !== branches.current && onCheckout(name)}
+                  disabled={switching !== null}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left font-mono text-xs transition-colors hover:bg-accent disabled:opacity-60"
+                  data-testid={`branch-${name}`}
+                >
+                  {switching === name ? (
+                    <Loader2 className="size-3.5 animate-spin text-primary" />
+                  ) : (
+                    <Check
+                      className={cn(
+                        "size-3.5 text-primary",
+                        name === branches.current ? "opacity-100" : "opacity-0",
+                      )}
+                    />
+                  )}
+                  <span className="truncate">{name}</span>
+                </button>
+              ))}
+            {branches?.isRepository && branches.remote.length > 0 && (
+              <>
+                <div className="px-2 pt-2 pb-0.5 text-[11px] text-muted-foreground">Remotas</div>
+                {branches.remote.map((name) => (
+                  <button
+                    key={name}
+                    onClick={() => onCheckout(name)}
+                    disabled={switching !== null}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left font-mono text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-60"
+                    data-testid={`branch-${name}`}
+                  >
+                    <span className="size-3.5" />
+                    <span className="truncate">{name}</span>
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+          {branches?.isRepository && (
+            <p className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+              {branches.dirtyFiles > 0
+                ? `${branches.dirtyFiles} alteração(ões) não commitada(s). Trocar de branch pedirá confirmação.`
+                : "Árvore limpa. O Orquestrador nunca troca de branch sozinho."}
+            </p>
+          )}
         </PopoverContent>
       </Popover>
 

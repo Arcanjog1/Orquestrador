@@ -159,9 +159,86 @@ export function TeamDialog({
 }
 
 /**
- * Renames a conversation. The title is what the recents list shows and what
- * search matches; saving is `chat.renameSession`.
+ * Renames one thing - a conversation, a project. The caller does the save,
+ * so the dialog is the same for both and never decides which channel to call.
  */
+export function RenameDialog({
+  open,
+  title,
+  description,
+  value,
+  onOpenChange,
+  onSave,
+  testid = "rename",
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  value: string;
+  onOpenChange: (v: boolean) => void;
+  onSave: (next: string) => Promise<void>;
+  testid?: string;
+}) {
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (open) {
+      setDraft(value);
+      setError(null);
+    }
+  }, [open, value]);
+
+  const save = async () => {
+    if (!draft.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(draft.trim());
+      onOpenChange(false);
+    } catch (e) {
+      setError(messageOf(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle className="text-sm">{title}</DialogTitle>
+          <DialogDescription className="text-xs">{description}</DialogDescription>
+        </DialogHeader>
+        <Input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void save();
+          }}
+          maxLength={200}
+          autoFocus
+          data-testid={`${testid}-title`}
+        />
+        {error && <p className="text-xs text-danger">{error}</p>}
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancelar
+          </Button>
+          <Button
+            onClick={() => void save()}
+            disabled={saving || !draft.trim()}
+            data-testid={`${testid}-save`}
+          >
+            {saving && <Loader2 className="size-3.5 animate-spin" />} Salvar
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Renames a conversation; saving is `chat.renameSession`. */
 export function RenameSessionDialog({
   session,
   onOpenChange,
@@ -171,63 +248,20 @@ export function RenameSessionDialog({
   onOpenChange: (v: boolean) => void;
   onRenamed: () => void;
 }) {
-  const [title, setTitle] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    setTitle(session?.title ?? "");
-    setError(null);
-  }, [session]);
-
-  const save = async () => {
-    if (!session || !title.trim()) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await api.chat.renameSession({ sessionId: session.id, title: title.trim() });
-      onOpenChange(false);
-      onRenamed();
-    } catch (e) {
-      setError(messageOf(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
   return (
-    <Dialog open={session !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle className="text-sm">Renomear conversa</DialogTitle>
-          <DialogDescription className="text-xs">
-            O novo título aparece em Recentes e no histórico.
-          </DialogDescription>
-        </DialogHeader>
-        <Input
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void save();
-          }}
-          maxLength={200}
-          autoFocus
-          data-testid="rename-session-title"
-        />
-        {error && <p className="text-xs text-danger">{error}</p>}
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancelar
-          </Button>
-          <Button
-            onClick={() => void save()}
-            disabled={saving || !title.trim()}
-            data-testid="rename-session-save"
-          >
-            {saving && <Loader2 className="size-3.5 animate-spin" />} Salvar
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <RenameDialog
+      open={session !== null}
+      title="Renomear conversa"
+      description="O novo título aparece em Recentes e no histórico."
+      value={session?.title ?? ""}
+      onOpenChange={onOpenChange}
+      testid="rename-session"
+      onSave={async (title) => {
+        if (!session) return;
+        await api.chat.renameSession({ sessionId: session.id, title });
+        onRenamed();
+      }}
+    />
   );
 }
 

@@ -17,7 +17,8 @@
 
 import { app, BrowserWindow, ipcMain } from 'electron';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -695,6 +696,65 @@ test('a run that cannot start says which account is missing, and "Detalhes" show
   }
 });
 
+test('the header renames the project and switches branches the git way, asking when the tree is dirty', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-branch-'));
+  const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'Test');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(dir, 'a.txt'), 'one\n', 'utf8');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'first');
+    git('branch', 'feature/ui');
+
+    const workspace = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Projeto git', localPath: dir })})`,
+    );
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Projeto git/, 15_000);
+
+    // Rename, from the project popover.
+    await click(window, 'project-chip');
+    await waitForText(window, /Renomear projeto/, 10_000);
+    await click(window, 'rename-workspace');
+    await waitForText(window, /Só o nome na lista muda/, 10_000);
+    await type(window, 'rename-workspace-title', 'Projeto renomeado');
+    await click(window, 'rename-workspace-save');
+    await waitForText(window, /Projeto renomeado/, 10_000);
+    const renamed = (await window.webContents.executeJavaScript('window.api.workspace.list()')).find(
+      (w) => w.id === workspace.id,
+    );
+    assert.equal(renamed.name, 'Projeto renomeado');
+
+    // The branch chip lists what git has, and switches on a clean tree.
+    await click(window, 'branch-chip');
+    let list = await waitForText(window, /feature\/ui/, 10_000);
+    assert.match(list, /Árvore limpa/);
+    await click(window, 'branch-feature/ui');
+    await waitForText(window, /Branch trocada para feature\/ui/, 15_000);
+    assert.equal(git('branch', '--show-current').trim(), 'feature/ui');
+
+    // With an uncommitted change the switch asks first, then goes ahead.
+    writeFileSync(join(dir, 'a.txt'), 'two\n', 'utf8');
+    await click(window, 'branch-chip');
+    list = await waitForText(window, /1 alteração\(ões\) não commitada/, 10_000);
+    await click(window, 'branch-main');
+    await waitForText(window, /Trocar de branch com alterações pendentes\?/, 10_000);
+    await click(window, 'confirm');
+    await waitForText(window, /Branch trocada para main/, 15_000);
+    assert.equal(git('branch', '--show-current').trim(), 'main');
+    assert.equal(readFileSync(join(dir, 'a.txt'), 'utf8'), 'two\n', 'the change was carried, not dropped');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /* ------------------------------------------------------------------ helpers */
 
 let sharedWindow = null;
@@ -717,6 +777,8 @@ async function openWindow() {
   services = new AppServices({ paths, openUrl: () => {} });
   const router = new IpcRouter(services, {
     selectFolder: async () => null,
+    openExternal: async () => true,
+    openPath: async () => true,
     appInfo: () => ({
       appVersion: '0.1.0-test',
       electronVersion: process.versions.electron,

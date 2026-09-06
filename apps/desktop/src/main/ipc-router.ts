@@ -35,6 +35,8 @@ export interface ShellBridge {
   };
   /** Hands an already-validated http(s) URL to the system browser. */
   openExternal(url: string): Promise<boolean>;
+  /** Opens a folder the application itself recorded, in the file manager. */
+  openPath(path: string): Promise<boolean>;
 }
 
 export type Handler = (payload: unknown) => Promise<unknown> | unknown;
@@ -137,6 +139,26 @@ export class IpcRouter {
     this.handlers.set('workspace.setTeam', (p) => {
       const input = p as IpcMap['workspace.setTeam']['request'];
       return s.workspaces.setTeam(input.workspaceId, input.orchestrator, input.worker);
+    });
+    this.handlers.set('workspace.rename', (p) => {
+      const input = p as { workspaceId: string; name: string };
+      return s.workspaces.rename(input.workspaceId, input.name);
+    });
+    this.handlers.set('workspace.remove', (p) => ({
+      removed: s.workspaces.remove((p as { workspaceId: string }).workspaceId),
+    }));
+    this.handlers.set('workspace.branches', (p) =>
+      s.workspaces.branches((p as { workspaceId: string }).workspaceId),
+    );
+    this.handlers.set('workspace.checkout', (p) => {
+      const input = p as { workspaceId: string; branch: string; allowDirty?: boolean };
+      return s.workspaces.checkout(input.workspaceId, input.branch, input.allowDirty ?? false);
+    });
+    this.handlers.set('workspace.openFolder', async (p) => {
+      // The path is the workspace's own, read from the database - the
+      // renderer names a project id, never a path.
+      const workspace = s.workspaces.require((p as { workspaceId: string }).workspaceId);
+      return { opened: await this.shell.openPath(workspace.localPath) };
     });
     this.handlers.set('workspace.changes', (p) =>
       s.workspaces.changes((p as { workspaceId: string }).workspaceId),

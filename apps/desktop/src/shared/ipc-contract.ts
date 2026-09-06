@@ -45,6 +45,11 @@ export const REQUEST_CHANNELS = [
   'workspace.setAgents',
   'workspace.setTeam',
   'workspace.changes',
+  'workspace.rename',
+  'workspace.remove',
+  'workspace.branches',
+  'workspace.checkout',
+  'workspace.openFolder',
 
   'verifications.list',
   'verifications.create',
@@ -349,6 +354,28 @@ export interface WorkspaceChangesView {
   readonly truncated: boolean;
 }
 
+/**
+ * A switch either happened, or was held because the tree is dirty and the
+ * person has not said to go ahead. A held switch is an answer, not an error:
+ * the bridge carries an error's message but not its code, so the reason
+ * travels as data.
+ */
+export type CheckoutResult =
+  | { readonly switched: true; readonly workspace: WorkspaceView }
+  | { readonly switched: false; readonly dirtyFiles: number; readonly message: string };
+
+/** The branches git knows in this working copy. */
+export interface WorkspaceBranchesView {
+  readonly isRepository: boolean;
+  readonly current: string | null;
+  /** Local branches, by name. */
+  readonly local: readonly string[];
+  /** Remote-tracking branches, e.g. `origin/feature`. */
+  readonly remote: readonly string[];
+  /** Uncommitted changes in the working copy, as git counts them. */
+  readonly dirtyFiles: number;
+}
+
 export interface RunProgressEvent {
   readonly runId: string;
   readonly sessionId: string;
@@ -416,6 +443,21 @@ export interface IpcMap {
   };
   /** Read-only: what changed in the working copy, straight from git. */
   'workspace.changes': { request: { workspaceId: string }; response: WorkspaceChangesView };
+  'workspace.rename': { request: { workspaceId: string; name: string }; response: WorkspaceView };
+  /** Removes the project from the list. The folder on disk is never touched. */
+  'workspace.remove': { request: { workspaceId: string }; response: { removed: boolean } };
+  'workspace.branches': { request: { workspaceId: string }; response: WorkspaceBranchesView };
+  /**
+   * Switches the working copy to a branch. With a dirty tree the call is
+   * refused (code DIRTY_TREE) unless `allowDirty` is set, and git itself still
+   * refuses a switch that would overwrite a change.
+   */
+  'workspace.checkout': {
+    request: { workspaceId: string; branch: string; allowDirty?: boolean };
+    response: CheckoutResult;
+  };
+  /** Opens the project folder in the system file manager. */
+  'workspace.openFolder': { request: { workspaceId: string }; response: { opened: boolean } };
 
   /**
    * The verifications of one project: read, add, change, remove.

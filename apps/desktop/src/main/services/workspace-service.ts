@@ -17,6 +17,8 @@ import {
   type TeamMemberInput,
   type TeamMemberView,
   type TeamRole,
+  type CheckoutResult,
+  type WorkspaceBranchesView,
   type WorkspaceChangesView,
   type WorkspaceView,
 } from '../../shared/ipc-contract.js';
@@ -45,8 +47,126 @@ export class WorkspaceService {
     private readonly agents: AgentService = new AgentService(database),
   ) {}
 
+  /** Whether a run is going in a workspace; set by the container once the loop exists. */
+  private isBusy: (workspaceId: string) => boolean = () => false;
+
+  bindActivity(isBusy: (workspaceId: string) => boolean): void {
+    this.isBusy = isBusy;
+  }
+
   list(): WorkspaceView[] {
     return this.database.workspaces.list().map((record) => this.toView(record));
+  }
+
+  require(workspaceId: string): WorkspaceView {
+    return this.toView(this.database.workspaces.require(workspaceId));
+  }
+
+  rename(workspaceId: string, name: string): WorkspaceView {
+    const trimmed = name.trim();
+    if (trimmed.length === 0) throw new WorkspaceError('Escolha um nome para o projeto.');
+    this.database.workspaces.require(workspaceId);
+    return this.toView(this.database.workspaces.rename(workspaceId, trimmed));
+  }
+
+  /**
+   * Removes the project from the list - and only from the list. Its records
+   * (conversations, runs, verifications, team) go with it; the folder and
+   * everything in it stay exactly as they are.
+   */
+  remove(workspaceId: string): boolean {
+    this.database.workspaces.require(workspaceId);
+    if (this.isBusy(workspaceId)) {
+      throw new WorkspaceError('Cancele a execução em andamento antes de remover o projeto.');
+    }
+    return this.database.workspaces.remove(workspaceId);
+  }
+
+  /** The branches of the working copy, read with git. */
+  async branches(workspaceId: string): Promise<WorkspaceBranchesView> {
+    const workspace = this.database.workspaces.require(workspaceId);
+    const none: WorkspaceBranchesView = {
+      isRepository: false,
+      current: null,
+      local: [],
+      remote: [],
+      dirtyFiles: 0,
+    };
+    let git: string;
+    try {
+      git = await this.runtimes.executablePath('git');
+    } catch {
+      return none;
+    }
+    const collector = new GitEvidenceCollector(workspace.local_path, this.processManager, git);
+    if (!(await collector.isGitRepository())) return none;
+    const [current, local, remote, status] = await Promise.all([
+      collector.git(['branch', '--show-current']),
+      collector.git(['branch', '--format=%(refname:short)']),
+      collector.git(['branch', '-r', '--format=%(refname:short)']),
+      collector.git(['status', '--porcelain']),
+    ]);
+    const names = (out: string): string[] =>
+      out
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0 && !l.endsWith('/HEAD'));
+    return {
+      isRepository: true,
+      current: current.ok ? current.stdout.trim() || null : null,
+      local: local.ok ? names(local.stdout) : [],
+      remote: remote.ok ? names(remote.stdout) : [],
+      dirtyFiles: parseStatusShort(status.stdout).length,
+    };
+  }
+
+  /**
+   * `git switch <branch>`, with two locks: a dirty tree is refused unless the
+   * person said to go ahead (and git itself still refuses a switch that would
+   * lose a change), and nothing is switched under a running loop.
+   */
+  async checkout(workspaceId: string, branch: string, allowDirty: boolean): Promise<CheckoutResult> {
+    const workspace = this.database.workspaces.require(workspaceId);
+    if (this.isBusy(workspaceId)) {
+      throw new WorkspaceError('Cancele a execução em andamento antes de trocar de branch.');
+    }
+    const known = await this.branches(workspaceId);
+    if (!known.isRepository) throw new WorkspaceError('Esta pasta não é um repositório git.');
+    // A remote-tracking name becomes its local branch: `git switch feature`
+    // creates `feature` tracking `origin/feature` when that is unambiguous.
+    const target = known.local.includes(branch)
+      ? branch
+      : (known.remote.find((r) => r === branch) ?? branch).replace(/^[^/]+\//, '');
+    if (!known.local.includes(target) && !known.remote.some((r) => r.endsWith(`/${target}`))) {
+      throw new WorkspaceError(`A branch "${branch}" não existe neste repositório.`);
+    }
+    if (known.dirtyFiles > 0 && !allowDirty) {
+      return {
+        switched: false,
+        dirtyFiles: known.dirtyFiles,
+        message: `Há ${known.dirtyFiles} alteração(ões) não commitada(s) no projeto.`,
+      };
+    }
+    const git = await this.runtimes.executablePath('git');
+    const result = await this.processManager.run({
+      command: git,
+      // `switch` takes a branch, never a path, which is what makes it the
+      // safe spelling here; the validator already refused a leading dash.
+      args: ['switch', target],
+      cwd: workspace.local_path,
+      timeoutMs: 60_000,
+    });
+    if (result.outcome !== 'completed' || result.exitCode !== 0) {
+      throw new WorkspaceError(`O git recusou a troca de branch.${firstLine(result.stderr)}`);
+    }
+    this.database.workspaces.touch(workspaceId);
+    return {
+      switched: true,
+      workspace: {
+        ...this.toView(this.database.workspaces.require(workspaceId)),
+        branch: await this.currentBranch(workspace.local_path),
+      },
+    };
   }
 
   /**

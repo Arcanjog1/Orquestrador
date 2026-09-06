@@ -193,6 +193,21 @@ export const sessionTitle: Validator<string> = (value, path) => {
   return s.trim();
 };
 
+/**
+ * A git branch name as one argv entry after `git switch`: never a leading
+ * dash (would be read as an option), no whitespace, no control characters,
+ * and none of the characters git itself refuses in a ref name.
+ */
+export const branchName: Validator<string> = (value, path) => {
+  const s = str({ min: 1, max: 250 })(value, path);
+  if (s.startsWith('-')) fail(path, 'must not start with "-"');
+  if (/[\s~^:?*[\\\u0000-\u001f\u007f]/.test(s)) fail(path, 'must be a valid branch name');
+  if (s.includes('..') || s.endsWith('/') || s.endsWith('.lock') || s.includes('@{')) {
+    fail(path, 'must be a valid branch name');
+  }
+  return s;
+};
+
 /** One role of a workspace team: the account, and how it should run. */
 export const teamMember = obj<{ accountId: string; model?: string; reasoning?: string }>(
   { accountId: id, model: modelName, reasoning: oneOf(REASONING_LEVELS) },
@@ -276,6 +291,14 @@ export const REQUEST_VALIDATORS: {
     worker: teamMember,
   }),
   'workspace.changes': obj({ workspaceId: id }),
+  'workspace.rename': obj({ workspaceId: id, name: str({ min: 1, max: 120 }) }),
+  'workspace.remove': obj({ workspaceId: id }),
+  'workspace.branches': obj({ workspaceId: id }),
+  'workspace.checkout': obj(
+    { workspaceId: id, branch: branchName, allowDirty: bool },
+    { optional: ['allowDirty'] },
+  ),
+  'workspace.openFolder': obj({ workspaceId: id }),
 
   'verifications.list': obj({ workspaceId: id }),
   'verifications.create': obj({

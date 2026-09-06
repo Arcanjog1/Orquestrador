@@ -13,6 +13,7 @@ import {
   CancelDialog,
   CommandPalette,
   TeamDialog,
+  RenameDialog,
   RenameSessionDialog,
   ConfirmDialog,
 } from "@/components/orch/dialogs";
@@ -31,6 +32,7 @@ import type {
   AccountView,
   ChatMessageView,
   RunDetailView,
+  WorkspaceBranchesView,
   WorkspaceChangesView,
   ChatSessionView,
   RunProgressEvent,
@@ -70,6 +72,11 @@ export function WorkspacePage({
   const [changes, setChanges] = useState<WorkspaceChangesView | null>(null);
   const [runDetail, setRunDetail] = useState<RunDetailView | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const [branches, setBranches] = useState<WorkspaceBranchesView | null>(null);
+  const [switching, setSwitching] = useState<string | null>(null);
+  const [dirtySwitch, setDirtySwitch] = useState<{ branch: string; message: string } | null>(null);
+  const [renamingWorkspace, setRenamingWorkspace] = useState(false);
+  const [removingWorkspace, setRemovingWorkspace] = useState(false);
   const [teamOpen, setTeamOpen] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -217,6 +224,57 @@ export function WorkspacePage({
       alive = false;
     };
   }, [run?.id, run?.status]);
+
+  // -- Branches: read from git on demand, switched only on request ---------
+
+  const refreshBranches = useCallback(async () => {
+    if (!workspace) {
+      setBranches(null);
+      return;
+    }
+    try {
+      setBranches(await api.workspace.branches({ workspaceId: workspace.id }));
+    } catch (error) {
+      fail(error);
+    }
+  }, [workspace?.id, fail]);
+
+  useEffect(() => {
+    setBranches(null);
+    void refreshBranches();
+  }, [refreshBranches]);
+
+  async function checkout(branch: string, allowDirty = false) {
+    if (!workspace) return;
+    setSwitching(branch);
+    try {
+      const result = await api.workspace.checkout({ workspaceId: workspace.id, branch, allowDirty });
+      if (!result.switched) {
+        setDirtySwitch({ branch, message: result.message });
+        return;
+      }
+      toast(`Branch trocada para ${result.workspace.branch ?? branch}`);
+      setDirtySwitch(null);
+      reload();
+      await Promise.all([refreshBranches(), refreshChanges()]);
+    } catch (error) {
+      fail(error);
+    } finally {
+      setSwitching(null);
+    }
+  }
+
+  async function removeWorkspace() {
+    if (!workspace) return;
+    try {
+      await api.workspace.remove({ workspaceId: workspace.id });
+      toast(`"${workspace.name}" removido da lista`);
+      setRemovingWorkspace(false);
+      reload();
+    } catch (error) {
+      fail(error);
+    }
+  }
 
   // -- Live run progress ---------------------------------------------------
 
@@ -486,6 +544,13 @@ export function WorkspacePage({
           onOpenExternal={openExternal}
           onOpenWorkspace={onSelectWorkspace}
           onAddProject={() => setAddProjectOpen(true)}
+          onRenameWorkspace={() => setRenamingWorkspace(true)}
+          onRemoveWorkspace={() => setRemovingWorkspace(true)}
+          onOpenFolder={() => void api.workspace.openFolder({ workspaceId: workspace.id }).catch(fail)}
+          branches={branches}
+          onRefreshBranches={() => void refreshBranches()}
+          onCheckout={(branch) => void checkout(branch)}
+          switching={switching}
         />
 
         <div className="relative flex min-h-0 flex-1">
@@ -561,6 +626,36 @@ export function WorkspacePage({
         runId={run?.id ?? null}
       />
       <RunDetailDialog runId={detailRunId} onOpenChange={(v) => !v && setDetailRunId(null)} />
+      <RenameDialog
+        open={renamingWorkspace}
+        title="Renomear projeto"
+        description="Só o nome na lista muda. A pasta continua onde está."
+        value={workspace.name}
+        onOpenChange={setRenamingWorkspace}
+        testid="rename-workspace"
+        onSave={async (name) => {
+          await api.workspace.rename({ workspaceId: workspace.id, name });
+          toast("Projeto renomeado");
+          reload();
+        }}
+      />
+      <ConfirmDialog
+        open={removingWorkspace}
+        onOpenChange={setRemovingWorkspace}
+        title="Remover projeto da lista?"
+        description={`"${workspace.name}" sai da lista com suas conversas, execuções e verificações registradas. A pasta ${workspace.localPath} e todos os seus arquivos ficam intactos.`}
+        confirmLabel="Remover da lista"
+        onConfirm={() => void removeWorkspace()}
+      />
+      <ConfirmDialog
+        open={dirtySwitch !== null}
+        onOpenChange={(v) => !v && setDirtySwitch(null)}
+        title="Trocar de branch com alterações pendentes?"
+        description={`${dirtySwitch?.message ?? ""} O git leva as alterações junto quando pode, e recusa a troca se alguma seria perdida. Nada é descartado.`}
+        confirmLabel="Trocar mesmo assim"
+        busy={switching !== null}
+        onConfirm={() => dirtySwitch && void checkout(dirtySwitch.branch, true)}
+      />
       <RenameSessionDialog
         session={renaming}
         onOpenChange={(v) => !v && setRenaming(null)}

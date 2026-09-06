@@ -25,6 +25,7 @@ export interface DesktopFixture {
   /** Everything the services emitted, in order. */
   events: Array<{ channel: keyof EventMap; payload: EventMap[keyof EventMap] }>;
   openedUrls: string[];
+  openedPaths: string[];
   selectedFolder: string | null;
   cleanup(): Promise<void>;
 }
@@ -50,6 +51,7 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
   };
 
   const openedUrls: string[] = [];
+  const openedPaths: string[] = [];
   const services = new AppServices({
     paths,
     ...(options.createRunners ? { createRunners: options.createRunners } : {}),
@@ -77,6 +79,10 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
       openedUrls.push(parsed.toString());
       return true;
     },
+    async openPath(path: string) {
+      openedPaths.push(path);
+      return true;
+    },
     appInfo: () => ({
       appVersion: '0.0.0-test',
       electronVersion: 'test',
@@ -94,6 +100,7 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
     paths,
     events,
     openedUrls,
+    openedPaths,
     selectedFolder: null,
     async cleanup() {
       await services.shutdown();
