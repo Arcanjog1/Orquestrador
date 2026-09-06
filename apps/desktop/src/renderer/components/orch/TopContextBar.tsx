@@ -122,6 +122,7 @@ export function TopContextBar({
   onPush: () => void;
   onPullRequest: () => void;
 }) {
+  const [branchesOpen, setBranchesOpen] = useState(false);
   const [query, setQuery] = useState("");
 
   const branch = workspace?.branch ?? workspace?.defaultBranch ?? "—";
@@ -337,8 +338,16 @@ export function TopContextBar({
         </PopoverContent>
       </Popover>
 
-      {/* Branch chip: the branches git knows, and a switch that asks first */}
-      <Popover onOpenChange={(open) => open && onRefreshBranches()}>
+      {/* Branch chip: the branches git knows, and a switch that asks first.
+          Controlled, so choosing a branch closes it: an open popover that
+          survives the switch turns the next click on the chip into a close. */}
+      <Popover
+        open={branchesOpen}
+        onOpenChange={(open) => {
+          setBranchesOpen(open);
+          if (open) onRefreshBranches();
+        }}
+      >
         <PopoverTrigger asChild>
           <button data-testid="branch-chip">
             <Chip>
@@ -372,7 +381,10 @@ export function TopContextBar({
               branches.local.map((name) => (
                 <button
                   key={name}
-                  onClick={() => name !== branches.current && onCheckout(name)}
+                  onClick={() => {
+                    setBranchesOpen(false);
+                    if (name !== branches.current) onCheckout(name);
+                  }}
                   disabled={switching !== null}
                   className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left font-mono text-xs transition-colors hover:bg-accent disabled:opacity-60"
                   data-testid={`branch-${name}`}
@@ -396,7 +408,10 @@ export function TopContextBar({
                 {branches.remote.map((name) => (
                   <button
                     key={name}
-                    onClick={() => onCheckout(name)}
+                    onClick={() => {
+                      setBranchesOpen(false);
+                      onCheckout(name);
+                    }}
                     disabled={switching !== null}
                     className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left font-mono text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-60"
                     data-testid={`branch-${name}`}
