@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelRightOpen, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { AppSidebar } from "@/components/orch/AppSidebar";
+import { ProjectDialog } from "@/components/orch/ProjectDialog";
 import { TopContextBar } from "@/components/orch/TopContextBar";
 import { TimelineView } from "@/components/orch/Timeline";
 import { ActivityPanel, type Step } from "@/components/orch/ActivityPanel";
@@ -38,6 +39,7 @@ import type {
   WorkspaceBranchesView,
   WorkspaceChangesView,
   ChatSessionView,
+  ProjectView,
   RunProgressEvent,
   RunView,
   WorkspaceView,
@@ -93,7 +95,12 @@ export function WorkspacePage({
   );
 
   const [sessions, setSessions] = useState<readonly ChatSessionView[]>([]);
+  const [projects, setProjects] = useState<readonly ProjectView[]>([]);
+  const [projectDialog, setProjectDialog] = useState<{ project: ProjectView | null } | null>(null);
+  const [removingProject, setRemovingProject] = useState<ProjectView | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // A conversation to open once the page has switched to its folder.
+  const pendingSession = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [renaming, setRenaming] = useState<ChatSessionView | null>(null);
@@ -113,18 +120,23 @@ export function WorkspacePage({
   const loadSessions = useCallback(async () => {
     if (!workspace) return;
     try {
-      const list = await api.chat.listSessions({
-        workspaceId: workspace.id,
-        includeArchived: showArchived,
-        ...(search.trim() ? { query: search.trim() } : {}),
-      });
+      // Every conversation, of every project and folder: the sidebar files
+      // them by project; the open one must belong to the folder on screen.
+      const [list, projectList] = await Promise.all([
+        api.chat.listAllSessions({
+          includeArchived: showArchived,
+          ...(search.trim() ? { query: search.trim() } : {}),
+        }),
+        api.project.list(),
+      ]);
       setSessions(list);
+      setProjects(projectList);
       // A filter narrows the list, not the conversation being read: only when
       // the open one is truly gone does the selection move.
       setSessionId((current) => {
         if (current && list.some((s) => s.id === current)) return current;
         if (current && (search.trim() || !showArchived)) return current;
-        return list[0]?.id ?? null;
+        return list.find((s) => s.workspaceId === workspace.id)?.id ?? null;
       });
     } catch (error) {
       fail(error);
@@ -143,7 +155,46 @@ export function WorkspacePage({
       }
     },
     remove: (session: ChatSessionView) => setDeleting(session),
+    move: async (session: ChatSessionView, projectId: string | null) => {
+      try {
+        const moved = await api.chat.moveSession({ sessionId: session.id, projectId });
+        toast(moved.projectName ? `Movida para ${moved.projectName}` : "Movida para Sem projeto");
+        await loadSessions();
+      } catch (error) {
+        fail(error);
+      }
+    },
   };
+
+  /** Opens a conversation, switching to its folder first when it lives elsewhere. */
+  const openSession = (id: string) => {
+    const target = sessions.find((s) => s.id === id);
+    if (target && workspace && target.workspaceId !== workspace.id) {
+      pendingSession.current = id;
+      onSelectWorkspace(target.workspaceId);
+      return;
+    }
+    setSessionId(id);
+    setRun(null);
+    setStage(null);
+    setStages([]);
+  };
+
+  async function removeProject() {
+    if (!removingProject) return;
+    try {
+      const outcome = await api.project.remove({ projectId: removingProject.id });
+      toast(
+        outcome.sessionsMoved > 0
+          ? `Projeto excluído; ${outcome.sessionsMoved} conversa(s) foram para Sem projeto`
+          : "Projeto excluído",
+      );
+      setRemovingProject(null);
+      await loadSessions();
+    } catch (error) {
+      fail(error);
+    }
+  }
 
   async function confirmDelete() {
     if (!deleting) return;
@@ -168,7 +219,10 @@ export function WorkspacePage({
   }
 
   useEffect(() => {
-    setSessionId(null);
+    // Switching folders opens the conversation that asked for the switch,
+    // when there is one; otherwise it starts clean.
+    setSessionId(pendingSession.current);
+    pendingSession.current = null;
     setMessages([]);
     setRun(null);
     setStage(null);
@@ -465,23 +519,39 @@ export function WorkspacePage({
 
   // -- Actions -------------------------------------------------------------
 
-  const newTask = useCallback(async () => {
-    if (!workspace) return;
-    try {
-      const created = await api.chat.createSession({
-        workspaceId: workspace.id,
-        title: "Nova tarefa",
-      });
-      await loadSessions();
-      setSessionId(created.id);
-      setRun(null);
-      setStage(null);
-      setStages([]);
-      toast("Nova tarefa — contexto do projeto mantido");
-    } catch (error) {
-      fail(error);
-    }
-  }, [workspace, loadSessions, fail]);
+  /**
+   * A new conversation. Inside a project it is born there and works in the
+   * project's folder (switching to it when it is another); otherwise it is
+   * "Sem projeto", in the folder on screen.
+   */
+  const newTask = useCallback(
+    async (project: ProjectView | null = null) => {
+      if (!workspace) return;
+      try {
+        const workspaceId = project?.workspaceId ?? workspace.id;
+        const created = await api.chat.createSession({
+          workspaceId,
+          title: "Nova tarefa",
+          projectId: project?.id ?? null,
+        });
+        if (workspaceId !== workspace.id) {
+          pendingSession.current = created.id;
+          onSelectWorkspace(workspaceId);
+          toast(`Nova conversa em ${project?.name ?? "Sem projeto"}`);
+          return;
+        }
+        await loadSessions();
+        setSessionId(created.id);
+        setRun(null);
+        setStage(null);
+        setStages([]);
+        toast(project ? `Nova conversa em ${project.name}` : "Nova tarefa — contexto do projeto mantido");
+      } catch (error) {
+        fail(error);
+      }
+    },
+    [workspace, loadSessions, fail, onSelectWorkspace],
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -582,16 +652,19 @@ export function WorkspacePage({
         onToggle={() => setSidebarCollapsed((v) => !v)}
         onNewTask={() => void newTask()}
         sessions={sessions}
+        projects={projects}
         workspaces={workspaces}
         activeWorkspaceId={workspace.id}
         activeSessionId={sessionId}
-        onOpenSession={(id) => {
-          setSessionId(id);
-          setRun(null);
-          setStage(null);
-          setStages([]);
-        }}
+        onOpenSession={openSession}
         onOpenWorkspace={onSelectWorkspace}
+        projectActions={{
+          create: () => setProjectDialog({ project: null }),
+          rename: (project) => setProjectDialog({ project }),
+          linkWorkspace: (project) => setProjectDialog({ project }),
+          remove: (project) => setRemovingProject(project),
+          newSession: (project) => void newTask(project),
+        }}
         accountName={
           accounts.find((a) => a.state === "connected")?.name ?? accounts[0]?.name ?? null
         }
@@ -787,6 +860,29 @@ export function WorkspacePage({
         confirmLabel="Apagar conversa"
         busy={deletingBusy}
         onConfirm={() => void confirmDelete()}
+      />
+      <ProjectDialog
+        open={projectDialog !== null}
+        project={projectDialog?.project ?? null}
+        workspaces={workspaces}
+        defaultWorkspaceId={workspace.id}
+        onOpenChange={(v) => !v && setProjectDialog(null)}
+        onSaved={(project) => {
+          toast(projectDialog?.project ? "Projeto salvo" : `Projeto "${project.name}" criado`);
+          void loadSessions();
+        }}
+      />
+      <ConfirmDialog
+        open={removingProject !== null}
+        onOpenChange={(v) => !v && setRemovingProject(null)}
+        title="Excluir projeto?"
+        description={
+          removingProject
+            ? `"${removingProject.name}" sai da lista. Suas ${removingProject.sessionCount} conversa(s) vão para "Sem projeto" e continuam com suas mensagens e execuções. Nenhuma pasta, repositório ou arquivo é tocado.`
+            : ""
+        }
+        confirmLabel="Excluir projeto"
+        onConfirm={() => void removeProject()}
       />
       <TeamDialog
         open={teamOpen}

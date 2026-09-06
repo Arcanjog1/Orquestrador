@@ -280,6 +280,31 @@ ALTER TABLE agent_invocations ADD COLUMN selection_reason TEXT;
 ALTER TABLE agent_invocations ADD COLUMN fallback_used INTEGER;
 `,
   },
+  {
+    id: 5,
+    name: 'projects',
+    sql: `
+-- A project organises conversations; it is not a folder. It may point at a
+-- workspace (the folder agents work in), which new conversations inherit,
+-- or at none. Removing a project never removes anything else: its
+-- conversations go to "Sem projeto" through the foreign key, and no
+-- workspace, repository or file is touched.
+CREATE TABLE projects (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  workspace_id  TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+  -- Explicit context a person writes for the project (JSON). Never merged
+  -- into prompts silently.
+  metadata      TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE INDEX idx_projects_updated ON projects(updated_at DESC);
+-- Conversations from before this migration keep NULL: "Sem projeto".
+ALTER TABLE chat_sessions ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
+CREATE INDEX idx_chat_sessions_project ON chat_sessions(project_id, updated_at DESC);
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Check, ChevronRight, Folder, Loader2, Sparkles, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,7 @@ import type {
   GitHubStatusView,
   DiagnosticView,
   ProviderName,
+  ProjectView,
   RuntimeId,
   RuntimeProgressEvent,
   WorkspaceView,
@@ -62,6 +63,35 @@ export function OnboardingPage({
   const [showDetail, setShowDetail] = useState(false);
   const [progress, setProgress] = useState<Record<string, RuntimeProgressEvent>>({});
   const [addProject, setAddProject] = useState(false);
+  // The first project - the real entity conversations are filed under -
+  // created here with the same service the sidebar uses.
+  const [projects, setProjects] = useState<readonly ProjectView[]>([]);
+  const [projectName, setProjectName] = useState("");
+  const [creatingProject, setCreatingProject] = useState(false);
+  const loadProjects = useCallback(() => {
+    void api.project
+      .list()
+      .then(setProjects)
+      .catch(() => undefined);
+  }, []);
+  useEffect(loadProjects, [loadProjects, workspace?.id]);
+  useEffect(() => {
+    setProjectName(workspace?.name ?? "");
+  }, [workspace?.id, workspace?.name]);
+
+  async function createProject() {
+    if (!workspace || !projectName.trim()) return;
+    setCreatingProject(true);
+    setError(null);
+    try {
+      await api.project.create({ name: projectName.trim(), workspaceId: workspace.id });
+      loadProjects();
+    } catch (e) {
+      setError(messageOf(e));
+    } finally {
+      setCreatingProject(false);
+    }
+  }
 
   useEffect(
     () => api.events.runtimeProgress((p) => setProgress((prev) => ({ ...prev, [p.runtimeId]: p }))),
@@ -365,6 +395,40 @@ export function OnboardingPage({
                   <Folder className="size-3.5" /> Selecionar pasta ou clonar
                 </button>
               </div>
+              {workspace && (
+                <div className="mt-4 rounded-lg border border-border bg-surface-raised p-3" data-testid="onboarding-project">
+                  <SectionLabel>Projeto</SectionLabel>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    As conversas ficam organizadas por projeto. Um projeto aponta para a pasta
+                    onde os agentes trabalham; esta pasta é <strong>{workspace.name}</strong>.
+                  </p>
+                  {projects.some((p) => p.workspaceId === workspace.id) ? (
+                    <p className="mt-2 text-sm" data-testid="onboarding-project-existing">
+                      Projeto: {projects.filter((p) => p.workspaceId === workspace.id).map((p) => p.name).join(", ")}
+                    </p>
+                  ) : (
+                    <div className="mt-2 flex gap-2">
+                      <Input
+                        className="h-8 text-xs"
+                        value={projectName}
+                        onChange={(e) => setProjectName(e.target.value)}
+                        placeholder="Nome do projeto"
+                        data-testid="onboarding-project-name"
+                      />
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={creatingProject || !projectName.trim()}
+                        onClick={() => void createProject()}
+                        data-testid="onboarding-project-create"
+                      >
+                        Criar projeto
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+              {error && <p className="mt-3 text-xs text-danger">{error}</p>}
               <Button className="mt-6" onClick={() => setStep(5)}>
                 Continuar
               </Button>

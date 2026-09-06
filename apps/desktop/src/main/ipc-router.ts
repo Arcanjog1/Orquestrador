@@ -245,9 +245,31 @@ export class IpcRouter {
       deleted: s.chat.deleteSession((p as { sessionId: string }).sessionId),
     }));
     this.handlers.set('chat.createSession', (p) => {
-      const input = p as { workspaceId: string; title: string };
-      return s.chat.createSession(input.workspaceId, input.title);
+      const input = p as { workspaceId: string; title: string; projectId?: string | null };
+      return s.chat.createSession(input.workspaceId, input.title, input.projectId ?? null);
     });
+    this.handlers.set('chat.listAllSessions', (p) => {
+      const input = p as IpcMap['chat.listAllSessions']['request'];
+      return s.chat.listAllSessions({
+        ...(input.includeArchived !== undefined ? { includeArchived: input.includeArchived } : {}),
+        ...(input.query !== undefined ? { query: input.query } : {}),
+      });
+    });
+    this.handlers.set('chat.moveSession', (p) => {
+      const input = p as IpcMap['chat.moveSession']['request'];
+      return s.chat.moveSession(input.sessionId, input.projectId);
+    });
+    this.handlers.set('project.list', () => s.projects.list());
+    this.handlers.set('project.create', (p) => s.projects.create(p as IpcMap['project.create']['request']));
+    this.handlers.set('project.rename', (p) => {
+      const input = p as IpcMap['project.rename']['request'];
+      return s.projects.rename(input.projectId, input.name);
+    });
+    this.handlers.set('project.setWorkspace', (p) => {
+      const input = p as IpcMap['project.setWorkspace']['request'];
+      return s.projects.setWorkspace(input.projectId, input.workspaceId);
+    });
+    this.handlers.set('project.remove', (p) => s.projects.remove((p as { projectId: string }).projectId));
     this.handlers.set('chat.listMessages', (p) =>
       s.chat.listMessages((p as { sessionId: string }).sessionId),
     );

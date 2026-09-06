@@ -382,6 +382,86 @@ function blankToNull(value: string | null | undefined): string | null {
  * Chat
  * ------------------------------------------------------------------ */
 
+export interface ProjectRecord extends SqlRow {
+  id: string;
+  name: string;
+  /** The folder new conversations of this project work in; null for none. */
+  workspace_id: string | null;
+  metadata: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Projects: the organisation of conversations, distinct from workspaces
+ * (the folders agents work in). One project may point at one workspace, or
+ * at none; a conversation belongs to at most one project.
+ */
+export class ProjectRepository extends Repository {
+  create(input: { id: string; name: string; workspaceId?: string | null; metadata?: unknown }): ProjectRecord {
+    const timestamp = now();
+    this.db.run(
+      'INSERT INTO projects (id, name, workspace_id, metadata, created_at, updated_at) VALUES (?,?,?,?,?,?)',
+      [
+        input.id,
+        input.name,
+        input.workspaceId ?? null,
+        input.metadata === undefined ? null : JSON.stringify(input.metadata),
+        timestamp,
+        timestamp,
+      ] as SqlValue[],
+    );
+    return this.require(input.id);
+  }
+
+  list(): ProjectRecord[] {
+    return this.db.all<ProjectRecord>('SELECT * FROM projects ORDER BY updated_at DESC, name');
+  }
+
+  find(id: string): ProjectRecord | undefined {
+    return this.db.get<ProjectRecord>('SELECT * FROM projects WHERE id = ?', [id]);
+  }
+
+  require(id: string): ProjectRecord {
+    const row = this.find(id);
+    if (!row) throw new Error(`Project ${id} does not exist.`);
+    return row;
+  }
+
+  rename(id: string, name: string): ProjectRecord {
+    this.db.run('UPDATE projects SET name = ?, updated_at = ? WHERE id = ?', [name, now(), id]);
+    return this.require(id);
+  }
+
+  setWorkspace(id: string, workspaceId: string | null): ProjectRecord {
+    this.db.run('UPDATE projects SET workspace_id = ?, updated_at = ? WHERE id = ?', [workspaceId, now(), id]);
+    return this.require(id);
+  }
+
+  touch(id: string): void {
+    this.db.run('UPDATE projects SET updated_at = ? WHERE id = ?', [now(), id]);
+  }
+
+  countSessions(id: string, includeArchived = false): number {
+    const row = this.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM chat_sessions WHERE project_id = ?${includeArchived ? '' : ' AND archived_at IS NULL'}`,
+      [id],
+    );
+    return Number(row?.n ?? 0);
+  }
+
+  /**
+   * Forgets the project. Its conversations are kept and become "Sem projeto"
+   * (the foreign key sets their project to NULL); no workspace, repository
+   * or file is touched. Returns how many conversations were moved.
+   */
+  remove(id: string): { removed: boolean; sessionsMoved: number } {
+    const sessionsMoved = this.countSessions(id, true);
+    const result = this.db.run('DELETE FROM projects WHERE id = ?', [id]);
+    return { removed: Number(result.changes) > 0, sessionsMoved };
+  }
+}
+
 export interface ChatSessionRecord extends SqlRow {
   id: string;
   workspace_id: string;
@@ -390,6 +470,8 @@ export interface ChatSessionRecord extends SqlRow {
   updated_at: string;
   /** Set when the conversation was archived; null while it is in the list. */
   archived_at: string | null;
+  /** The project this conversation is filed under; null is "Sem projeto". */
+  project_id: string | null;
 }
 
 export interface ListSessionsOptions {
@@ -397,6 +479,8 @@ export interface ListSessionsOptions {
   includeArchived?: boolean;
   /** Case-insensitive match on the title. */
   query?: string;
+  /** Only this project's conversations; `null` for the ones without a project. */
+  projectId?: string | null;
 }
 
 export interface MessageRecord extends SqlRow {
@@ -412,25 +496,50 @@ export interface MessageRecord extends SqlRow {
 }
 
 export class ChatRepository extends Repository {
-  createSession(input: { id: string; workspaceId: string; title: string }): ChatSessionRecord {
+  createSession(input: {
+    id: string;
+    workspaceId: string;
+    title: string;
+    projectId?: string | null;
+  }): ChatSessionRecord {
     const timestamp = now();
     this.db.run(
-      'INSERT INTO chat_sessions (id, workspace_id, title, created_at, updated_at) VALUES (?,?,?,?,?)',
-      [input.id, input.workspaceId, input.title, timestamp, timestamp],
+      'INSERT INTO chat_sessions (id, workspace_id, title, project_id, created_at, updated_at) VALUES (?,?,?,?,?,?)',
+      [input.id, input.workspaceId, input.title, input.projectId ?? null, timestamp, timestamp],
     );
     return this.requireSession(input.id);
   }
 
   listSessions(workspaceId: string, options: ListSessionsOptions = {}): ChatSessionRecord[] {
-    const where = ['workspace_id = ?'];
-    const params: SqlValue[] = [workspaceId];
-    if (!options.includeArchived) where.push('archived_at IS NULL');
+    return this.query(['workspace_id = ?'], [workspaceId], options);
+  }
+
+  /** Every conversation, of every workspace: what the project tree shows. */
+  listAllSessions(options: ListSessionsOptions = {}): ChatSessionRecord[] {
+    return this.query([], [], options);
+  }
+
+  /** Files a conversation under a project, or under none. */
+  setSessionProject(id: string, projectId: string | null): ChatSessionRecord {
+    this.db.run('UPDATE chat_sessions SET project_id = ? WHERE id = ?', [projectId, id]);
+    return this.requireSession(id);
+  }
+
+  private query(where: string[], params: SqlValue[], options: ListSessionsOptions): ChatSessionRecord[] {
+    const clauses = [...where];
+    const values = [...params];
+    if (!options.includeArchived) clauses.push('archived_at IS NULL');
+    if (options.projectId === null) clauses.push('project_id IS NULL');
+    else if (options.projectId !== undefined) {
+      clauses.push('project_id = ?');
+      values.push(options.projectId);
+    }
     const rows = this.db.all<ChatSessionRecord>(
-      `SELECT * FROM chat_sessions WHERE ${where.join(' AND ')} ORDER BY updated_at DESC`,
-      params,
+      `SELECT * FROM chat_sessions${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY updated_at DESC`,
+      values,
     );
     // Matched here rather than with LIKE: SQLite folds case for ASCII only, and
-    // titles are written in Portuguese. A workspace's list is small.
+    // titles are written in Portuguese. The list is small.
     const query = options.query?.trim().toLocaleLowerCase() ?? '';
     if (query.length === 0) return rows;
     return rows.filter((row) => row.title.toLocaleLowerCase().includes(query));

@@ -31,6 +31,7 @@ export type {
   AgentRecord,
   ChatSessionRecord,
   ListSessionsOptions,
+  ProjectRecord,
   MessageRecord,
   RunRecord,
   RunStepRecord,

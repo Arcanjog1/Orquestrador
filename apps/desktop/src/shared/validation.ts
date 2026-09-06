@@ -161,7 +161,10 @@ export function obj<T>(shape: Shape, rules: ObjectRules = {}): Validator<T> {
     const out: Record<string, unknown> = Object.create(null);
     for (const [key, validate] of Object.entries(shape)) {
       const raw = source[key];
-      if (raw === undefined || raw === null) {
+      // `null` is a value only for a validator that says it takes one (see
+      // `nullable`); everywhere else it is "not given", as before.
+      const takesNull = (validate as Validator<unknown> & { nullable?: boolean }).nullable === true;
+      if (raw === undefined || (raw === null && !takesNull)) {
         if (optional.has(key)) continue;
         fail(`${path}.${key}`, 'is required');
       }
@@ -169,6 +172,14 @@ export function obj<T>(shape: Shape, rules: ObjectRules = {}): Validator<T> {
     }
     return { ...out } as T;
   };
+}
+
+/** Accepts `null` or a value the inner validator takes. */
+function nullable<T>(inner: Validator<T>): Validator<T | null> {
+  const validate: Validator<T | null> & { nullable?: boolean } = (value, path) =>
+    value === null ? null : inner(value, path);
+  validate.nullable = true;
+  return validate;
 }
 
 export const runtimeId = oneOf(['codex', 'claude-code', 'git'] as const);
@@ -350,7 +361,23 @@ export const REQUEST_VALIDATORS: {
     { workspaceId: id, includeArchived: bool, query: str({ min: 0, max: 200 }) },
     { optional: ['includeArchived', 'query'] },
   ),
-  'chat.createSession': obj({ workspaceId: id, title: str({ min: 1, max: 200 }) }),
+  'chat.listAllSessions': obj(
+    { includeArchived: bool, query: str({ min: 0, max: 200 }) },
+    { optional: ['includeArchived', 'query'] },
+  ),
+  'chat.moveSession': obj({ sessionId: id, projectId: nullable(id) }),
+  'chat.createSession': obj(
+    { workspaceId: id, title: str({ min: 1, max: 200 }), projectId: nullable(id) },
+    { optional: ['projectId'] },
+  ),
+  'project.list': noArgs,
+  'project.create': obj(
+    { name: str({ min: 1, max: 200 }), workspaceId: nullable(id) },
+    { optional: ['workspaceId'] },
+  ),
+  'project.rename': obj({ projectId: id, name: str({ min: 1, max: 200 }) }),
+  'project.setWorkspace': obj({ projectId: id, workspaceId: nullable(id) }),
+  'project.remove': obj({ projectId: id }),
   'chat.renameSession': obj({ sessionId: id, title: sessionTitle }),
   'chat.archiveSession': obj({ sessionId: id, archived: bool }),
   'chat.deleteSession': obj({ sessionId: id }),

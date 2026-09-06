@@ -32,9 +32,35 @@ export class ChatService {
     return this.database.chat.listSessions(workspaceId, options).map((s) => this.view(s));
   }
 
-  createSession(workspaceId: string, title: string): ChatSessionView {
+  /**
+   * A new conversation, in a workspace and - when asked - under a project.
+   * Started from inside a project, it is born there; the workspace is the
+   * one the caller names (the project's own, by default, in the interface).
+   */
+  createSession(workspaceId: string, title: string, projectId: string | null = null): ChatSessionView {
     this.database.workspaces.require(workspaceId);
-    return this.view(this.database.chat.createSession({ id: newId('chat'), workspaceId, title }));
+    if (projectId && !this.database.projects.find(projectId)) {
+      throw new ChatError('Este projeto não existe mais.');
+    }
+    const record = this.database.chat.createSession({ id: newId('chat'), workspaceId, title, projectId });
+    if (projectId) this.database.projects.touch(projectId);
+    return this.view(record);
+  }
+
+  /** Every conversation of every workspace, for the project tree and the search. */
+  listAllSessions(options: ListSessionsOptions = {}): ChatSessionView[] {
+    return this.database.chat.listAllSessions(options).map((s) => this.view(s));
+  }
+
+  /** Files the conversation under another project, or under none. Persisted. */
+  moveSession(sessionId: string, projectId: string | null): ChatSessionView {
+    this.database.chat.requireSession(sessionId);
+    if (projectId && !this.database.projects.find(projectId)) {
+      throw new ChatError('Este projeto não existe mais.');
+    }
+    const record = this.database.chat.setSessionProject(sessionId, projectId);
+    if (projectId) this.database.projects.touch(projectId);
+    return this.view(record);
   }
 
   renameSession(sessionId: string, title: string): ChatSessionView {
@@ -68,9 +94,13 @@ export class ChatService {
   }
 
   private view(record: ChatSessionRecord): ChatSessionView {
+    const project = record.project_id ? this.database.projects.find(record.project_id) : undefined;
+    const workspace = this.database.workspaces.find(record.workspace_id);
     return toSessionView(record, {
       messageCount: this.database.chat.countMessages(record.id),
       lastRun: this.database.runs.listForSession(record.id).at(-1) ?? null,
+      projectName: project?.name ?? null,
+      workspaceName: workspace?.display_name ?? null,
     });
   }
 

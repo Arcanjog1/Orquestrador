@@ -69,7 +69,15 @@ export const REQUEST_CHANNELS = [
   'verifications.update',
   'verifications.remove',
 
+  'project.list',
+  'project.create',
+  'project.rename',
+  'project.setWorkspace',
+  'project.remove',
+
   'chat.listSessions',
+  'chat.listAllSessions',
+  'chat.moveSession',
   'chat.createSession',
   'chat.renameSession',
   'chat.archiveSession',
@@ -302,9 +310,30 @@ export interface WorkspaceView {
   readonly updatedAt: string;
 }
 
+/**
+ * A project: the organisation of conversations. Not a folder - it may point
+ * at one workspace (the folder agents work in) that its new conversations
+ * inherit, or at none.
+ */
+export interface ProjectView {
+  readonly id: string;
+  readonly name: string;
+  readonly workspaceId: string | null;
+  readonly workspaceName: string | null;
+  /** Conversations filed under it, archived ones not counted. */
+  readonly sessionCount: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 export interface ChatSessionView {
   readonly id: string;
+  /** The folder the agents work in for this conversation. */
   readonly workspaceId: string;
+  readonly workspaceName: string | null;
+  /** The project it is filed under; null is "Sem projeto". */
+  readonly projectId: string | null;
+  readonly projectName: string | null;
   readonly title: string;
   readonly createdAt: string;
   /** Moves whenever a message lands or the title changes; the recents order. */
@@ -670,10 +699,33 @@ export interface IpcMap {
     request: { workspaceId: string; includeArchived?: boolean; query?: string };
     response: readonly ChatSessionView[];
   };
-  'chat.createSession': {
-    request: { workspaceId: string; title: string };
+  /**
+   * Every conversation of every workspace, for the project tree; `query`
+   * searches across projects and each row says which project it is in.
+   */
+  'chat.listAllSessions': {
+    request: { includeArchived?: boolean; query?: string };
+    response: readonly ChatSessionView[];
+  };
+  /** Files a conversation under a project (`null` = "Sem projeto"). Persisted. */
+  'chat.moveSession': {
+    request: { sessionId: string; projectId: string | null };
     response: ChatSessionView;
   };
+  'chat.createSession': {
+    request: { workspaceId: string; title: string; projectId?: string | null };
+    response: ChatSessionView;
+  };
+
+  'project.list': { request: void; response: readonly ProjectView[] };
+  'project.create': { request: { name: string; workspaceId?: string | null }; response: ProjectView };
+  'project.rename': { request: { projectId: string; name: string }; response: ProjectView };
+  'project.setWorkspace': { request: { projectId: string; workspaceId: string | null }; response: ProjectView };
+  /**
+   * Forgets the project. Its conversations are kept and move to "Sem
+   * projeto"; no workspace, repository or file is touched.
+   */
+  'project.remove': { request: { projectId: string }; response: { removed: boolean; sessionsMoved: number } };
   'chat.renameSession': { request: { sessionId: string; title: string }; response: ChatSessionView };
   /** Hides or brings back a conversation. Nothing is deleted either way. */
   'chat.archiveSession': {

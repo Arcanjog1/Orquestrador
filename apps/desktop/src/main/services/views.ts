@@ -18,11 +18,19 @@ import type {
 
 export function toSessionView(
   record: ChatSessionRecord,
-  extra: { messageCount: number; lastRun: RunRecord | null },
+  extra: {
+    messageCount: number;
+    lastRun: RunRecord | null;
+    projectName?: string | null;
+    workspaceName?: string | null;
+  },
 ): ChatSessionView {
   return {
     id: record.id,
     workspaceId: record.workspace_id,
+    workspaceName: extra.workspaceName ?? null,
+    projectId: record.project_id ?? null,
+    projectName: extra.projectName ?? null,
     title: record.title,
     createdAt: record.created_at,
     updatedAt: record.updated_at,

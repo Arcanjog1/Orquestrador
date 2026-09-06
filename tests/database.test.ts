@@ -418,3 +418,59 @@ test('a database from before worker routing upgrades in place: old rows read as 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('conversations from before projects existed read as "Sem projeto", and nothing is lost', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lao-db-upgrade5-'));
+  try {
+    const file = join(dir, 'data', 'old.db');
+    const older = new NodeSqliteDriver(file);
+    older.exec(
+      'CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)',
+    );
+    for (const migration of MIGRATIONS.filter((m) => m.id < 5)) {
+      older.exec(migration.sql);
+      older.run('INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)', [
+        migration.id,
+        migration.name,
+        '2026-01-01T00:00:00.000Z',
+      ]);
+    }
+    const t = '2026-01-01T00:00:00.000Z';
+    older.run(
+      "INSERT INTO workspaces (id, display_name, local_path, created_at, updated_at) VALUES ('ws-1','Projeto','/w',?,?)",
+      [t, t],
+    );
+    older.run(
+      "INSERT INTO chat_sessions (id, workspace_id, title, created_at, updated_at) VALUES ('chat-1','ws-1','Conversa antiga',?,?)",
+      [t, t],
+    );
+    older.run(
+      "INSERT INTO messages (id, session_id, kind, author, body, created_at) VALUES ('msg-1','chat-1','text','user','olá',?)",
+      [t],
+    );
+    older.close();
+
+    const upgraded = new Database({ filePath: file });
+    try {
+      assert.equal(upgraded.schemaVersion, SCHEMA_VERSION);
+      assert.deepEqual(upgraded.projects.list(), [], 'no project was invented');
+      const session = upgraded.chat.requireSession('chat-1');
+      assert.equal(session.project_id, null, '"Sem projeto"');
+      assert.equal(session.title, 'Conversa antiga');
+      assert.equal(upgraded.chat.countMessages('chat-1'), 1);
+      assert.equal(upgraded.chat.listAllSessions({ projectId: null }).length, 1);
+
+      // And the new entity works on the old database.
+      const project = upgraded.projects.create({ id: 'proj-1', name: 'Revit', workspaceId: 'ws-1' });
+      upgraded.chat.setSessionProject('chat-1', project.id);
+      assert.equal(upgraded.chat.requireSession('chat-1').project_id, 'proj-1');
+      assert.equal(upgraded.projects.countSessions('proj-1'), 1);
+      assert.deepEqual(upgraded.projects.remove('proj-1'), { removed: true, sessionsMoved: 1 });
+      assert.equal(upgraded.chat.requireSession('chat-1').project_id, null, 'back to "Sem projeto", kept');
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

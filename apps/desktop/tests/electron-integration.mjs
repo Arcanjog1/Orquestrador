@@ -662,6 +662,92 @@ test('a conversation is renamed, archived, found and deleted from the real sideb
   }
 });
 
+test('projects: the sidebar files conversations under real projects, and a move persists', async () => {
+  const window = await openWindow();
+  const dirA = mkdtempSync(join(tmpdir(), 'lao-electron-proj-a-'));
+  const dirB = mkdtempSync(join(tmpdir(), 'lao-electron-proj-b-'));
+  try {
+    const orq = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Pasta Orquestrador', localPath: dirA })})`,
+    );
+    const revitFolder = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Pasta Revit', localPath: dirB })})`,
+    );
+    const revit = await window.webContents.executeJavaScript(
+      `window.api.project.create(${JSON.stringify({ name: 'Revit', workspaceId: revitFolder.id })})`,
+    );
+    assert.equal(revit.workspaceName, 'Pasta Revit');
+    const inside = await window.webContents.executeJavaScript(
+      `window.api.chat.createSession(${JSON.stringify({ workspaceId: revitFolder.id, title: 'Modulação automática', projectId: revit.id })})`,
+    );
+    const loose = await window.webContents.executeJavaScript(
+      `window.api.chat.createSession(${JSON.stringify({ workspaceId: orq.id, title: 'Conversa solta' })})`,
+    );
+
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    // Section labels are uppercased by CSS, and innerText follows.
+    await waitForText(window, /Modulação automática/, 15_000);
+
+    // The tree: the project row, its conversation under it, the loose one
+    // under "Sem projeto".
+    const underRevit = await window.webContents.executeJavaScript(
+      `!!document.querySelector('[data-testid="project-${revit.id}"] [data-testid="session-${inside.id}"]')`,
+    );
+    assert.equal(underRevit, true, 'the conversation is filed under its project');
+    const underNone = await window.webContents.executeJavaScript(
+      `!!document.querySelector('[data-testid="project-none"] [data-testid="session-${loose.id}"]')`,
+    );
+    assert.equal(underNone, true, 'a conversation without a project is under "Sem projeto"');
+    const body = await window.webContents.executeJavaScript('document.body.innerText');
+    assert.match(body, /Revit/);
+    assert.match(body, /Sem projeto/i);
+
+    // A new conversation from the project's own "+" is born inside it, in
+    // its folder.
+    await click(window, `new-session-in-${revit.id}`);
+    await waitForText(window, /Nova conversa em Revit/, 10_000);
+    const all = await window.webContents.executeJavaScript('window.api.chat.listAllSessions({})');
+    const born = all.find((s) => s.title === 'Nova tarefa');
+    assert.ok(born, 'the conversation exists');
+    assert.equal(born.projectId, revit.id);
+    assert.equal(born.workspaceId, revitFolder.id, 'in the project\'s folder');
+
+    // Moving is a persisted change, not a visual one: after a reload the
+    // loose conversation is under Revit.
+    await window.webContents.executeJavaScript(
+      `window.api.chat.moveSession(${JSON.stringify({ sessionId: loose.id, projectId: revit.id })})`,
+    );
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Conversa solta/, 15_000);
+    const movedUnderRevit = await window.webContents.executeJavaScript(
+      `!!document.querySelector('[data-testid="project-${revit.id}"] [data-testid="session-${loose.id}"]')`,
+    );
+    assert.equal(movedUnderRevit, true);
+
+    // The search finds it whatever the project, and names the project.
+    await type(window, 'session-search', 'solta');
+    const results = await waitForText(window, /Resultados/i, 10_000);
+    assert.match(results, /Revit · Conversa solta/);
+
+    // Removing the project keeps the conversations, now "Sem projeto".
+    const outcome = await window.webContents.executeJavaScript(
+      `window.api.project.remove(${JSON.stringify({ projectId: revit.id })})`,
+    );
+    assert.equal(outcome.sessionsMoved, 3);
+    const after = await window.webContents.executeJavaScript('window.api.chat.listAllSessions({})');
+    assert.equal(after.length, 3);
+    assert.ok(after.every((s) => s.projectId === null));
+  } finally {
+    removeTree(dirA);
+    removeTree(dirB);
+  }
+});
+
 test('a run that cannot start says which account is missing, and "Detalhes" shows the record', async () => {
   const window = await openWindow();
   const dir = mkdtempSync(join(tmpdir(), 'lao-electron-run-'));

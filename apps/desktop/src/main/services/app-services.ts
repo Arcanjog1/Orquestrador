@@ -24,6 +24,7 @@ import { EventBus } from '../events.js';
 import { AccountService, type UrlOpener } from './account-service.js';
 import { AgentService, workerAgentIdFor } from './agent-service.js';
 import { ChatService } from './chat-service.js';
+import { ProjectService } from './project-service.js';
 import {
   OrchestrationService,
   type OrchestrationOptions,
@@ -89,6 +90,7 @@ export class AppServices {
   readonly verifications: VerificationService;
   readonly orchestration: OrchestrationService;
   readonly chat: ChatService;
+  readonly projects: ProjectService;
   readonly github: GitHubService;
 
   constructor(options: AppServicesOptions = {}) {
@@ -136,6 +138,7 @@ export class AppServices {
       options.createRunners ? async () => null : (workspace) => this.checkAgentsReady(workspace),
     );
     this.chat = new ChatService(this.database, this.orchestration);
+    this.projects = new ProjectService(this.database);
     this.workspaces.bindActivity((workspaceId) => this.orchestration.hasActiveRunInWorkspace(workspaceId));
     this.github = new GitHubService(
       this.database,

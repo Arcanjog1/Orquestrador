@@ -18,6 +18,7 @@ import {
   RunRepository,
   VerificationDefinitionRepository,
   WorkspaceRepository,
+  ProjectRepository,
 } from './repositories.js';
 import { appPaths, type AppPaths } from '../runtime/paths.js';
 import type { RuntimeManifest } from '../runtime/types.js';
@@ -90,6 +91,7 @@ export class Database {
   readonly agents = new AgentRepository(() => this.driver);
   readonly workspaces = new WorkspaceRepository(() => this.driver);
   readonly chat = new ChatRepository(() => this.driver);
+  readonly projects = new ProjectRepository(() => this.driver);
   readonly runs = new RunRepository(() => this.driver);
   readonly verifications = new VerificationDefinitionRepository(() => this.driver);
 }
