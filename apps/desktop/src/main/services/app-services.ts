@@ -53,6 +53,13 @@ export interface AppServicesOptions {
   github?: GitHubClientOptions;
 }
 
+/** The settings keys the loop reads. The Execution screen writes the same ones. */
+export const SETTING = {
+  maxIterations: 'execution.maxIterations',
+  agentTimeoutMinutes: 'execution.agentTimeoutMinutes',
+  verificationTimeoutMinutes: 'execution.verificationTimeoutMinutes',
+} as const;
+
 /** The store used when the shell offers none: nothing can be kept. */
 const NO_SECRET_STORE: SecretStore = {
   available: false,
@@ -122,11 +129,7 @@ export class AppServices {
       this.processManager,
       this.events,
       options.createRunners ?? ((workspace) => this.buildRunners(workspace)),
-      {
-        // Evidence is collected with the managed Git when there is one.
-        gitCommand: () => this.runtimeManager.getExecutablePath('git'),
-        ...(options.orchestration ?? {}),
-      },
+      this.orchestrationOptions(options.orchestration ?? {}),
       // Tests supplying their own runners are supplying their own agents too,
       // so there is nothing to check.
       options.createRunners ? async () => null : (workspace) => this.checkAgentsReady(workspace),
@@ -146,6 +149,37 @@ export class AppServices {
     this.agents.sync();
     // A run the previous process left as RUNNING is not running now.
     this.orchestration.reconcileInterrupted();
+  }
+
+  /**
+   * The loop's limits, read from the settings table at the moment they are
+   * used, so a change on the Execution screen applies to the next run without
+   * a restart. An explicit option (tests) wins; a stored setting comes next;
+   * the loop's own default last.
+   */
+  private orchestrationOptions(explicit: OrchestrationOptions): OrchestrationOptions {
+    const setting = (key: string, min: number, max: number): number | undefined => {
+      const raw = this.database.settings.get(key);
+      if (raw === null) return undefined;
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
+    };
+    return {
+      // Evidence is collected with the managed Git when there is one.
+      gitCommand: () => this.runtimeManager.getExecutablePath('git'),
+      ...(explicit.allowNoChanges !== undefined ? { allowNoChanges: explicit.allowNoChanges } : {}),
+      get maxIterations() {
+        return explicit.maxIterations ?? setting(SETTING.maxIterations, 1, 50);
+      },
+      get agentTimeoutMs() {
+        const minutes = setting(SETTING.agentTimeoutMinutes, 1, 180);
+        return explicit.agentTimeoutMs ?? (minutes !== undefined ? minutes * 60_000 : undefined);
+      },
+      get verificationTimeoutMs() {
+        const minutes = setting(SETTING.verificationTimeoutMinutes, 1, 180);
+        return explicit.verificationTimeoutMs ?? (minutes !== undefined ? minutes * 60_000 : undefined);
+      },
+    };
   }
 
   /**

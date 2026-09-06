@@ -242,6 +242,7 @@ export const REQUEST_VALIDATORS: {
   [K in RequestChannel]: Validator<IpcMap[K]['request']>;
 } = {
   'app.info': noArgs,
+  'app.setStartWithSystem': obj({ enabled: bool }),
   'app.openExternal': obj({ url: externalUrl }),
 
   'settings.all': noArgs,

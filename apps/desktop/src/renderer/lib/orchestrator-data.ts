@@ -83,36 +83,6 @@ export function reasoningLabel(level: string | null | undefined): string | null 
   }
 }
 
-/** The reasons a run can stop for a human, offered in Settings. */
-export const humanReviewReasons = [
-  {
-    id: "ambiguous",
-    label: "Requisito ambíguo",
-    description: "Existem duas interpretações válidas do objetivo.",
-  },
-  {
-    id: "destructive",
-    label: "Ação destrutiva",
-    description: "É necessário um force push na branch remota.",
-  },
-  { id: "security", label: "Segurança", description: "A mudança afeta autenticação." },
-  {
-    id: "no-progress",
-    label: "Sem progresso",
-    description: "3 tentativas repetiram o mesmo erro.",
-  },
-  {
-    id: "iteration-limit",
-    label: "Limite de iterações",
-    description: "O limite configurado de iterações foi atingido.",
-  },
-  {
-    id: "auth",
-    label: "Autenticação",
-    description: "O usuário precisa concluir o login do provider.",
-  },
-];
-
 export const suggestions = [
   "Corrigir um bug",
   "Implementar recurso",

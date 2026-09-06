@@ -297,6 +297,19 @@ export function WorkspacePage({
     await Promise.all([refreshBranches(), refreshChanges(), refreshPullRequest()]);
   }
 
+  const [pushConfirm, setPushConfirm] = useState(false);
+
+  /** Push asks first unless the person switched that off in Settings → Git. */
+  async function pushRequested() {
+    try {
+      const settings = await api.settings.all();
+      if ((settings["git.confirmBeforePush"] ?? "true") === "true") setPushConfirm(true);
+      else await runGit("push");
+    } catch (error) {
+      fail(error);
+    }
+  }
+
   async function runGit(action: "fetch" | "push") {
     if (!workspace) return;
     try {
@@ -603,7 +616,7 @@ export function WorkspacePage({
           onFetch={() => void runGit("fetch")}
           onCreateBranch={() => setGitDialog("branch")}
           onCommit={() => setGitDialog("commit")}
-          onPush={() => void runGit("push")}
+          onPush={() => void pushRequested()}
           onPullRequest={() => setGitDialog("pr")}
         />
 
@@ -680,6 +693,17 @@ export function WorkspacePage({
         runId={run?.id ?? null}
       />
       <RunDetailDialog runId={detailRunId} onOpenChange={(v) => !v && setDetailRunId(null)} />
+      <ConfirmDialog
+        open={pushConfirm}
+        onOpenChange={setPushConfirm}
+        title="Enviar para o remoto?"
+        description={`git push da branch ${workspace.branch ?? "atual"} para origin. Pode ser desligado em Configurações → Git.`}
+        confirmLabel="Push"
+        onConfirm={() => {
+          setPushConfirm(false);
+          void runGit("push");
+        }}
+      />
       <CommitDialog
         open={gitDialog === "commit"}
         onOpenChange={(v) => !v && setGitDialog(null)}

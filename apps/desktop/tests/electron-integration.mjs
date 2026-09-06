@@ -826,10 +826,76 @@ test('GitHub: the card takes a client id, signs in with the device code shown, a
   assert.equal(after.configured, true, 'the client id stays');
 });
 
+test('Settings: the theme applies to the page, a number persists, and the login item reaches the shell', async () => {
+  const window = await openWindow();
+  await window.webContents.executeJavaScript(
+    `(() => { location.hash = '#/configuracoes?tab=appearance'; return true; })()`,
+  );
+  await reloadWindow(window);
+  await waitForText(window, /Tema/, 15_000);
+  const classesBefore = await window.webContents.executeJavaScript('document.documentElement.className');
+  assert.match(classesBefore, /dark/);
+
+  await click(window, 'setting-theme-light');
+  const classesAfter = await window.webContents.executeJavaScript('document.documentElement.className');
+  assert.match(classesAfter, /light/);
+  assert.doesNotMatch(classesAfter, /dark/);
+
+  // Persisted: a fresh load of the page comes up light.
+  await reloadWindow(window);
+  await waitForText(window, /Tema/, 15_000);
+  assert.match(await window.webContents.executeJavaScript('document.documentElement.className'), /light/);
+  await click(window, 'setting-theme-dark');
+  assert.match(await window.webContents.executeJavaScript('document.documentElement.className'), /dark/);
+
+  // Execution: a bounded number, saved on blur, read back by the main process.
+  await window.webContents.executeJavaScript(
+    `(() => { location.hash = '#/configuracoes?tab=execution'; return true; })()`,
+  );
+  await reloadWindow(window);
+  await waitForText(window, /Máximo de iterações/, 15_000);
+  await type(window, 'setting-max-iterations', '3');
+  await window.webContents.executeJavaScript(`
+    document.querySelector('[data-testid="setting-max-iterations"]').dispatchEvent(new Event('blur'))
+  `);
+  await window.webContents.executeJavaScript(`
+    (() => {
+      const el = document.querySelector('[data-testid="setting-max-iterations"]');
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return true;
+    })()
+  `);
+  const deadline = Date.now() + 5000;
+  let stored = null;
+  while (Date.now() < deadline) {
+    stored = (await window.webContents.executeJavaScript('window.api.settings.all()'))['execution.maxIterations'];
+    if (stored === '3') break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.equal(stored, '3');
+  assert.equal(services.database.settings.get('execution.maxIterations'), '3');
+
+  // General: the switch talks to the shell's login item.
+  await window.webContents.executeJavaScript(
+    `(() => { location.hash = '#/configuracoes?tab=general'; return true; })()`,
+  );
+  await reloadWindow(window);
+  await waitForText(window, /Iniciar com o sistema/, 15_000);
+  await click(window, 'setting-start-with-system');
+  const armed = Date.now() + 5000;
+  while (Date.now() < armed && loginItem !== true) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(loginItem, true, 'the shell was asked to open at login');
+
+  // The prototype's decorative switches are gone.
+  const text = await window.webContents.executeJavaScript('document.body.innerText');
+  assert.doesNotMatch(text, /handoff automático|Auto retry|Execução automática/);
+});
+
 /* ------------------------------------------------------------------ helpers */
 
 let sharedWindow = null;
 let fakeGitHub = null;
+let loginItem = false;
 const openedUrls = [];
 
 /**
@@ -909,6 +975,8 @@ async function openWindow() {
     selectFolder: async () => null,
     openExternal: async () => true,
     openPath: async () => true,
+    startWithSystem: () => loginItem,
+    setStartWithSystem: (enabled) => (loginItem = enabled),
     appInfo: () => ({
       appVersion: '0.1.0-test',
       electronVersion: process.versions.electron,

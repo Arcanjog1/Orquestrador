@@ -20,6 +20,7 @@
 
 export const REQUEST_CHANNELS = [
   'app.info',
+  'app.setStartWithSystem',
   'app.openExternal',
 
   'settings.all',
@@ -114,6 +115,8 @@ export interface AppInfo {
   readonly arch: string;
   readonly sqliteAvailable: boolean;
   readonly packaged: boolean;
+  /** Opens at login; null where the OS offers no such setting to the app. */
+  readonly startWithSystem: boolean | null;
 }
 
 export interface RuntimeStatusView {
@@ -466,6 +469,8 @@ export interface RunProgressEvent {
 
 export interface IpcMap {
   'app.info': { request: void; response: AppInfo };
+  /** The OS login item, set by the shell; the answer is what the OS now says. */
+  'app.setStartWithSystem': { request: { enabled: boolean }; response: { startWithSystem: boolean | null } };
   /**
    * Hands one http(s) URL to the system browser.
    *

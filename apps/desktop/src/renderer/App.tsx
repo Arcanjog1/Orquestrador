@@ -6,6 +6,7 @@ import { OnboardingPage } from "@/pages/Onboarding";
 import { SettingsPage } from "@/pages/Settings";
 import { HistoryPage } from "@/pages/History";
 import { api, messageOf } from "@/lib/api";
+import { applyTheme } from "@/lib/theme";
 import type {
   AccountView,
   GitHubStatusView,
@@ -60,14 +61,16 @@ function Shell() {
   const reload = useCallback(() => {
     void (async () => {
       try {
-        const [appInfo, diagnostics, accounts, agents, workspaces, github] = await Promise.all([
+        const [appInfo, diagnostics, accounts, agents, workspaces, github, settings] = await Promise.all([
           api.app.info(),
           api.runtime.diagnose(),
           api.accounts.list(),
           api.agents.list(),
           api.workspace.list(),
           api.github.status(),
+          api.settings.all(),
         ]);
+        applyTheme(settings["appearance.theme"]);
         setState({ appInfo, diagnostics, accounts, agents, workspaces, github });
         setWorkspaceId((current) =>
           current && workspaces.some((w) => w.id === current) ? current : workspaces[0]?.id ?? null,

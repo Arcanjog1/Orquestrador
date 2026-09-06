@@ -3,7 +3,6 @@ import { ArrowLeft, Check, Loader2, MoreHorizontal, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -23,9 +22,9 @@ import {
 import { LoginDialog } from "@/components/orch/dialogs";
 import { GitHubCard } from "@/components/orch/GitHubCard";
 import { ProviderIcon, SectionLabel } from "@/components/orch/primitives";
-import { humanReviewReasons } from "@/lib/orchestrator-data";
 import { cn } from "@/lib/utils";
 import { api, messageOf } from "@/lib/api";
+import { applyTheme, THEMES } from "@/lib/theme";
 import { Link, useRouter, useSearch } from "@/router";
 import type {
   AccountView,
@@ -40,31 +39,35 @@ import type {
 const tabs = [
   { id: "general", label: "General" },
   { id: "appearance", label: "Appearance" },
-  { id: "agents", label: "Agents" },
   { id: "accounts", label: "Accounts & Integrations" },
   { id: "execution", label: "Execution" },
   { id: "verifications", label: "Verificações do projeto" },
   { id: "git", label: "Git" },
-  { id: "advanced", label: "Advanced" },
   { id: "developer", label: "Developer Mode" },
 ] as const;
 
 type TabId = (typeof tabs)[number]["id"];
 
-/** Setting keys, so the renderer and the settings table agree on one spelling. */
-const KEY = {
-  autoRun: "execution.autoRun",
+/**
+ * Setting keys, so the renderer and the settings table agree on one spelling.
+ *
+ * Every key here is read by something: the loop (execution.*), the theme
+ * (appearance.theme), the push button (git.confirmBeforePush), this screen
+ * (developer.mode). The prototype's switches with nothing behind them -
+ * auto-run, auto-retry, human-review reasons, density, language, handoff -
+ * are gone rather than shown as if they did something.
+ */
+export const KEY = {
   maxIterations: "execution.maxIterations",
-  autoRetry: "execution.autoRetry",
-  humanReview: "execution.humanReview.",
+  agentTimeoutMinutes: "execution.agentTimeoutMinutes",
+  verificationTimeoutMinutes: "execution.verificationTimeoutMinutes",
   theme: "appearance.theme",
-  density: "appearance.density",
-  language: "general.language",
-  startWithSystem: "general.startWithSystem",
   confirmPush: "git.confirmBeforePush",
-  autoHandoff: "general.autoHandoff",
   devMode: "developer.mode",
 } as const;
+
+/** The loop's own defaults, shown when nothing was set. */
+const LOOP_DEFAULTS = { maxIterations: 8, agentTimeoutMinutes: 15, verificationTimeoutMinutes: 10 };
 
 /**
  * Settings, exactly as approved.
@@ -225,124 +228,105 @@ export function SettingsPage({
 
           {active === "execution" && (
             <div className="mt-8 space-y-6">
-              <Row label="Execução automática" hint="Roda o loop sem pedir confirmação a cada etapa">
-                <Switch
-                  checked={flag(KEY.autoRun, true)}
-                  onCheckedChange={(v) => save(KEY.autoRun, String(v))}
-                />
-              </Row>
-              <Row label="Máximo de iterações" hint="Ao atingir o limite, pede revisão humana">
-                <Input
-                  value={settings[KEY.maxIterations] ?? "6"}
-                  onChange={(e) =>
-                    setSettings((p) => ({ ...p, [KEY.maxIterations]: e.target.value }))
-                  }
-                  onBlur={(e) => {
-                    const n = Number(e.target.value);
-                    save(KEY.maxIterations, String(Number.isFinite(n) && n > 0 ? Math.floor(n) : 6));
-                  }}
-                  className="h-8 w-20 text-center"
-                />
-              </Row>
-              <Row label="Auto retry" hint="Gera nova instrução automaticamente após falha">
-                <Switch
-                  checked={flag(KEY.autoRetry, true)}
-                  onCheckedChange={(v) => save(KEY.autoRetry, String(v))}
-                />
-              </Row>
-              <div className="border-t border-border pt-6">
-                <SectionLabel>Human Review quando</SectionLabel>
-                <div className="mt-3 space-y-2.5">
-                  {humanReviewReasons.map((r) => (
-                    <label key={r.id} className="flex items-start gap-3 text-sm">
-                      <Checkbox
-                        className="mt-0.5"
-                        checked={flag(KEY.humanReview + r.id, true)}
-                        onCheckedChange={(v) => save(KEY.humanReview + r.id, String(v === true))}
-                      />
-                      <span>
-                        {r.label}
-                        <span className="block text-xs text-muted-foreground">
-                          {r.description}
-                        </span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </div>
+              <p className="text-xs text-muted-foreground">
+                Lidos pelo loop no início de cada execução. Uma mudança aqui vale para a próxima
+                tarefa enviada, sem reiniciar.
+              </p>
+              <NumberRow
+                label="Máximo de iterações"
+                hint="Ao atingir o limite a execução para e pede uma nova instrução"
+                value={settings[KEY.maxIterations]}
+                fallback={LOOP_DEFAULTS.maxIterations}
+                min={1}
+                max={50}
+                onSave={(n) => save(KEY.maxIterations, String(n))}
+                testid="setting-max-iterations"
+              />
+              <NumberRow
+                label="Tempo máximo por agente (min)"
+                hint="Quanto o Codex ou o Claude Code podem levar em uma invocação"
+                value={settings[KEY.agentTimeoutMinutes]}
+                fallback={LOOP_DEFAULTS.agentTimeoutMinutes}
+                min={1}
+                max={180}
+                onSave={(n) => save(KEY.agentTimeoutMinutes, String(n))}
+                testid="setting-agent-timeout"
+              />
+              <NumberRow
+                label="Tempo máximo por verificação (min)"
+                hint="Quanto um comando de verificação pode levar"
+                value={settings[KEY.verificationTimeoutMinutes]}
+                fallback={LOOP_DEFAULTS.verificationTimeoutMinutes}
+                min={1}
+                max={180}
+                onSave={(n) => save(KEY.verificationTimeoutMinutes, String(n))}
+                testid="setting-verification-timeout"
+              />
             </div>
           )}
 
           {active === "appearance" && (
             <div className="mt-8 space-y-6">
-              <Row label="Tema" hint="Dark é o padrão do aplicativo">
+              <Row label="Tema" hint="Dark é o padrão do aplicativo; System segue o sistema">
                 <Segmented
-                  options={["Dark", "Light", "System"]}
+                  options={[...THEMES]}
                   value={settings[KEY.theme] ?? "Dark"}
-                  onChange={(v) => save(KEY.theme, v)}
-                />
-              </Row>
-              <Row label="Densidade" hint="Compacto reduz o espaçamento da timeline">
-                <Segmented
-                  options={["Compact", "Comfortable"]}
-                  value={settings[KEY.density] ?? "Comfortable"}
-                  onChange={(v) => save(KEY.density, v)}
+                  onChange={(v) => {
+                    applyTheme(v);
+                    save(KEY.theme, v);
+                  }}
+                  testid="setting-theme"
                 />
               </Row>
             </div>
           )}
 
-          {active === "developer" && (
+          {active === "general" && (
             <div className="mt-8 space-y-6">
-              <Row label="Developer Mode" hint="Expõe versões, runtimes e o estado do banco">
-                <Switch checked={devMode} onCheckedChange={(v) => save(KEY.devMode, String(v))} />
-              </Row>
-              {devMode && (
-                <pre className="overflow-x-auto rounded-lg border border-border bg-background p-3 font-mono text-xs text-muted-foreground">
-                  {[
-                    `[app] version=${appInfo?.appVersion ?? "—"} packaged=${appInfo?.packaged ?? "—"}`,
-                    `[electron] ${appInfo?.electronVersion ?? "—"} · node ${appInfo?.nodeVersion ?? "—"} · chromium ${appInfo?.chromeVersion ?? "—"}`,
-                    `[platform] ${appInfo?.platform ?? "—"} ${appInfo?.arch ?? ""}`,
-                    `[sqlite] ${appInfo?.sqliteAvailable ? "ok" : "indisponível"}`,
-                    ...(diagnostics?.runtimes ?? []).map(
-                      (r) => `[runtime:${r.runtimeId}] origin=${r.origin} version=${r.version ?? "—"} ready=${r.ready}`,
-                    ),
-                    `[workspace] ${workspace?.localPath ?? "nenhum"}`,
-                  ].join("\n")}
-                </pre>
-              )}
-            </div>
-          )}
-
-          {(active === "general" || active === "agents" || active === "git" || active === "advanced") && (
-            <div className="mt-8 space-y-6">
-              <Row label="Idioma da interface" hint="Português (Brasil)">
-                <Segmented
-                  options={["PT-BR", "EN"]}
-                  value={settings[KEY.language] ?? "PT-BR"}
-                  onChange={(v) => save(KEY.language, v)}
-                />
-              </Row>
-              <Row label="Iniciar com o sistema" hint="Abre o Orquestrador ao ligar o computador">
+              <Row
+                label="Iniciar com o sistema"
+                hint={
+                  appInfo?.startWithSystem === null
+                    ? "Este sistema não oferece essa opção ao aplicativo"
+                    : "Abre o AI Orchestrator ao entrar no Windows"
+                }
+              >
                 <Switch
-                  checked={flag(KEY.startWithSystem, false)}
-                  onCheckedChange={(v) => save(KEY.startWithSystem, String(v))}
+                  checked={appInfo?.startWithSystem ?? false}
+                  disabled={appInfo?.startWithSystem === null || appInfo === null}
+                  onCheckedChange={(v) => {
+                    void api.app
+                      .setStartWithSystem({ enabled: v })
+                      .then(() => reload())
+                      .catch(fail);
+                  }}
+                  data-testid="setting-start-with-system"
                 />
               </Row>
-              <Row label="Confirmar antes de push" hint="Sempre pedir revisão em pushes remotos">
+              <Row label="Idioma" hint="Português (Brasil). A interface ainda não tem outros idiomas.">
+                <span className="text-xs text-muted-foreground">PT-BR</span>
+              </Row>
+            </div>
+          )}
+
+          {active === "git" && (
+            <div className="mt-8 space-y-6">
+              <Row label="Confirmar antes de push" hint="O botão Push do cabeçalho pede confirmação">
                 <Switch
                   checked={flag(KEY.confirmPush, true)}
                   onCheckedChange={(v) => save(KEY.confirmPush, String(v))}
+                  data-testid="setting-confirm-push"
                 />
               </Row>
-              <Row label="Gerar handoff automático" hint="Resumo de continuidade ao atingir 85% de contexto">
-                <Switch
-                  checked={flag(KEY.autoHandoff, true)}
-                  onCheckedChange={(v) => save(KEY.autoHandoff, String(v))}
-                />
+              <Row
+                label="Remoto do projeto atual"
+                hint={workspace?.repositoryUrl ?? "Nenhum remoto registrado para o projeto atual"}
+              >
+                <span className="text-xs text-muted-foreground">{workspace?.name ?? "—"}</span>
               </Row>
             </div>
           )}
+
         </div>
       </main>
 
@@ -777,21 +761,69 @@ function Row({
   );
 }
 
+/** A bounded integer setting, saved on blur or Enter, shown with its default. */
+function NumberRow({
+  label,
+  hint,
+  value,
+  fallback,
+  min,
+  max,
+  onSave,
+  testid,
+}: {
+  label: string;
+  hint: string;
+  value: string | undefined;
+  fallback: number;
+  min: number;
+  max: number;
+  onSave: (n: number) => void;
+  testid: string;
+}) {
+  const [draft, setDraft] = useState(value ?? String(fallback));
+  useEffect(() => setDraft(value ?? String(fallback)), [value, fallback]);
+  const commit = () => {
+    const n = Math.floor(Number(draft));
+    const clamped = Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    setDraft(String(clamped));
+    if (String(clamped) !== (value ?? "")) onSave(clamped);
+  };
+  return (
+    <Row label={label} hint={`${hint} · padrão ${fallback}`}>
+      <Input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+        }}
+        inputMode="numeric"
+        className="h-8 w-20 text-center"
+        data-testid={testid}
+      />
+    </Row>
+  );
+}
+
 function Segmented({
   options,
   value,
   onChange,
+  testid,
 }: {
   options: string[];
   value: string;
   onChange: (v: string) => void;
+  testid?: string;
 }) {
   return (
-    <div className="inline-flex rounded-md border border-border bg-surface-raised p-0.5">
+    <div className="inline-flex rounded-md border border-border bg-surface-raised p-0.5" data-testid={testid}>
       {options.map((o) => (
         <button
           key={o}
           onClick={() => onChange(o)}
+          data-testid={testid ? `${testid}-${o.toLowerCase()}` : undefined}
           className={cn(
             "rounded px-2.5 py-1 text-xs transition-colors",
             value === o ? "bg-accent text-foreground" : "text-muted-foreground",

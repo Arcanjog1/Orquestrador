@@ -85,6 +85,17 @@ function buildShellBridge(): ShellBridge {
       const problem = await shell.openPath(path);
       return problem === '';
     },
+    // Windows and macOS have a login item for the app; Linux has none Electron
+    // can set, and the setting says so rather than pretending.
+    startWithSystem: () =>
+      process.platform === 'win32' || process.platform === 'darwin'
+        ? app.getLoginItemSettings().openAtLogin
+        : null,
+    setStartWithSystem: (enabled: boolean) => {
+      if (process.platform !== 'win32' && process.platform !== 'darwin') return null;
+      app.setLoginItemSettings({ openAtLogin: enabled });
+      return app.getLoginItemSettings().openAtLogin;
+    },
     appInfo: () => ({
       appVersion: app.getVersion(),
       electronVersion: process.versions.electron ?? '',

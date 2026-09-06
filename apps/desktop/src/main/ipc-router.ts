@@ -37,6 +37,9 @@ export interface ShellBridge {
   openExternal(url: string): Promise<boolean>;
   /** Opens a folder the application itself recorded, in the file manager. */
   openPath(path: string): Promise<boolean>;
+  /** The OS "open at login" item. Null where the platform has none for the app. */
+  startWithSystem(): boolean | null;
+  setStartWithSystem(enabled: boolean): boolean | null;
 }
 
 export type Handler = (payload: unknown) => Promise<unknown> | unknown;
@@ -74,8 +77,12 @@ export class IpcRouter {
   private register(): void {
     const s = this.services;
 
+    this.handlers.set('app.setStartWithSystem', (p) => ({
+      startWithSystem: this.shell.setStartWithSystem((p as { enabled: boolean }).enabled),
+    }));
     this.handlers.set('app.info', () => ({
       ...this.shell.appInfo(),
+      startWithSystem: this.shell.startWithSystem(),
       platform: process.platform,
       arch: process.arch,
       sqliteAvailable: s.database.schemaVersion > 0,

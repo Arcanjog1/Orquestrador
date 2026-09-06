@@ -73,6 +73,7 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
 
   const openedUrls: string[] = [];
   const openedPaths: string[] = [];
+  let loginItem = false;
   const services = new AppServices({
     paths,
     ...(options.createRunners ? { createRunners: options.createRunners } : {}),
@@ -105,6 +106,11 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
     async openPath(path: string) {
       openedPaths.push(path);
       return true;
+    },
+    startWithSystem: () => loginItem,
+    setStartWithSystem: (enabled: boolean) => {
+      loginItem = enabled;
+      return loginItem;
     },
     appInfo: () => ({
       appVersion: '0.0.0-test',
