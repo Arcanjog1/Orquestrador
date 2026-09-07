@@ -18,7 +18,7 @@
 
 import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessRunner } from './adapter-types.js';
 import { makeAgentResult, resolveFixedEffort } from '../core.js';
-import type { InvocationUsage, WorkerRuntimeCapabilities } from '../core.js';
+import type { InvocationUsage, ProviderFailureKind, WorkerRuntimeCapabilities } from '../core.js';
 import {
   describeProbe,
   modelAliases,
@@ -88,18 +88,42 @@ export class ClaudeCodeAdapter implements AgentRunner {
       // is what lets a worker keep its context between delegations instead of
       // meeting the codebase again on every turn.
       const envelope = plan.jsonOutput ? readEnvelope(result.stdout) : null;
+
+      // The envelope reports a failure *inside* a run that exited 0.
+      //
+      // This is the trap this whole block exists for. `claude -p` exits 0 and
+      // sets `is_error` when the run itself failed - a refused tool, a turn
+      // limit, an error during execution. Reading only `result` therefore
+      // turned "the worker was not allowed to write the file" into "the worker
+      // finished cleanly and changed nothing", which the loop then read as no
+      // progress and answered by escalating the model. No model can fix a
+      // refused permission, so the run escalated to the top and stopped with
+      // nobody ever seeing the actual cause.
+      const failure = envelope ? classifyEnvelope(envelope) : null;
+      const denials = envelope?.permissionDenials ?? [];
+      const stderr = [result.stderr, describeDenials(denials), envelope?.errorSummary ?? '']
+        .filter((part) => part.trim().length > 0)
+        .join('\n');
+
       return makeAgentResult({
         startedAt,
         outcome: result.outcome,
-        exitCode: result.exitCode,
+        // An envelope that says it failed is a failure, whatever the exit code
+        // was. Keeping the CLI's own 0 here would hide it from every check
+        // downstream that reads `exitCode`.
+        exitCode: failure ? (result.exitCode === 0 ? 1 : result.exitCode) : result.exitCode,
         signal: result.signal,
+        // Never lose what came back. When the envelope cannot be read, the raw
+        // stdout is the report; when it can, `result` is.
         stdout: envelope?.text ?? result.stdout,
-        stderr: result.stderr,
+        stderr,
         truncated: result.truncated,
         executable,
         applied: plan.applied,
         ...(envelope?.sessionId ? { sessionId: envelope.sessionId } : {}),
         ...(envelope?.usage ? { usage: envelope.usage } : {}),
+        ...(failure ? { failure } : {}),
+        ...(denials.length > 0 ? { permissionDenials: denials } : {}),
         ...(result.error ? { error: result.error } : {}),
       });
     } finally {
@@ -266,19 +290,55 @@ interface ClaudePlan {
   readonly jsonOutput: boolean;
 }
 
+interface ClaudeEnvelope {
+  text: string;
+  sessionId: string | null;
+  usage: InvocationUsage | null;
+  /** `success`, `error_max_turns`, `error_during_execution`, … */
+  subtype: string | null;
+  isError: boolean;
+  /** Tools the run asked for and was refused, as the CLI reported them. */
+  permissionDenials: string[];
+  /** A short line naming the failure, for stderr. Empty when there is none. */
+  errorSummary: string;
+}
+
+/**
+ * What kind of failure the envelope describes, or null when it describes none.
+ *
+ * A refused tool is `tool-permission-denied` rather than a generic failure
+ * because the loop treats it differently: it is mechanical, so no stronger
+ * model is tried, and it is actionable, so the orchestrator is told what was
+ * refused instead of "no progress".
+ */
+function classifyEnvelope(envelope: ClaudeEnvelope): ProviderFailureKind | null {
+  if (envelope.permissionDenials.length > 0) return 'tool-permission-denied';
+  if (!envelope.isError) {
+    // A run that succeeded but said nothing is still nothing to act on, and
+    // saying so beats handing the orchestrator an empty string.
+    return envelope.text.trim().length === 0 ? 'empty-response' : null;
+  }
+  if (envelope.subtype === 'error_max_turns') return 'provider-error';
+  return 'provider-error';
+}
+
+function describeDenials(denials: readonly string[]): string {
+  if (denials.length === 0) return '';
+  return `Ferramentas recusadas nesta execução: ${denials.join(', ')}.`;
+}
+
 /**
  * Reads `--output-format json`.
  *
- * Documented fields: `result` (the answer), `session_id`, `total_cost_usd`
- * and `usage`. The cost is the CLI's own figure, which beats any price table
- * this application could keep, so it is marked as reported.
+ * Documented fields on the result message: `result`, `subtype`, `is_error`,
+ * `session_id`, `total_cost_usd`, `usage`, `permission_denials` and
+ * `structured_output`. The cost is the CLI's own figure, which beats any price
+ * table this application could keep, so it is marked as reported.
  *
  * Anything unreadable returns null and the caller falls back to raw stdout -
  * a build that changed its envelope must not lose the answer.
  */
-function readEnvelope(
-  stdout: string,
-): { text: string; sessionId: string | null; usage: InvocationUsage | null } | null {
+function readEnvelope(stdout: string): ClaudeEnvelope | null {
   const trimmed = stdout.trim();
   if (!trimmed.startsWith('{')) return null;
   let parsed: Record<string, unknown>;
@@ -296,6 +356,12 @@ function readEnvelope(
         ? JSON.stringify(structured)
         : stdout;
   const sessionId = typeof parsed.session_id === 'string' ? parsed.session_id : null;
+  const subtype = typeof parsed.subtype === 'string' ? parsed.subtype : null;
+  const isError = parsed.is_error === true;
+  const permissionDenials = readDenials(parsed.permission_denials);
+  const errorSummary = isError
+    ? `A execução do Claude Code terminou em erro${subtype ? ` (${subtype})` : ''}.`
+    : '';
 
   const raw = (parsed.usage ?? {}) as Record<string, unknown>;
   const input = numberOrNull(raw.input_tokens);
@@ -316,7 +382,28 @@ function readEnvelope(
           costUsd: cost,
           costReported: cost !== null,
         };
-  return { text, sessionId, usage };
+  return { text, sessionId, usage, subtype, isError, permissionDenials, errorSummary };
+}
+
+/**
+ * The refused tools, named.
+ *
+ * The shape is a list of objects the CLI writes; only the tool name is taken,
+ * because the rest can carry the arguments a tool was called with and those
+ * may contain anything the person typed.
+ */
+function readDenials(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const names: string[] = [];
+  for (const entry of value.slice(0, 20)) {
+    if (typeof entry === 'string') names.push(entry.slice(0, 80));
+    else if (entry && typeof entry === 'object') {
+      const name = (entry as { tool_name?: unknown; name?: unknown }).tool_name ??
+        (entry as { name?: unknown }).name;
+      if (typeof name === 'string') names.push(name.slice(0, 80));
+    }
+  }
+  return [...new Set(names)];
 }
 
 function numberOrNull(value: unknown): number | null {

@@ -19,6 +19,8 @@
  *     from the worker's summary of what it did.
  */
 
+import { rmSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type {
   AgentResult,
   AgentRunner,
@@ -474,10 +476,44 @@ export class OrchestrationService {
           })
         : null;
 
+    // A coding run must have somewhere real to work. Checked here, before the
+    // first agent is paid for, because an unwritable or missing folder is a
+    // configuration problem with a clear fix - and letting it through means
+    // the worker fails, the orchestrator sees "no progress", and the person is
+    // told nothing they can act on.
+    // Only for a folder on *this* computer. A remote environment's path
+    // exists inside that environment, never here, so statting it locally
+    // would answer about the wrong filesystem - which is the boundary cloud
+    // mode exists to keep.
+    if (!conversation && environment?.kind === 'local') {
+      const problem = describeWorkspaceProblem(cwd);
+      if (problem) {
+        this.database.runs.setStatus(runId, 'NEEDS_HUMAN', problem);
+        this.step(runId, 0, 'workspace', 'invalid', problem);
+        this.say(sessionId, runId, 'system', problem);
+        this.progress(runId, sessionId, 'needs-human', 'Pasta do projeto indisponível.', 'NEEDS_HUMAN');
+        return;
+      }
+    }
+
     const baseline = collector ? await collector.captureBaseline() : EMPTY_BASELINE;
     if (collector) {
       this.database.runs.setBaseline(runId, baseline.branch, baseline.commit, baseline.dirty);
-      this.step(runId, 0, 'baseline', 'ok', baseline.commit ?? 'sem commit');
+      // What the program can actually observe, said once at the start rather
+      // than discovered as silence later.
+      this.step(
+        runId,
+        0,
+        'baseline',
+        baseline.evidenceProblem ? 'degraded' : 'ok',
+        baseline.evidenceProblem ??
+          (baseline.isGitRepository
+            ? (baseline.commit ?? 'sem commit')
+            : 'pasta sem repositório git; alterações serão observadas pelo sistema de arquivos'),
+      );
+      if (baseline.evidenceProblem) {
+        this.say(sessionId, runId, 'system', baseline.evidenceProblem);
+      }
     }
 
     const ledger = new AcceptanceCriteriaLedger();
@@ -1086,6 +1122,19 @@ export class OrchestrationService {
       '  }',
       '}',
       '',
+      // Measured: a supervisor that believes it must see the file itself will
+      // block when it cannot. Codex runs read-only by design, so it cannot -
+      // and it does not need to, because the application looks for it. Saying
+      // so is what stops "I have no way to verify this" from ending a run
+      // whose worker may well have succeeded.
+      'You do NOT inspect the workspace yourself, and you do not need to. You run',
+      'read-only on purpose. After every delegation the application collects evidence',
+      'directly from the workspace - git, or a walk of the folder when there is no',
+      'repository - and runs the verifications you name, then puts both in front of you.',
+      'The EVIDENCE and VERIFICATION sections below are your source of truth about what',
+      'happened. Never answer "blocked" merely because you cannot read a file: say what',
+      'you need verified and the application will verify it.',
+      '',
       'Rules: "done" is a request, not a conclusion - it is re-validated before the run',
       'can end. In a run with a workspace that means freshly collected git evidence and',
       'every verification re-run from scratch; an unknown verification id is reported as a',
@@ -1144,7 +1193,33 @@ export class OrchestrationService {
         '',
       );
     }
-    lines.push('GIT EVIDENCE (collected by the orchestrator, not reported by the agent):');
+    // The concrete cause, when the worker's own tool reported one. Before
+    // this, a refused write reached the orchestrator as "progressed: no",
+    // which is why it kept re-delegating the same task at ever higher tiers.
+    if (worker?.failure) {
+      lines.push(
+        'WHY THE WORKER DID NOT SUCCEED:',
+        `  ${failureExplanation(worker.failure)}`,
+        ...(worker.deniedTools && worker.deniedTools.length > 0
+          ? [`  tools refused: ${worker.deniedTools.join(', ')}`]
+          : []),
+        '  This is not something a stronger model or a repeated attempt fixes.',
+        '  Say what needs authorising, or answer "blocked" with this as the reason.',
+        '',
+      );
+    }
+
+    lines.push(
+      evidence.source === 'filesystem'
+        ? 'FILESYSTEM EVIDENCE (collected by the orchestrator by walking the folder, not reported by the agent):'
+        : 'GIT EVIDENCE (collected by the orchestrator, not reported by the agent):',
+    );
+    if (evidence.evidenceProblem) {
+      lines.push(
+        `  WARNING: ${evidence.evidenceProblem}`,
+        '  Treat "no changes" below as "could not be observed", not as proof that nothing happened.',
+      );
+    }
     lines.push(`  branch: ${evidence.branch ?? '(none)'}`);
     lines.push(`  changed since baseline: ${evidence.changedSinceBaseline ? 'yes' : 'no'}`);
     lines.push(`  changed files: ${evidence.changedFiles.join(', ') || '(none)'}`);
@@ -1310,7 +1385,15 @@ export class OrchestrationService {
 
       const modelUnavailable =
         routed?.resolvedModel !== null && routed?.resolvedModel !== undefined && modelUnavailableIn(result);
-      const mechanical = !modelUnavailable && isMechanicalFailure(result);
+      const mechanical =
+        !modelUnavailable &&
+        isMechanicalFailure({
+          outcome: result.outcome,
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          ...(result.failure ? { failure: result.failure } : {}),
+        });
 
       input.budget.record(result.usage ?? null);
       // The worker's answer is what a conversation run finishes with, and it
@@ -1334,6 +1417,9 @@ export class OrchestrationService {
         modelUnavailable,
         ...(result.usage ? { usage: result.usage } : {}),
         ...(result.failure ? { failure: result.failure } : {}),
+        ...(result.permissionDenials && result.permissionDenials.length > 0
+          ? { deniedTools: [...result.permissionDenials] }
+          : {}),
       };
       this.database.runs.recordInvocation({
         runId,
@@ -1373,6 +1459,13 @@ export class OrchestrationService {
         ...(recorded ? { routing: recorded } : {}),
         ...(modelUnavailable ? { modelUnavailable: true } : {}),
         ...(mechanical ? { mechanical: true } : {}),
+        // The three facts that answer "why did nothing change?" from the
+        // record alone, without anyone opening a terminal.
+        ...(result.failure ? { failure: result.failure } : {}),
+        ...(result.permissionDenials && result.permissionDenials.length > 0
+          ? { deniedTools: [...result.permissionDenials] }
+          : {}),
+        workingDirectory: cwd,
         stderrExcerpt: excerpt(result.stderr),
       });
 
@@ -1659,6 +1752,23 @@ export function teamOf(runners: RunnerPair): readonly WorkerSlot[] {
  */
 export function terminalFailure(failure: ProviderFailureKind | undefined): string | null {
   switch (failure) {
+    case 'tool-permission-denied':
+      return (
+        'O worker foi impedido de usar uma ferramenta de que precisava (ver "Ferramentas ' +
+        'recusadas" em Detalhes). Repetir a mesma tarefa não muda isso, e um modelo mais ' +
+        'forte também não: é uma permissão, não uma dificuldade. Autorize a operação e ' +
+        'continue quando quiser.'
+      );
+    case 'approval-required':
+      return (
+        'A execução precisa de uma aprovação que ninguém pode dar em modo não interativo. ' +
+        'Autorize a operação e continue quando quiser.'
+      );
+    case 'workspace-invalid':
+      return (
+        'A pasta deste projeto não pôde ser usada para escrever. Verifique o caminho e as ' +
+        'permissões da pasta em Projeto, e continue quando quiser.'
+      );
     case 'insufficient-credit':
       return (
         'A conexão está sem saldo ou fora da cota do provider. A execução parou aqui: ' +
@@ -1716,6 +1826,81 @@ export function sessionMissing(result: AgentResult): boolean {
     /no conversation found with session id/i.test(said) ||
     /session .{0,80}(not found|does not exist)/i.test(said)
   );
+}
+
+/** A classified failure, in the words the orchestrator should reason with. */
+export function failureExplanation(failure: ProviderFailureKind): string {
+  switch (failure) {
+    case 'tool-permission-denied':
+      return 'The worker was refused a tool it needed. Its permission, not its ability, is what stopped it.';
+    case 'approval-required':
+      return 'The work needs a human approval that cannot be given in a non-interactive run.';
+    case 'empty-response':
+      return 'The worker ran and returned nothing to act on.';
+    case 'workspace-invalid':
+      return 'The project folder could not be used for writing.';
+    case 'evidence-unavailable':
+      return 'The program could not observe the workspace, so it cannot say what changed.';
+    case 'authentication':
+      return "The worker's credential was not accepted.";
+    case 'insufficient-credit':
+      return "The worker's account is out of balance or quota.";
+    case 'rate-limit':
+      return 'The provider asked to wait before the next call.';
+    case 'timeout':
+      return 'The worker did not answer within the time allowed.';
+    case 'model-unavailable':
+      return 'The model requested is not available to this account.';
+    default:
+      return `The worker failed: ${failure}.`;
+  }
+}
+
+/**
+ * Why this folder cannot be worked in, or null when it can.
+ *
+ * Three separate questions, because they have three different fixes: the path
+ * is empty (no project folder chosen), the path is not a usable directory
+ * (moved, deleted, a file), or the directory cannot be written (permissions,
+ * a read-only volume). Answering "no progress" to any of them, which is what
+ * happened before this existed, tells the person nothing.
+ *
+ * The write check writes and removes a probe file rather than reading a
+ * permission bit: on Windows the bits do not answer the question, and the
+ * thing that matters is whether *this* process can create a file here - which
+ * is exactly what the worker is about to try.
+ */
+export function describeWorkspaceProblem(cwd: string): string | null {
+  if (!cwd || cwd.trim() === '') {
+    return 'Este projeto não tem uma pasta definida. Escolha a pasta do projeto antes de enviar uma tarefa de código.';
+  }
+  let stats;
+  try {
+    stats = statSync(cwd);
+  } catch {
+    return `A pasta do projeto não foi encontrada: ${cwd}. Escolha-a novamente em Projeto.`;
+  }
+  if (!stats.isDirectory()) {
+    return `O caminho do projeto não é uma pasta: ${cwd}.`;
+  }
+  const probe = join(cwd, `.ai-orchestrator-write-probe-${process.pid}`);
+  try {
+    writeFileSync(probe, '');
+  } catch (error) {
+    const code = (error as { code?: string }).code ?? '';
+    return (
+      `O aplicativo não consegue escrever na pasta do projeto (${cwd}${code ? `, ${code}` : ''}). ` +
+      'O worker não conseguiria criar ou alterar arquivos ali. Verifique as permissões da pasta.'
+    );
+  } finally {
+    try {
+      rmSync(probe, { force: true });
+    } catch {
+      // The probe is best-effort cleanup; a leftover empty file is harmless
+      // and must not turn a usable workspace into a refused one.
+    }
+  }
+  return null;
 }
 
 /** A cheap fingerprint of the working tree, to tell one attempt's outcome from the next. */

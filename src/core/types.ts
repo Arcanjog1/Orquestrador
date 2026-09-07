@@ -51,7 +51,24 @@ export type ProviderFailureKind =
   | 'schema'
   | 'provider-error'
   | 'cancelled'
-  | 'budget-exceeded';
+  | 'budget-exceeded'
+  /**
+   * A tool the worker needed was refused.
+   *
+   * Distinct from `permission`, which is about the *credential* not being
+   * allowed to call the provider. This one is the agent being allowed to run
+   * and then told it may not write the file - and a stronger model cannot fix
+   * it, so the loop must not escalate on it.
+   */
+  | 'tool-permission-denied'
+  /** The run needed a person to approve something, and nobody could. */
+  | 'approval-required'
+  /** The agent ran and produced nothing at all to act on. */
+  | 'empty-response'
+  /** The workspace could not be used: missing, not a folder, not writable. */
+  | 'workspace-invalid'
+  /** The program could not observe the workspace, so it cannot say what changed. */
+  | 'evidence-unavailable';
 
 /**
  * What one invocation consumed.
@@ -227,6 +244,13 @@ export interface AgentResult {
   /** Seconds the provider asked us to wait, from its `retry-after`. */
   retryAfterSeconds?: number;
   /**
+   * Tools the agent asked for and was refused, as the tool itself reported.
+   *
+   * The concrete answer to "why did nothing change?", which is otherwise
+   * unavailable to anyone: the agent knows, and this is where it says so.
+   */
+  permissionDenials?: readonly string[];
+  /**
    * The provider's own id for the session this invocation ran in.
    *
    * Recorded so the next delegation to the *same* connection can continue it.
@@ -260,6 +284,22 @@ export interface CommandResult {
   timedOut: boolean;
 }
 
+/**
+ * How the program was able to observe the workspace.
+ *
+ * The distinction this exists to make: "nothing changed" and "I could not
+ * look" are completely different answers, and conflating them is how a run
+ * that really did the work gets reported as having done nothing. Every
+ * evidence collection says which one it is.
+ */
+export type EvidenceSource =
+  /** A git repository, read with git. The richest answer. */
+  | 'git'
+  /** No repository here, so the filesystem was walked instead. */
+  | 'filesystem'
+  /** Nothing could be observed. `evidenceProblem` says why. */
+  | 'none';
+
 /** Snapshot of the project's git state before anything runs (spec 9). */
 export interface Baseline {
   capturedAt: string;
@@ -276,6 +316,36 @@ export interface Baseline {
   stagedFiles: string[];
   /** True when the user already had uncommitted work before the run. */
   dirty: boolean;
+  /** How this snapshot was taken. */
+  source?: EvidenceSource;
+  /**
+   * Why git could not be used, when it could not.
+   *
+   * Set when the git executable itself failed to run - which is a different
+   * thing from the folder not being a repository, and must never be reported
+   * as "no changes".
+   */
+  evidenceProblem?: string | null;
+  /** The filesystem snapshot, when `source` is `filesystem`. */
+  files?: FileSnapshot | null;
+}
+
+/**
+ * The workspace as a plain list of files, for a project that is not a git
+ * repository - or where git could not run.
+ *
+ * Bounded on purpose: a workspace can contain a node_modules with a hundred
+ * thousand files, and walking it on every iteration would cost more than the
+ * run. What matters is being able to say "this path appeared and it contains
+ * these bytes", which a bounded walk answers.
+ */
+export interface FileSnapshot {
+  /** Relative path to size-and-digest, for every file the walk covered. */
+  entries: Record<string, string>;
+  /** True when the walk stopped at its limit, so absence proves nothing. */
+  truncated: boolean;
+  /** Directories skipped by name, so a reader knows what was not looked at. */
+  skipped: readonly string[];
 }
 
 /** Git evidence collected independently after a worker runs (spec 12). */
@@ -294,6 +364,17 @@ export interface GitEvidence {
   deletedFiles: string[];
   /** True when the working tree changed relative to the baseline. */
   changedSinceBaseline: boolean;
+  /** How this evidence was gathered. */
+  source?: EvidenceSource;
+  /**
+   * Why nothing could be observed, when nothing could.
+   *
+   * Present only with `source: 'none'`. The loop puts this in front of the
+   * orchestrator verbatim, because "I could not look" is a fact it must act
+   * on differently from "nothing changed".
+   */
+  evidenceProblem?: string | null;
+  files?: FileSnapshot | null;
 }
 
 /** Everything recorded about a single orchestration iteration. */
@@ -338,6 +419,8 @@ export interface WorkerRecord {
   usage?: InvocationUsage;
   /** The classified provider failure, when the attempt failed on one. */
   failure?: ProviderFailureKind;
+  /** Tools this attempt was refused, as the worker's own tool reported them. */
+  deniedTools?: readonly string[];
 }
 
 /** Outcome of the independent DONE validation (spec 15). */

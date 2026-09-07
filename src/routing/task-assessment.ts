@@ -65,12 +65,55 @@ const SIGNALS: readonly Signal[] = [
   },
 ];
 
+/**
+ * Lines that tell the worker what *not* to do, or describe a previous
+ * failure, rather than describing the work.
+ *
+ * Measured, not imagined: a delegation to create one file escalated to the
+ * top tier because the orchestrator's re-delegation said "diagnostique a falha
+ * de permissão" and "não contorne permissões". Both mention permissions;
+ * neither makes creating a file a security task. Reading a prohibition as a
+ * requirement is how a trivial job ends up on the most expensive model, which
+ * then cannot fix it either, because the failure was mechanical.
+ */
+const NOT_THE_WORK =
+  /^\s*(?:[-*\d.)\s]*)?(?:n[ãa]o\b|nunca\b|evite\b|do not\b|don't\b|never\b|avoid\b)/i;
+
+/**
+ * Phrases that describe a failure being reported, not work being requested.
+ *
+ * "the previous attempt was denied permission" is a diagnosis handed to the
+ * worker. It is context, and treating context as scope is what inflated the
+ * tier.
+ */
+const REPORTED_FAILURE =
+  /\b(?:falh(?:a|ou|as)|erro|error|failed|failure|recusad|denied|bloqueio|blocked|diagn[óo]stic|diagnos)\b/i;
+
+/**
+ * The task text with the lines that are not the work removed.
+ *
+ * Exported so a test can show exactly what the assessment reads, because the
+ * difference between "creates a file" and "changes authentication" is the
+ * whole reason a run costs cents or dollars.
+ */
+export function workLines(task: string): string {
+  return task
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => !NOT_THE_WORK.test(line))
+    .join('\n');
+}
+
 export function assessTask(task: string): TaskAssessment {
   let capability: CapabilityTier = 'FAST';
   let reasoning: ReasoningTier = 'LOW';
   const signals: string[] = [];
+  const work = workLines(task);
   for (const signal of SIGNALS) {
-    if (!signal.pattern.test(task)) continue;
+    if (!signal.pattern.test(work)) continue;
+    // A signal that only appears where a failure is being described is
+    // context about the last attempt, not the scope of this one.
+    if (onlyInReportedFailure(work, signal.pattern)) continue;
     signals.push(signal.label);
     capability = higherCapability(capability, signal.capability);
     reasoning = higherReasoning(reasoning, signal.reasoning);
@@ -84,6 +127,19 @@ export function assessTask(task: string): TaskAssessment {
   return { minimumCapability: capability, minimumReasoning: reasoning, signals };
 }
 
+/**
+ * True when every line carrying the signal is also describing a failure.
+ *
+ * One line saying "the write was denied" does not make this a security task.
+ * A line saying "add authentication to the API" does, and that line contains
+ * no failure vocabulary, so it still counts.
+ */
+function onlyInReportedFailure(work: string, pattern: RegExp): boolean {
+  const carrying = work.split(/\r?\n/).filter((line) => pattern.test(line));
+  if (carrying.length === 0) return false;
+  return carrying.every((line) => REPORTED_FAILURE.test(line));
+}
+
 /** True when the signals say the task must not be run cheaper than asked. */
 export function isSensitive(assessment: TaskAssessment): boolean {
   return assessment.signals.length > 0;
@@ -94,7 +150,30 @@ export interface AttemptOutcome {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  /** The classified failure, when the adapter produced one. */
+  failure?: string;
 }
+
+/**
+ * Failures a better model cannot fix, by name.
+ *
+ * Each of these is about the world the agent is running in - a permission it
+ * was refused, a person who must approve, a folder that cannot be written, a
+ * workspace nothing can observe. Spending a stronger model on any of them
+ * buys nothing and costs more.
+ */
+const MECHANICAL_FAILURES: ReadonlySet<string> = new Set([
+  'tool-permission-denied',
+  'approval-required',
+  'workspace-invalid',
+  'evidence-unavailable',
+  'authentication',
+  'permission',
+  'insufficient-credit',
+  'rate-limit',
+  'network',
+  'timeout',
+]);
 
 /**
  * A failure a stronger model would not fix: the binary is missing, the
@@ -102,6 +181,11 @@ export interface AttemptOutcome {
  * would spend a better model on the same wall.
  */
 export function isMechanicalFailure(result: AttemptOutcome): boolean {
+  // The agent's own classification wins when it made one: it knows a refused
+  // tool for what it is, and no stronger model can be given the permission it
+  // was denied. Escalating here is how a run climbs to the top tier and stops
+  // anyway, which is exactly what happened before this check existed.
+  if (result.failure && MECHANICAL_FAILURES.has(result.failure)) return true;
   if (result.outcome === 'spawn-error') return true;
   if (result.outcome === 'completed' && result.exitCode === 0) return false;
   const text = `${result.stderr}\n${result.stdout}`;
