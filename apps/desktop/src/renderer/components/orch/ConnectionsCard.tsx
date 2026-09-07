@@ -118,8 +118,16 @@ export function ConnectionsCard({ onChanged }: { onChanged?: () => void }) {
           />
         ))}
         <div className="flex flex-wrap gap-2">
-          <AddButton label="Adicionar conexão OpenAI" onClick={() => setAdding("openai")} />
-          <AddButton label="Adicionar conexão Anthropic" onClick={() => setAdding("anthropic")} />
+          <AddButton
+            testid="add-connection-openai"
+            label="Adicionar conexão OpenAI"
+            onClick={() => setAdding("openai")}
+          />
+          <AddButton
+            testid="add-connection-anthropic"
+            label="Adicionar conexão Anthropic"
+            onClick={() => setAdding("anthropic")}
+          />
         </div>
       </div>
 
@@ -252,7 +260,7 @@ function ConnectionRow({
   };
 
   return (
-    <div className="rounded-lg border border-border bg-surface p-4">
+    <div className="rounded-lg border border-border bg-surface p-4" data-testid={`connection-${connection.id}`}>
       <div className="flex items-start gap-3">
         <ProviderIcon provider={connection.providerId === "openai" ? "openai" : "anthropic"} />
         <div className="min-w-0 flex-1">
@@ -280,6 +288,7 @@ function ConnectionRow({
           {isApi && (
             <div className="mt-3 flex items-center gap-2">
               <Switch
+                data-testid={`connection-enable-${connection.id}`}
                 checked={connection.apiEnabled}
                 disabled={busy === "toggle" || !connection.hasCredential}
                 onCheckedChange={(next: boolean) => {
@@ -344,7 +353,13 @@ function ConnectionRow({
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
-          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void test()}>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy !== null}
+            data-testid={`connection-test-${connection.id}`}
+            onClick={() => void test()}
+          >
             {busy === "test" ? <Loader2 className="size-4 animate-spin" /> : "Testar"}
           </Button>
           <DropdownMenu>
@@ -443,7 +458,7 @@ function EnableBillingDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancelar
           </Button>
-          <Button onClick={() => void confirm()} disabled={busy}>
+          <Button onClick={() => void confirm()} disabled={busy} data-testid="connection-enable-confirm">
             {busy ? <Loader2 className="size-4 animate-spin" /> : "Entendi, habilitar"}
           </Button>
         </DialogFooter>
@@ -505,6 +520,7 @@ function AddApiDialog({
               value={name}
               autoFocus
               placeholder={provider === "openai" ? "OpenAI Trabalho" : "Claude Trabalho 1"}
+              data-testid="connection-name"
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setName(e.target.value)}
             />
           </label>
@@ -516,6 +532,7 @@ function AddApiDialog({
               spellCheck={false}
               autoComplete="off"
               placeholder="cole a chave aqui"
+              data-testid="connection-key"
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setKey(e.target.value)}
             />
           </label>
@@ -528,6 +545,7 @@ function AddApiDialog({
           <Button
             onClick={() => void submit()}
             disabled={busy || name.trim().length === 0 || key.trim().length === 0}
+            data-testid="connection-save"
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : "Salvar conexão"}
           </Button>
@@ -646,10 +664,19 @@ function RenameDialog({
   );
 }
 
-function AddButton({ label, onClick }: { label: string; onClick: () => void }) {
+function AddButton({
+  label,
+  onClick,
+  testid,
+}: {
+  label: string;
+  onClick: () => void;
+  testid: string;
+}) {
   return (
     <button
       onClick={onClick}
+      data-testid={testid}
       className="flex items-center gap-2 rounded-lg border border-dashed border-border px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
     >
       <Plus className="size-4" /> {label}

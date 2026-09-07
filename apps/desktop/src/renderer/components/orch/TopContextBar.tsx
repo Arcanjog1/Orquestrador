@@ -513,6 +513,7 @@ export function TopContextBar({
         onClick={onAddProject}
         className="grid size-7 place-items-center rounded-md border border-dashed border-border text-muted-foreground transition-colors hover:border-primary/40 hover:text-primary"
         aria-label="Adicionar projeto"
+        data-testid="add-workspace"
       >
         <Plus className="size-3.5" />
       </button>

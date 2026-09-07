@@ -49,6 +49,9 @@ const { WEB_PREFERENCES } = await load('apps/desktop/src/electron/security.js');
 const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
 
+/** Every provider API request the window caused, so a check can read it. */
+const providerCalls = [];
+
 /** No single check may take longer than this. */
 const CASE_TIMEOUT_MS = 90_000;
 /** Nor the suite as a whole. */
@@ -1075,6 +1078,223 @@ test('Settings: the theme applies to the page, a number persists, and the login 
   assert.doesNotMatch(text, /handoff automático|Auto retry|Execução automática/);
 });
 
+
+test('Connections: a key is added through the real screen, shown as a hint, and enabled only on purpose', async () => {
+  const window = await openWindow();
+  const before = providerCalls.length;
+  try {
+    await window.webContents.executeJavaScript(
+      `(() => { location.hash = '#/configuracoes?tab=accounts'; return true; })()`,
+    );
+    await reloadWindow(window);
+    await waitForText(window, /Conexões/, 15_000);
+
+    // Add an Anthropic connection the way a person does.
+    await click(window, 'add-connection-anthropic');
+    await waitForText(window, /Nova conexão Anthropic/, 10_000);
+    await type(window, 'connection-name', 'Claude Trabalho 1');
+    await type(window, 'connection-key', 'sk-ant-electron-test-ZZZZ');
+    await click(window, 'connection-save');
+    await waitForText(window, /Claude Trabalho 1/, 10_000);
+
+    const listed = await window.webContents.executeJavaScript('window.api.connections.list()');
+    const created = listed.find((c) => c.displayName === 'Claude Trabalho 1');
+    assert.ok(created, 'the connection was created through the real screen');
+    assert.equal(created.connectionKind, 'api');
+    assert.equal(created.keyHint, '…ZZZZ', 'four characters, not the key');
+    assert.equal(created.apiEnabled, false, 'saving a key must not switch billing on');
+
+    // Nothing the renderer can read carries the key.
+    const rendered = await window.webContents.executeJavaScript('document.body.innerText');
+    assert.ok(
+      !rendered.includes('sk-ant-electron-test-ZZZZ'),
+      'the key must never appear on screen after it is saved',
+    );
+    assert.ok(
+      !JSON.stringify(listed).includes('sk-ant-electron-test-ZZZZ'),
+      'no listed field may carry the key',
+    );
+
+    // Testing it reaches the provider, with the vendor's documented header.
+    await click(window, `connection-test-${created.id}`);
+    await waitForText(window, /Conexão funcionando/, 10_000);
+    const call = providerCalls[providerCalls.length - 1];
+    assert.ok(call.url.startsWith('https://api.anthropic.com/v1/models'), call.url);
+    assert.equal(call.headers['x-api-key'], 'sk-ant-electron-test-ZZZZ');
+    assert.ok(providerCalls.length > before, 'the real adapter was used');
+
+    // Enabling asks first, and says what it cannot promise.
+    await click(window, `connection-enable-${created.id}`);
+    const warning = await waitForText(window, /Habilitar “Claude Trabalho 1”/, 10_000);
+    assert.match(warning, /cobrança por uso, separada da sua assinatura/);
+    assert.match(warning, /interrompe este\s+aplicativo/);
+    assert.match(warning, /não é um teto cobrado pelo provider/);
+    await click(window, 'connection-enable-confirm');
+    await new Promise((r) => setTimeout(r, 500));
+
+    const after = await window.webContents.executeJavaScript('window.api.connections.list()');
+    assert.equal(
+      after.find((c) => c.id === created.id).apiEnabled,
+      true,
+      'and only then is it enabled',
+    );
+  } finally {
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+  }
+});
+
+test('a conversation project is created with no folder, and offers no git actions', async () => {
+  const window = await openWindow();
+  // No runtime is installed here, so a fresh load lands on onboarding; the
+  // workspace is reached the way a person reaches it.
+  await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+  await reloadWindow(window);
+  await waitForText(window, /Pular onboarding/, 15_000);
+  await click(window, 'skip-onboarding');
+  await waitForText(window, /Adicionar projeto|projeto/, 15_000);
+
+  await click(window, 'add-workspace');
+  await waitForText(window, /Adicionar projeto/, 10_000);
+  // Conversation is offered, and is the choice that needs nothing configured.
+  await click(window, 'environment-conversation');
+  await waitForText(window, /Não precisa de pasta, repositório nem servidor/, 10_000);
+  await type(window, 'conversation-name', 'Arquitetura');
+  await click(window, 'conversation-create');
+  await waitForText(window, /Arquitetura/, 15_000);
+
+  const workspaces = await window.webContents.executeJavaScript('window.api.workspace.list()');
+  const created = workspaces.find((w) => w.name === 'Arquitetura');
+  assert.ok(created, 'the conversation project exists');
+  assert.equal(created.environment, 'conversation');
+  assert.equal(created.localPath, '', 'and it claims no folder on this computer');
+
+  // The header says what kind of project this is, and offers no git chip:
+  // there is no working copy to commit or push from.
+  const chip = await window.webContents.executeJavaScript(
+    `document.querySelector('[data-testid="environment-chip"]')?.textContent ?? ''`,
+  );
+  assert.match(chip, /Conversa/);
+  const gitChip = await window.webContents.executeJavaScript(
+    `document.querySelector('[data-testid="github-chip"]') === null`,
+  );
+  assert.equal(gitChip, true, 'a conversation project must not offer git actions');
+});
+
+test('the team dialog adds a second worker, and refuses two workers on one connection', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-team2-'));
+  try {
+    await window.webContents.executeJavaScript(
+      `window.api.accounts.create(${JSON.stringify({ name: 'Claude Dois', provider: 'anthropic' })})`,
+    );
+    const workspace = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Equipe grande', localPath: dir })})`,
+    );
+
+    // The newest project is the one the shell opens, and this one was just
+    // created - so a reload lands on it.
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Equipe grande/, 15_000);
+
+    await click(window, 'team-chip');
+    await waitForText(window, /Editar equipe/, 10_000);
+    await click(window, 'edit-team');
+    await waitForText(window, /Equipe deste projeto/, 10_000);
+
+    // One worker to start with, exactly as before teams could grow.
+    const single = await window.webContents.executeJavaScript(
+      `document.querySelectorAll('[data-testid^="team-worker"]').length > 0`,
+    );
+    assert.equal(single, true);
+
+    await click(window, 'team-add-worker');
+    // The section label is uppercased by CSS, so innerText reads it uppercase.
+    const second = await waitForText(window, /Coding worker 2/i, 10_000);
+    assert.match(second, /Coding worker 1/i, 'the first is renumbered once there are two');
+
+    // Both default to different connections, so the form is savable; forcing
+    // them onto one is what must be refused.
+    const accounts = await window.webContents.executeJavaScript('window.api.accounts.list()');
+    const anthropic = accounts.filter((a) => a.provider === 'anthropic');
+    assert.ok(anthropic.length >= 2, 'two Anthropic accounts exist for this check');
+
+    const refused = await window.webContents.executeJavaScript(`
+      window.api.workspace.setTeam(${JSON.stringify({
+        workspaceId: workspace.id,
+        orchestrator: { accountId: accounts.find((a) => a.provider === 'openai').id },
+        worker: { accountId: anthropic[0].id },
+        workers: [{ accountId: anthropic[0].id }, { accountId: anthropic[0].id }],
+      })}).then(() => 'saved', (e) => e.message)
+    `);
+    assert.match(String(refused), /mesma conexão/, 'one connection cannot be two workers');
+
+    // Two different connections save, and read back as two members.
+    const saved = await window.webContents.executeJavaScript(`
+      window.api.workspace.setTeam(${JSON.stringify({
+        workspaceId: workspace.id,
+        orchestrator: { accountId: accounts.find((a) => a.provider === 'openai').id },
+        worker: { accountId: anthropic[0].id },
+        workers: [{ accountId: anthropic[0].id }, { accountId: anthropic[1].id }],
+      })})
+    `);
+    assert.equal(saved.team.workers.length, 2);
+    assert.deepEqual(
+      saved.team.workers.map((w) => w.workerId),
+      ['worker-1', 'worker-2'],
+      'the ids the orchestrator delegates by',
+    );
+    assert.notEqual(saved.team.workers[0].accountId, saved.team.workers[1].accountId);
+  } finally {
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('budget limits are saved for the project, and the screen says what they cannot promise', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-budget-'));
+  try {
+    const workspace = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Projeto com limite', localPath: dir })})`,
+    );
+    assert.equal(workspace.budget.maxCostUsd, null, 'a new project has no limit');
+
+    // Settings shows the limits of the project that is open, so this opens one
+    // first - which is also what a person does.
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Projeto com limite/, 15_000);
+    await window.webContents.executeJavaScript(
+      `(() => { location.hash = '#/configuracoes?tab=execution'; return true; })()`,
+    );
+    const text = await waitForText(window, /Limites de gasto/i, 15_000);
+
+    // The sentence that matters, on the screen that sets the limit.
+    assert.match(text, /não é um teto cobrado pelo\s+provider/);
+    assert.match(text, /não informado.*nunca zero|nunca zero/);
+
+    await type(window, 'budget-cost', '2.5');
+    await type(window, 'budget-invocations', '12');
+    await click(window, 'budget-save');
+    await new Promise((r) => setTimeout(r, 600));
+
+    const saved = (await window.webContents.executeJavaScript('window.api.workspace.list()')).find(
+      (w) => w.id === workspace.id,
+    );
+    assert.equal(saved.budget.maxCostUsd, 2.5);
+    assert.equal(saved.budget.maxInvocations, 12);
+    assert.equal(saved.budget.maxTokens, null, 'an empty field stays no limit');
+  } finally {
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /* ------------------------------------------------------------------ helpers */
 
 let sharedWindow = null;
@@ -1153,6 +1373,19 @@ async function openWindow() {
       available: true,
       encrypt: (plain) => `enc:${Buffer.from(plain, 'utf8').toString('base64')}`,
       decrypt: (cipher) => Buffer.from(cipher.slice(4), 'base64').toString('utf8'),
+    },
+    // The provider APIs, answered locally. A test must never reach a vendor:
+    // it would need a credential nobody has here and would cost money if it
+    // did. Every request is recorded so a check can assert what went out.
+    providerTransport: async (url, init) => {
+      providerCalls.push({ url, headers: init.headers });
+      return {
+        status: 200,
+        ok: true,
+        text: async () =>
+          JSON.stringify({ data: [{ id: 'modelo-de-teste', display_name: 'Modelo de teste' }] }),
+        headers: { get: () => null },
+      };
     },
   });
   const router = new IpcRouter(services, {
