@@ -104,17 +104,19 @@ npm run -w apps/coordinator start
 Ele **recusa subir** sem imagem ou sem credencial do GitHub App: aceitar
 execuções que não conseguiria executar é pior do que não iniciar.
 
-**Emitir um token de dispositivo** (ainda não há CLI para isso — é o próximo
-passo abaixo). Hoje, no Node do host:
+**Emitir um token de dispositivo**, no host:
 
-```js
-import { Database } from './dist-coordinator/src/database/database.js';
-import { RunStore } from './dist-coordinator/src/cloud/coordinator/store.js';
-const db = new Database({ filePath: process.env.ORQ_DATABASE_FILE });
-const store = new RunStore(db);
-const p = store.createPrincipal({ displayName: 'Arcanjo' });
-console.log(store.issueSession({ principalId: p.id }).token); // mostrado uma vez
+```bash
+node dist-coordinator/apps/coordinator/src/main.js issue-token "PC do Arcanjo"
 ```
+
+Imprime o token **uma única vez** — só o hash fica guardado, então nem o
+servidor consegue lê-lo de novo. Um segundo dispositivo da mesma pessoa
+(`ORQ_PRINCIPAL="PC do Arcanjo"`) reaproveita o mesmo principal, de modo que o
+outro computador vê o mesmo histórico em vez de uma lista vazia.
+
+Emitir credencial é um comando do host, não uma rota da API: mintar acesso não
+pode ser algo que uma requisição consiga pedir.
 
 Cole esse token em **Configurações → Nuvem** no desktop, junto com a URL.
 
@@ -136,15 +138,19 @@ Só depois disso `CLOUD_EXECUTION_VERIFIED` pode ser declarado.
 
 ## Próximo passo menor e concreto
 
-**Um comando de CLI no coordenador para emitir um token de dispositivo** —
-`node dist-coordinator/apps/coordinator/src/main.js issue-token "Meu PC"` —
-imprimindo o token uma vez. Hoje isso exige um script Node à mão, o que é a
-única parte do caminho de instalação que ainda não é operável por quem não leu
-o código.
+**Bloco 8 — evidência rica na timeline de nuvem.** Hoje um evento remoto chega
+à timeline local como um passo com o resumo do evento; falta apresentar
+arquivos alterados, diff e resultado de verificação com a mesma riqueza do modo
+local, **sem baixar o repositório**.
 
-Depois dele, na ordem: bloco 8 (evidência rica na timeline de nuvem) e bloco 9
-(branch/push/PR de dentro do workspace), ambos descritos em
-`CLOUD_IMPLEMENTATION_PLAN.md`.
+*Menor passo:* fazer o coordenador anexar o `GitEvidence` que ele já coleta
+(arquivos, inserções, remoções) à carga do evento `orchestration.run:progress`
+da fase `evidence`, e o `CloudService` gravá-lo onde a timeline local já lê.
+Nada nisso depende de um human gate.
+
+Depois: bloco 9 (branch/push/PR de dentro do workspace), descrito em
+`CLOUD_IMPLEMENTATION_PLAN.md` — esse depende do GitHub App com permissão de
+escrita.
 
 ## O que não fazer
 

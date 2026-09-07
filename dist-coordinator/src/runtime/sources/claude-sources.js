@@ -1,0 +1,195 @@
+/**
+ * Where the Claude Code runtime comes from.
+ *
+ * The layout below is not invented: it is what Anthropic's own installer does.
+ * `https://claude.ai/install.sh` and `install.ps1` are the documented entry
+ * points; both redirect to a bootstrap script on
+ * `https://downloads.claude.ai/claude-code-releases`, and that script:
+ *
+ *   1. reads a plain-text version from `<base>/stable` or `<base>/latest`;
+ *   2. fetches `<base>/<version>/manifest.json`, which holds
+ *      `platforms["<platform>"] = { checksum: "<sha256>", size: <bytes> }`;
+ *   3. downloads `<base>/<version>/<platform>/claude` - `claude.exe` on
+ *      Windows - and refuses it unless the SHA-256 matches.
+ *
+ * This source does exactly that, with the same checksum check, so the
+ * application installs the same bytes a user would get by running the official
+ * command - without asking anyone to open a terminal.
+ *
+ * Claude Code's npm licence reads "SEE LICENSE IN README.md", which is not a
+ * permissive open-source licence, so the application **never** redistributes it
+ * inside the installer. It only fetches it, on the user's machine, from
+ * Anthropic's own host.
+ */
+import { existsSync } from 'node:fs';
+export const CLAUDE_RELEASES_BASE = 'https://downloads.claude.ai/claude-code-releases';
+export function claudeExecutableNames(target) {
+    return target.platform === 'win32' ? ['claude.exe'] : ['claude'];
+}
+/**
+ * Platform keys to look for in the manifest, best first.
+ *
+ * The installer builds this string itself (`linux-x64-musl`, `darwin-arm64`,
+ * and so on) and the Windows spelling is not visible from the POSIX script, so
+ * rather than guess one, every plausible key is offered and the manifest
+ * decides: a key that is not in `platforms` is not used. That also means a
+ * future rename is a decline, never a wrong download.
+ */
+export function claudePlatformKeys(target) {
+    const arch = target.arch === 'arm64' ? 'arm64' : 'x64';
+    switch (target.platform) {
+        case 'win32':
+            return [`win32-${arch}`, `windows-${arch}`, `win-${arch}`];
+        case 'darwin':
+            return [`darwin-${arch}`, `macos-${arch}`];
+        case 'linux':
+            // musl first: the static build runs on both, the glibc one does not.
+            return [`linux-${arch}-musl`, `linux-${arch}`];
+        default:
+            return [`${target.platform}-${arch}`];
+    }
+}
+/**
+ * The release channel the official installer uses.
+ *
+ * DOCUMENTED: this is the contract Anthropic publishes an installer against,
+ * not a host observed inside a binary. The application follows the same steps
+ * the installer takes.
+ */
+export class ClaudeOfficialReleaseSource {
+    baseUrl;
+    fetchImpl;
+    id = 'claude-official-releases';
+    label = 'Canal oficial de releases do Claude Code';
+    contract = 'DOCUMENTED';
+    /** The manifest publishes a SHA-256 per platform, and it is enforced. */
+    integrityStrategy = 'SHA256';
+    constructor(baseUrl = CLAUDE_RELEASES_BASE, fetchImpl = fetch) {
+        this.baseUrl = baseUrl;
+        this.fetchImpl = fetchImpl;
+    }
+    async resolve(target, request) {
+        const version = await this.resolveVersion(request);
+        if (!version)
+            return null;
+        const manifest = await this.fetchJson(`${this.baseUrl}/${version}/manifest.json`);
+        if (!manifest)
+            return null;
+        const entry = pickPlatform(manifest, target);
+        if (!entry)
+            return null;
+        const fileName = target.platform === 'win32' ? 'claude.exe' : 'claude';
+        return {
+            url: `${this.baseUrl}/${version}/${entry.key}/${fileName}`,
+            version,
+            // A bare executable, not an archive: the installer downloads exactly this
+            // file and runs it.
+            archiveKind: 'raw',
+            executableNames: claudeExecutableNames(target),
+            integrity: entry.checksum,
+            ...(entry.size !== undefined ? { expectedBytes: entry.size } : {}),
+        };
+    }
+    /**
+     * Turns the version policy into a concrete version.
+     *
+     * A tested version is used as-is; only an explicit update check asks the
+     * channel what is newest. `stable` is the channel the installer defaults to.
+     */
+    async resolveVersion(request) {
+        if (request.kind === 'tested')
+            return request.version;
+        const text = await this.fetchText(`${this.baseUrl}/stable`);
+        const version = text?.trim();
+        // The channel answers with a bare version. Anything else - an error page, a
+        // redirect notice, a region block - is not a version, and is refused.
+        return version && /^\d+\.\d+\.\d+/.test(version) ? version : null;
+    }
+    async fetchText(url) {
+        try {
+            const response = await this.fetchImpl(url, { signal: AbortSignal.timeout(20_000) });
+            if (!response.ok)
+                return null;
+            return await response.text();
+        }
+        catch {
+            return null;
+        }
+    }
+    async fetchJson(url) {
+        try {
+            const response = await this.fetchImpl(url, {
+                headers: { accept: 'application/json' },
+                signal: AbortSignal.timeout(20_000),
+            });
+            if (!response.ok)
+                return null;
+            return await response.json();
+        }
+        catch {
+            return null;
+        }
+    }
+}
+/**
+ * An existing `claude` on the machine, used to install into the app's folder.
+ *
+ * `claude install <version>` is documented, but it needs a `claude` to already
+ * exist - so it can update a managed install, and cannot bootstrap a clean
+ * machine. It is offered only when a system installation is present.
+ */
+export class ClaudeSelfInstallSource {
+    systemExecutable;
+    id = 'claude-self-install';
+    label = 'Comando `claude install` de uma instalação existente';
+    contract = 'DOCUMENTED';
+    integrityStrategy = 'SIGNED_MANIFEST';
+    constructor(systemExecutable) {
+        this.systemExecutable = systemExecutable;
+    }
+    async resolve() {
+        // Reports availability only; the manager runs the subcommand itself,
+        // because this source produces no downloadable URL.
+        if (!this.systemExecutable || !existsSync(this.systemExecutable))
+            return null;
+        return null;
+    }
+    /** True when this machine could bootstrap from an existing installation. */
+    get available() {
+        return Boolean(this.systemExecutable && existsSync(this.systemExecutable));
+    }
+}
+export function defaultClaudeSources(fetchImpl = fetch) {
+    return [new ClaudeOfficialReleaseSource(undefined, fetchImpl)];
+}
+/**
+ * Finds the manifest entry for this machine.
+ *
+ * Only keys the manifest actually declares are considered, and the checksum
+ * must be a real SHA-256: a platform without one is skipped rather than
+ * installed unverified.
+ */
+export function pickPlatform(manifest, target) {
+    if (!manifest || typeof manifest !== 'object')
+        return null;
+    const platforms = manifest['platforms'];
+    if (!platforms || typeof platforms !== 'object')
+        return null;
+    const table = platforms;
+    for (const key of claudePlatformKeys(target)) {
+        const entry = table[key];
+        if (!entry || typeof entry !== 'object')
+            continue;
+        const record = entry;
+        const checksum = typeof record['checksum'] === 'string' ? record['checksum'] : null;
+        if (!checksum || !/^[a-f0-9]{64}$/i.test(checksum))
+            continue;
+        return {
+            key,
+            checksum,
+            size: typeof record['size'] === 'number' ? record['size'] : undefined,
+        };
+    }
+    return null;
+}
+//# sourceMappingURL=claude-sources.js.map

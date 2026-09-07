@@ -10,6 +10,7 @@
 
 import { Database, ProcessManager } from '../../desktop/src/main/core.js';
 import { Coordinator } from './coordinator.js';
+import { RunStore } from '../../../src/cloud/coordinator/store.js';
 import { createCoordinatorServer } from './http.js';
 import { Reaper } from './reaper.js';
 import { ContainerWorkspaceProvisioner } from '../../../src/cloud/container-provisioner.js';
@@ -33,7 +34,57 @@ function positive(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+/**
+ * Issues a device token, and prints it once.
+ *
+ * A separate command rather than a route: minting a credential must not be
+ * something a request can ask for, only something a person with access to the
+ * host can do.
+ *
+ * The token is shown once and then only its hash is kept, so this output is
+ * the single moment it exists in readable form. Losing it means issuing
+ * another, which is the correct trade.
+ */
+async function issueToken(label: string): Promise<void> {
+  const database = new Database({ filePath: process.env.ORQ_DATABASE_FILE ?? undefined });
+  try {
+    const store = new RunStore(database);
+    const principalName = process.env.ORQ_PRINCIPAL ?? label;
+    // One principal per person; more devices for the same person reuse it, so
+    // a second computer sees the same runs rather than an empty history.
+    const existing = database.driver.get<{ id: string; display_name: string; tenant_id: string; status: string; created_at: string }>(
+      'SELECT * FROM principals WHERE display_name = ? AND status = \'active\'',
+      [principalName],
+    );
+    const principal = existing ?? store.createPrincipal({ displayName: principalName });
+    const issued = store.issueSession({ principalId: principal.id, label });
+
+    console.log('');
+    console.log(`  Pessoa:      ${principal.display_name} (${principal.id})`);
+    console.log(`  Dispositivo: ${label} (${issued.id})`);
+    console.log('');
+    console.log('  Cole isto em Configurações → Nuvem, no aplicativo:');
+    console.log('');
+    console.log(`    ${issued.token}`);
+    console.log('');
+    console.log('  Ele é mostrado uma única vez. Só o hash fica guardado aqui,');
+    console.log('  então nem este servidor consegue lê-lo de novo.');
+    console.log('');
+  } finally {
+    database.close();
+  }
+}
+
 export async function main(): Promise<void> {
+  // `issue-token <rótulo>` before anything else: it needs the database and
+  // nothing else, so it must not be blocked by a missing workspace image.
+  const [command, ...rest] = process.argv.slice(2);
+  if (command === 'issue-token') {
+    const label = rest.join(' ').trim();
+    if (!label) throw new Error('uso: issue-token "<nome do dispositivo>"');
+    return issueToken(label);
+  }
+
   const database = new Database({ filePath: process.env.ORQ_DATABASE_FILE ?? undefined });
 
   const limits: WorkspaceLimits = {
