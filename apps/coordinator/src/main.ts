@@ -99,21 +99,26 @@ export async function main(): Promise<void> {
       .filter(Boolean),
   };
 
+  // One access object, shared by the clone and the publish: it caches the
+  // installation lookup, and a token is minted per repository and per scope.
+  const repositoryAccess = new GitHubAppRepositoryAccess({
+    appId: required('ORQ_GITHUB_APP_ID'),
+    // From the deployment's secret store. Never from a repository, and never
+    // copied from anybody's desktop.
+    privateKeyPem: required('ORQ_GITHUB_APP_PRIVATE_KEY'),
+  });
+
   const provisioner = new ContainerWorkspaceProvisioner({
     host: new ProcessManager(),
     runtimeCommand: process.env.ORQ_CONTAINER_RUNTIME ?? 'docker',
     image: required('ORQ_WORKSPACE_IMAGE'),
-    repositoryAccess: new GitHubAppRepositoryAccess({
-      appId: required('ORQ_GITHUB_APP_ID'),
-      // From the deployment's secret store. Never from a repository, and
-      // never copied from anybody's desktop.
-      privateKeyPem: required('ORQ_GITHUB_APP_PRIVATE_KEY'),
-    }),
+    repositoryAccess,
   });
 
   const coordinator = new Coordinator({
     database,
     provisioner,
+    repositoryAccess,
     limits,
     credentials: {
       openaiApiKey: process.env.ORQ_OPENAI_API_KEY,

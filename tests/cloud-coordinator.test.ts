@@ -730,3 +730,49 @@ test('the reaper reclaims what expired and what a crash left behind', async () =
     database.close();
   }
 });
+
+test('a run waiting for a person is terminal, and is not picked up or billed forever', async () => {
+  // The vocabularies differ in exactly one place: the loop's human gate is
+  // BLOCKED, the coordinator's is NEEDS_HUMAN. Storing the loop's word
+  // verbatim would leave a run that is waiting for a question to be answered
+  // outside the terminal set - so every recovery would provision it another
+  // workspace, and the reaper would never reclaim the old one.
+  const database = memoryDatabase();
+  try {
+    const store = new RunStore(database);
+    const principal = store.createPrincipal({ displayName: 'A' });
+    const { run } = store.createRun({ principal, repository: 'o/r', branch: 'main', objective: 'x' });
+
+    store.setStatus(run.id, 'NEEDS_HUMAN', 'O orquestrador pediu uma decisão.');
+    assert.deepEqual(store.listAbandoned().map((r) => r.id), [], 'it would be re-driven forever');
+
+    // And its workspace is reclaimable, so the meter stops.
+    const workspaceId = database.workspaces.create({
+      id: 'ws-h',
+      name: 'o/r',
+      localPath: '',
+      environment: 'cloud',
+      repositoryFullName: 'o/r',
+      branch: 'main',
+    }).id;
+    const cw = database.cloudWorkspaces.create({
+      id: 'cw-human',
+      workspaceId,
+      provisioner: 'fake',
+      repository: 'o/r',
+      branch: 'main',
+      workingDir: '/workspace/repo',
+      ttlMs: 60 * 60_000,
+    });
+    database.cloudWorkspaces.setHandle(cw.id, 'handle-human');
+    database.cloudWorkspaces.setStatus(cw.id, 'ready');
+    store.setCloudWorkspace(run.id, cw.id);
+
+    const provisioner = fakeProvisioner();
+    const swept = await new Reaper({ database, store, provisioner }).sweep();
+    assert.deepEqual(swept.orphaned, ['cw-human']);
+    assert.deepEqual(provisioner.released, ['handle-human']);
+  } finally {
+    database.close();
+  }
+});

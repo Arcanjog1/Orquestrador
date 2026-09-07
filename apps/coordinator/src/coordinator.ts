@@ -41,10 +41,12 @@ import {
   DEFAULT_LIMITS,
   ProvisioningError,
   type ProvisionedWorkspace,
+  type RepositoryAccess,
   type WorkspaceLimits,
   type WorkspaceProvisioner,
 } from '../../../src/cloud/provisioner.js';
 import { redact } from '../../../src/security/secret-redactor.js';
+import { PublishError, publishRun, type PublishResult } from '../../../src/cloud/publish.js';
 
 /**
  * Where the agent CLIs live inside a workspace image.
@@ -89,6 +91,15 @@ export interface AgentCredentials {
  */
 export interface RunTeam {
   readonly verifications?: readonly { id: string; label: string; command: string }[];
+  /**
+   * Where the work goes when the run ends.
+   *
+   * A cloud workspace is disposable, so a run that is not published produces
+   * nothing: the edits go with the workspace. `publish` is therefore on by
+   * default, and turning it off is a deliberate choice for a run whose point
+   * is only to look (an audit, an investigation).
+   */
+  readonly publish?: { readonly enabled?: boolean; readonly branch?: string | null };
   readonly orchestrator?: { model?: string | null; reasoning?: string | null };
   readonly worker?: { selection?: string | null; model?: string | null; reasoning?: string | null };
 }
@@ -96,6 +107,8 @@ export interface RunTeam {
 export interface CoordinatorOptions {
   database: Database;
   provisioner: WorkspaceProvisioner;
+  /** Mints the short-lived write token a publish needs. */
+  repositoryAccess?: RepositoryAccess;
   credentials: AgentCredentials;
   /** Identifies this process in a lease. Defaults to a fresh id per process. */
   owner?: string;
@@ -109,6 +122,31 @@ export interface CoordinatorOptions {
 }
 
 const LEASE_TTL_MS = 60_000;
+
+/**
+ * The loop's vocabulary, translated into the coordinator's.
+ *
+ * An explicit map rather than a pass-through, because the two differ in one
+ * place that matters: the loop's human gate is `BLOCKED`, and the
+ * coordinator's is `NEEDS_HUMAN` - which is what its terminal set, its
+ * recovery query and its reaper all check. Storing `BLOCKED` verbatim would
+ * mean a run waiting for a person was never terminal: every recovery would
+ * pick it up and provision another workspace for it, and its old one would
+ * never be reclaimed. A run stuck on a question would quietly bill forever.
+ *
+ * An unknown status becomes FAILED rather than being stored as itself, so a
+ * new state added to the loop cannot silently create the same hole again.
+ */
+const REMOTE_STATUS: Record<string, string> = {
+  DONE: 'DONE',
+  FAILED: 'FAILED',
+  CANCELLED: 'CANCELLED',
+  BLOCKED: 'NEEDS_HUMAN',
+  // A loop that somehow returned a non-terminal state has not finished, and
+  // saying it did would be worse than saying it failed.
+  RUNNING: 'FAILED',
+  PENDING: 'FAILED',
+};
 
 export class Coordinator {
   readonly store: RunStore;
@@ -286,6 +324,24 @@ export class Coordinator {
       await this.signIn(workspace);
 
       const finished = await this.runLoop(run, workspace, cloudWorkspace.id);
+
+      // Before the workspace is released, not after: everything not pushed
+      // goes with it. A run that edited files, passed its verifications and
+      // satisfied the DONE gate, and then evaporated, produced nothing.
+      const published = await this.publish(run, workspace).catch((error: unknown) => {
+        const reason = error instanceof PublishError ? error.userMessage : String(error);
+        this.store.append(runId, 'run.publish', { published: false, reason: redact(reason) });
+        return null;
+      });
+      if (published) {
+        this.store.append(runId, 'run.publish', {
+          published: published.published,
+          branch: published.branch,
+          commit: published.commit,
+          reason: published.reason,
+        });
+      }
+
       this.store.setStatus(runId, finished.status, finished.reason);
     } catch (error) {
       // A shutdown is not a failed run: the lease lapses and the next process
@@ -418,7 +474,36 @@ export class Coordinator {
       started.id,
       (this.options.agentTimeoutMs ?? 15 * 60_000) * ((this.options.maxIterations ?? 8) + 2),
     );
-    return { status: view.status, reason: view.summary ?? null };
+    return { status: REMOTE_STATUS[view.status] ?? 'FAILED', reason: view.summary ?? null };
+  }
+
+  /**
+   * Pushes the run's work to a branch of its own.
+   *
+   * Skipped when the team asked for it to be, and when there is nothing to
+   * push. The branch is derived from the run id, so a second attempt writes
+   * the same commits to the same branch - a no-op rather than a second branch.
+   */
+  private async publish(run: RemoteRunRecord, workspace: ProvisionedWorkspace): Promise<PublishResult | null> {
+    const team = this.teamOf(run);
+    if (team.publish?.enabled === false) return null;
+    if (!this.options.repositoryAccess) {
+      throw new PublishError(
+        'UNAUTHORIZED',
+        'O coordenador não tem credencial de escrita para publicar o resultado.',
+        'configure o GitHub App com permissão contents: write',
+      );
+    }
+    return publishRun({
+      processes: workspace.processes,
+      workingDirectory: workspace.workingDirectory,
+      repository: run.repository,
+      baseBranch: run.branch,
+      runId: run.id,
+      objective: run.objective,
+      repositoryAccess: this.options.repositoryAccess,
+      branch: team.publish?.branch ?? null,
+    });
   }
 
   /** The agent pair, built against the workspace rather than this machine. */

@@ -56,20 +56,28 @@ git local escondidas para projeto de nuvem; cartão de conexão em Configuraçõ
 
 ## Restante
 
-### Bloco 8 — timeline de nuvem mais rica  *(não bloqueado)*
-Hoje os eventos remotos chegam à timeline local como passos com o resumo do
-evento. Falta apresentar diff, arquivos alterados e resultado de verificação
-com a mesma riqueza do modo local, **sem baixar o repositório**.
-*Menor passo:* fazer o coordenador anexar `GitEvidence` (arquivos, inserções,
-remoções, diffstat) ao evento `orchestration.run:progress` da fase `evidence`,
-e o `CloudService` gravá-lo onde a timeline local já lê.
+### Bloco 8 — evidência real na timeline de nuvem ✔
+A evidência que o loop já coleta viaja no evento de progresso, então a timeline
+de uma execução remota mostra arquivos alterados e diffstat reais **sem que o
+repositório chegue ao computador da pessoa**. O diff completo fica de fora de
+propósito: é grande, já está em disco nos artefatos da execução, e carregá-lo
+em cada evento faria o log crescer com o tamanho da mudança em vez de com o que
+aconteceu. *Teste:* `cloud-reconnection.test.ts`.
 
-### Bloco 9 — branch, push e PR na nuvem  *(parcialmente bloqueado)*
-O clone já usa token de instalação. Falta o caminho de escrita: criar branch,
-commitar, empurrar e abrir PR **de dentro** do workspace, com um token
-`contents: write` de vida curta e proteção contra repetição.
-*Menor passo:* uma ação idempotente no coordenador, com chave derivada do
-`run_id`, para que uma repetição não abra um segundo PR.
+### Bloco 9 — publicar o resultado ✔ *(o PR ainda depende de um gate)*
+Um workspace de nuvem é descartável, o que cria uma falha que o produto local
+nunca teve: uma execução que editou arquivos, passou nas verificações e
+satisfez o DoneGate, e foi então recolhida, **produziu nada**. Por isso a
+publicação acontece **antes da liberação**: branch derivada do id da execução,
+commit com a identidade do aplicativo (nunca a da pessoa), push com token
+`contents: write` de vida curta pelo mesmo askpass do clone. Nunca force-push,
+nunca commit vazio, e uma repetição escreve a mesma branch em vez de uma
+segunda. *Teste:* `cloud-publish.test.ts`.
+
+**Falta:** abrir o pull request automaticamente. O `GitHubClient` já sabe
+abrir PR; o que falta é chamá-lo do coordenador com o token de instalação e uma
+chave de idempotência derivada do `run_id`, para que uma repetição não abra um
+segundo PR.
 *Bloqueado por:* instalação do GitHub App com permissão de escrita.
 
 ### Bloco 10 — E2E real  *(bloqueado)*
