@@ -995,3 +995,136 @@ test('a Claude Code build with no --print is still refused', async () => {
     },
   );
 });
+
+/** A Claude Code whose help declares the session and structured-output flags. */
+const CLAUDE_HELP_WITH_SESSIONS = `Usage: claude [options] [prompt]
+
+Options:
+  -p, --print                       Print response and exit
+      --permission-mode <mode>      Permission mode
+      --output-format <format>      Output format (text, json, stream-json)
+      --resume [sessionId]          Resume a conversation
+      --model <model>               Model for the session
+      --version                     Output the version number
+`;
+
+test('Claude Code asks for the JSON envelope, and reads the session id and cost out of it', async () => {
+  const envelope = JSON.stringify({
+    type: 'result',
+    result: 'Criei o arquivo.',
+    session_id: 'abc-123',
+    total_cost_usd: 0.0123,
+    usage: { input_tokens: 900, output_tokens: 120, cache_read_input_tokens: 40 },
+  });
+  const { manager, calls } = fakeProcessManager({
+    '--help': CLAUDE_HELP_WITH_SESSIONS,
+    // Keyed by the first argument, as this fake does for structured runs.
+    '--print': envelope,
+  });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({ CLAUDE_CONFIG_DIR: '/profiles/acc-1' }),
+  });
+
+  const result = await adapter.run({
+    prompt: 'crie hello.txt',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  const invocation = calls.at(-1)!;
+  assert.deepEqual(invocation.args, [
+    '--print',
+    '--permission-mode',
+    'acceptEdits',
+    '--output-format',
+    'json',
+  ]);
+  // `--bare` must never appear: it does not read the subscription login, and
+  // needing an API key is exactly the cost this product refuses to impose.
+  assert.ok(!invocation.args!.includes('--bare'));
+
+  // The answer is the envelope's `result`, not the raw JSON.
+  assert.equal(result.stdout, 'Criei o arquivo.');
+  assert.equal(result.sessionId, 'abc-123');
+  // The CLI's own cost figure wins over any table, and a plan invocation is
+  // billed to the subscription rather than metered.
+  assert.equal(result.usage?.billing, 'subscription');
+  assert.equal(result.usage?.costUsd, 0.0123);
+  assert.equal(result.usage?.costReported, true);
+  assert.equal(result.usage?.inputTokens, 900);
+  assert.equal(result.usage?.totalTokens, 1020);
+});
+
+test('Claude Code continues a session when one is given and the build takes --resume', async () => {
+  const { manager, calls } = fakeProcessManager({
+    '--help': CLAUDE_HELP_WITH_SESSIONS,
+    '--print': JSON.stringify({ result: 'ok', session_id: 'abc-123' }),
+  });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+
+  await adapter.run({
+    prompt: 'continue',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'run-1',
+    iteration: 2,
+    resumeSessionId: 'abc-123',
+  });
+  assert.ok(calls.at(-1)!.args!.includes('--resume'));
+  assert.equal(calls.at(-1)!.args!.at(-1), 'abc-123');
+  assert.equal(await adapter.supportsResume('/work'), true);
+});
+
+test('a build without --resume starts fresh, and nothing is promised on its behalf', async () => {
+  const { manager, calls } = fakeProcessManager({ '--help': CLAUDE_HELP });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+
+  const result = await adapter.run({
+    prompt: 'continue',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'run-1',
+    iteration: 2,
+    // Offered, but this build cannot take it.
+    resumeSessionId: 'abc-123',
+  });
+
+  assert.ok(!calls.at(-1)!.args!.includes('--resume'), 'a flag the help does not list is not sent');
+  assert.ok(!calls.at(-1)!.args!.includes('--output-format'));
+  assert.equal(result.sessionId, undefined, 'and no session is claimed');
+  assert.equal(await adapter.supportsResume('/work'), false);
+});
+
+test('an envelope this build does not produce falls back to raw stdout rather than losing the answer', async () => {
+  const { manager } = fakeProcessManager({
+    '--help': CLAUDE_HELP_WITH_SESSIONS,
+    // A build that changed its envelope, or printed something else entirely.
+    '--print': 'texto simples, não JSON',
+  });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+  const result = await adapter.run({
+    prompt: 'x',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'r',
+    iteration: 1,
+  });
+  assert.equal(result.stdout, 'texto simples, não JSON');
+  assert.equal(result.sessionId, undefined);
+});
