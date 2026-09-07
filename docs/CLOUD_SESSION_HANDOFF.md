@@ -2,7 +2,7 @@
 
 **Branch:** `claude/ai-orchestrator-implementation-y7xw98`
 **HEAD inicial:** `de4b4aa` (de `claude/lovable-on-latest-core`, o mais recente)
-**HEAD final:** ver `git log -1` na branch
+**HEAD final com código:** `f169c80` (o commit verificado pelo CI e publicado como build)
 **Nada foi feito em `main`. Nenhum merge, nenhum force-push, nenhuma branch apagada.**
 
 A branch parte de `de4b4aa` e só acrescenta. `claude/lovable-on-latest-core`
@@ -47,8 +47,9 @@ Detalhes e decisões: `CLOUD_ARCHITECTURE_DECISION.md`,
 | Typecheck (raiz + coordenador + main + renderer) | limpo |
 | Electron (`npm run desktop:test`) | **23 passam** |
 | Sonda contra o Codex 0.153.4 real | PASS (`scripts/probe-codex-capability.mjs`) |
-| Windows CI | **verde** em `2875aaf` — typecheck, testes, Electron, NSIS, smoke do instalador, e as sondas reais de Codex, Claude e Git |
-| Linux CI | **verde** em `2875aaf`, incluindo o smoke do pacote |
+| Windows CI | **verde** em `f169c80` — typecheck, testes, Electron, NSIS, smoke do instalador, e as sondas reais de Codex, Claude e Git |
+| Linux CI | **verde** em `f169c80`, incluindo o smoke do pacote |
+| Instalador | publicado: [`desktop-dev-f169c80`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-f169c80) — `AI-Orchestrator-Setup.exe`, 116 MB, sha256 `91725dac…981a` |
 
 Testes novos deste trabalho: `execution-boundary`, `cloud-provisioner`,
 `cloud-coordinator`, `cloud-github-access`, `cloud-reconnection`, mais casos em
