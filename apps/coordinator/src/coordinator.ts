@@ -412,9 +412,9 @@ export class Coordinator {
     const key = this.options.credentials.openaiApiKey;
     if (!key) {
       throw new ProvisioningError(
-        'REPOSITORY_UNAUTHORIZED',
+        'AGENT_CREDENTIAL_MISSING',
         'O ambiente remoto não tem uma credencial autorizada para o Codex.',
-        'configure OPENAI_API_KEY no coordenador',
+        'configure ORQ_OPENAI_API_KEY no coordenador; uma assinatura do ChatGPT não autoriza este uso',
       );
     }
     const result = await workspace.processes.run({
@@ -426,7 +426,7 @@ export class Coordinator {
     });
     if (result.exitCode !== 0) {
       throw new ProvisioningError(
-        'REPOSITORY_UNAUTHORIZED',
+        'AGENT_CREDENTIAL_REFUSED',
         'O Codex não aceitou a credencial no ambiente remoto.',
         redact(firstLine(result.stderr) ?? `saída ${result.exitCode}`),
       );

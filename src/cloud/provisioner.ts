@@ -139,6 +139,10 @@ export class ProvisioningError extends Error {
     readonly reason:
       | 'BACKEND_UNAVAILABLE'
       | 'REPOSITORY_UNAUTHORIZED'
+      /** No usable credential for an agent, so the run cannot be attempted. */
+      | 'AGENT_CREDENTIAL_MISSING'
+      /** A credential exists but the agent refused it. */
+      | 'AGENT_CREDENTIAL_REFUSED'
       | 'REPOSITORY_NOT_FOUND'
       | 'BRANCH_NOT_FOUND'
       | 'CLONE_FAILED'
