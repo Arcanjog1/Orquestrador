@@ -10,9 +10,11 @@ Estado ao fim da quarta sessão: a arquitetura de comunicação, inspirada no Bu
 | Branch desta sessão | `claude/ai-orchestrator-buzz-arch-vblrau` |
 | HEAD do início | `2e06ae5` (ponta de `claude/ai-orchestrator-reorientacao-ytlkw0`) |
 | Branch padrão real | `claude/new-session-3am7mo` — **não é `main`, e `main` não existe** |
-| Instalador | a pre-release `desktop-dev-*` **mais recente** desta branch, em [Releases](https://github.com/Arcanjog1/Orquestrador/releases) |
+| Instalador | [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — `AI-Orchestrator-Setup.exe`, publicado com a CI verde |
+| CI | [run 82](https://github.com/Arcanjog1/Orquestrador/actions/runs/34161117627) — Windows e Linux **verdes** |
 
-Sem reset, sem merge, sem force-push, sem apagar branch. A branch desta sessão
+Sem reset, sem merge, sem force-push, sem apagar branch. Nenhuma release
+anterior foi sobrescrita: a tag é por commit. A branch desta sessão
 saiu de `2e06ae5`, que é a ponta real do trabalho — a branch padrão do
 repositório estava onze commits atrás e teria descartado tudo desde a fase
 Electron.
@@ -288,9 +290,9 @@ DoneGate não foi afrouxado e nenhum teste foi removido.
 Não existem contas Codex/Claude legítimas no CI, e este ambiente não tem
 Windows. O roteiro:
 
-1. baixar o `AI-Orchestrator-Setup.exe` da pre-release `desktop-dev-*` mais
-   recente em [Releases](https://github.com/Arcanjog1/Orquestrador/releases) e
-   instalar por cima (o SmartScreen avisa: o build não é assinado);
+1. baixar o `AI-Orchestrator-Setup.exe` de
+   [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e)
+   e instalar por cima (o SmartScreen avisa: o build não é assinado);
 2. abrir o aplicativo — a base é migrada no lugar, nada é reautenticado;
 3. Configurações → Contas: confirmar Codex e Claude conectados;
 4. Equipe: orquestrador = Codex, Worker 1 = Claude;
