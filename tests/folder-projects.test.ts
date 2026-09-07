@@ -452,3 +452,161 @@ test('a conversation project is never matched against a folder', async () => {
     f.cleanup();
   }
 });
+
+/* ================================================================== *
+ * The provider session, surfaced (spec 5, 6)
+ * ================================================================== */
+
+test('the real session id and its resume command reach the details screen', async () => {
+  const fixture = createDesktopFixture();
+  const f = folder();
+  try {
+    const opened = await open(fixture, f.dir);
+    const account = value<{ id: string }>(
+      await fixture.router.handle('accounts.create', { name: 'Claude Trabalho 1', provider: 'anthropic' }),
+    );
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', {
+        workspaceId: opened.workspace.id,
+        title: 'Sessão',
+        projectId: opened.projectId,
+      }),
+    );
+    const run = fixture.services.database.runs.create({
+      id: 'run-session-1',
+      sessionId: session.id,
+      workspaceId: opened.workspace.id,
+      objective: 'algo',
+      orchestratorAgentId: null,
+      maxIterations: 4,
+    });
+    // What the adapter records after the CLI reports a session id.
+    fixture.services.database.agentSessions.remember({
+      chatSessionId: session.id,
+      connectionId: account.id,
+      providerSessionId: 'sess-abc-123',
+      adapterId: 'claude-code',
+      workingDirectory: f.dir,
+    });
+
+    const detail = value<{
+      providerSessions: Array<{
+        connectionName: string | null;
+        providerSessionId: string;
+        workingDirectory: string;
+        resumeCommand: string;
+        adapterId: string;
+      }>;
+    }>(await fixture.router.handle('run.detail', { runId: run.id }));
+
+    assert.equal(detail.providerSessions.length, 1);
+    const [only] = detail.providerSessions;
+    // A `-p` session is deliberately absent from Claude Code's own picker, so
+    // its id is the only handle a person has. Hiding it is what made the whole
+    // thing look like it was not really using Claude Code.
+    assert.equal(only!.providerSessionId, 'sess-abc-123');
+    assert.equal(only!.connectionName, 'Claude Trabalho 1');
+    assert.equal(only!.workingDirectory, f.dir);
+    assert.equal(only!.adapterId, 'claude-code');
+    // The documented command, ready to copy. Shown, never run by the app.
+    assert.equal(only!.resumeCommand, 'claude --resume sess-abc-123');
+  } finally {
+    await fixture.cleanup();
+    f.cleanup();
+  }
+});
+
+test('two Claude connections in one conversation keep two separate sessions', async () => {
+  const fixture = createDesktopFixture();
+  const f = folder();
+  try {
+    const opened = await open(fixture, f.dir);
+    const first = value<{ id: string }>(
+      await fixture.router.handle('accounts.create', { name: 'Claude Trabalho 1', provider: 'anthropic' }),
+    );
+    const second = value<{ id: string }>(
+      await fixture.router.handle('accounts.create', { name: 'Claude Trabalho 2', provider: 'anthropic' }),
+    );
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', {
+        workspaceId: opened.workspace.id,
+        title: 'Sessão',
+        projectId: opened.projectId,
+      }),
+    );
+    for (const [account, id] of [
+      [first.id, 'sess-conta-1'],
+      [second.id, 'sess-conta-2'],
+    ] as const) {
+      fixture.services.database.agentSessions.remember({
+        chatSessionId: session.id,
+        connectionId: account,
+        providerSessionId: id,
+        adapterId: 'claude-code',
+        workingDirectory: f.dir,
+      });
+    }
+
+    // Two rows, and each connection finds only its own. One account's session
+    // can never be handed to the other: their transcripts already live in two
+    // different CLAUDE_CONFIG_DIRs, and this makes the same separation true of
+    // what the application asks for.
+    const sessions = fixture.services.database.agentSessions.listForChatSession(session.id);
+    assert.equal(sessions.length, 2);
+    assert.equal(
+      fixture.services.database.agentSessions.find(session.id, first.id, f.dir)?.provider_session_id,
+      'sess-conta-1',
+    );
+    assert.equal(
+      fixture.services.database.agentSessions.find(session.id, second.id, f.dir)?.provider_session_id,
+      'sess-conta-2',
+    );
+  } finally {
+    await fixture.cleanup();
+    f.cleanup();
+  }
+});
+
+test('a session recorded for another folder is not offered for this one', async () => {
+  const fixture = createDesktopFixture();
+  const a = folder('lao-ws-a-');
+  const b = folder('lao-ws-b-');
+  try {
+    const opened = await open(fixture, a.dir);
+    const account = value<{ id: string }>(
+      await fixture.router.handle('accounts.create', { name: 'Claude Trabalho 1', provider: 'anthropic' }),
+    );
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', {
+        workspaceId: opened.workspace.id,
+        title: 'Sessão',
+        projectId: opened.projectId,
+      }),
+    );
+    fixture.services.database.agentSessions.remember({
+      chatSessionId: session.id,
+      connectionId: account.id,
+      providerSessionId: 'sess-da-pasta-a',
+      adapterId: 'claude-code',
+      workingDirectory: a.dir,
+    });
+
+    // Claude Code itself would now resume this id from any directory on the
+    // machine. The application is deliberately stricter: a session belongs to
+    // the folder it was started in, and offering it elsewhere is how a run
+    // silently continues the wrong project's context.
+    assert.equal(
+      fixture.services.database.agentSessions.find(session.id, account.id, a.dir)?.provider_session_id,
+      'sess-da-pasta-a',
+    );
+    assert.equal(
+      fixture.services.database.agentSessions.find(session.id, account.id, b.dir),
+      undefined,
+      'a session from another folder must not be offered',
+    );
+  } finally {
+    await fixture.cleanup();
+    a.cleanup();
+    b.cleanup();
+  }
+});

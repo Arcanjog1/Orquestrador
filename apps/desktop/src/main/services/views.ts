@@ -111,12 +111,39 @@ export function toRunDetailView(
   steps: readonly RunStepRecord[],
   invocations: readonly Record<string, unknown>[],
   verifications: readonly Record<string, unknown>[],
+  /**
+   * The provider sessions of this conversation, with the connection's name.
+   *
+   * Optional so every existing caller keeps working; absent means "none
+   * recorded", which is the truth for a run whose worker reported no session.
+   */
+  providerSessions: ReadonlyArray<{
+    connection_id: string;
+    connectionName: string | null;
+    adapter_id: string;
+    provider_session_id: string;
+    working_directory: string;
+    updated_at: string;
+  }> = [],
 ): RunDetailView {
   const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
   const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
   const flag = (v: unknown): boolean | null =>
     v === 1 || v === true ? true : v === 0 || v === false ? false : null;
   return {
+    providerSessions: providerSessions.map((session) => ({
+      connectionId: session.connection_id,
+      connectionName: session.connectionName,
+      adapterId: session.adapter_id,
+      providerSessionId: session.provider_session_id,
+      workingDirectory: session.working_directory,
+      updatedAt: session.updated_at,
+      // The documented way to continue this exact conversation by hand. A
+      // session started with `-p` is resumable only by its id, so this is the
+      // only handle there is - and showing it is what turns "where did my
+      // execution go?" into something a person can act on.
+      resumeCommand: `claude --resume ${session.provider_session_id}`,
+    })),
     run: toRunView(record, steps),
     baseline: {
       branch: record.baseline_branch,

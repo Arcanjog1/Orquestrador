@@ -521,11 +521,22 @@ export class OrchestrationService {
    */
   detail(runId: string): RunDetailView {
     const run = this.database.runs.require(runId);
+    // The provider sessions this conversation is continuing, with the name of
+    // the connection each belongs to. A session created by `claude -p` is
+    // deliberately absent from the interactive picker, so its id is the only
+    // handle a person has - which makes it worth showing rather than hiding.
+    const sessions = run.session_id
+      ? this.database.agentSessions.listForChatSession(run.session_id).map((session) => ({
+          ...session,
+          connectionName: this.database.accounts.find(session.connection_id)?.display_name ?? null,
+        }))
+      : [];
     return toRunDetailView(
       run,
       this.database.runs.steps(runId),
       this.database.runs.invocations(runId),
       this.database.runs.verifications(runId),
+      sessions,
     );
   }
 

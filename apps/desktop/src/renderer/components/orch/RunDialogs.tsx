@@ -176,6 +176,7 @@ export function EvidenceDialog({
   const { changes } = useChanges(workspace?.id ?? null, open);
   const { detail } = useRunDetail(open ? runId : null);
   const verifications = detail?.verifications ?? [];
+  const sessions = detail?.providerSessions ?? [];
   const evidenceSteps = (detail?.steps ?? []).filter((s) => s.phase === "evidence");
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -272,6 +273,49 @@ export function EvidenceDialog({
               </ul>
             )}
           </div>
+
+          {/* The provider's own sessions.
+              Worth its own block because of a confusing gap: a session created
+              by `claude -p` is deliberately kept out of Claude Code's own
+              session picker and out of `claude --continue`, so a person sees
+              the usage on their account, finds nothing in the picker, and
+              concludes the application is not really using Claude Code. It is.
+              The id is the only handle there is, so showing it is the fix. */}
+          {sessions.length > 0 && (
+            <div className="border-t border-border pt-4">
+              <SectionLabel>Sessões do Claude Code</SectionLabel>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Uma sessão iniciada em modo não interativo não aparece no seletor do
+                Claude Code nem no Claude Desktop — cada um mantém seu próprio
+                histórico. Ela existe e é retomável pelo id:
+              </p>
+              <ul className="mt-2 space-y-2">
+                {sessions.map((session) => (
+                  <li key={`${session.connectionId}-${session.providerSessionId}`}>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="font-semibold">{session.connectionName ?? "Conexão"}</span>
+                      <span className="text-muted-foreground">{session.adapterId}</span>
+                    </div>
+                    <div
+                      className="mt-1 truncate font-mono text-[11px] text-muted-foreground"
+                      title={session.workingDirectory}
+                    >
+                      {session.workingDirectory}
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="copy-resume-command"
+                      onClick={() => void navigator.clipboard?.writeText(session.resumeCommand)}
+                      title="Copiar"
+                      className="mt-1 w-full truncate rounded-md border border-border bg-surface-raised px-2 py-1 text-left font-mono text-[11px] transition-colors hover:bg-accent"
+                    >
+                      {session.resumeCommand}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>

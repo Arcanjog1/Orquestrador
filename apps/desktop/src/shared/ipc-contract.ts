@@ -622,6 +622,36 @@ export interface RunDetailView {
   readonly steps: readonly RunStepView[];
   readonly invocations: readonly RunInvocationView[];
   readonly verifications: readonly RunVerificationView[];
+  /** The provider sessions this conversation is continuing. See below. */
+  readonly providerSessions: readonly ProviderSessionView[];
+}
+
+/**
+ * A real session the vendor's own tool reported, and how to reach it.
+ *
+ * Worth showing because of a genuine and confusing gap: a session created by
+ * `claude -p` is deliberately kept out of the interactive session picker and
+ * out of `claude --continue` — it is resumable only by its id. So a person
+ * sees the usage on their Claude account and finds nothing in the picker, and
+ * concludes the application is not really using Claude Code. It is; the
+ * session is simply not listed by design.
+ *
+ * `resumeCommand` is that id in the form a person can use: the documented
+ * `claude --resume <id>`, to run in their own terminal if they want to
+ * continue the conversation by hand. Nothing here is executed by the
+ * application.
+ */
+export interface ProviderSessionView {
+  /** The connection this session belongs to. Never shared between accounts. */
+  readonly connectionId: string;
+  readonly connectionName: string | null;
+  /** Which tool reported it, so a resume is never attempted with the wrong CLI. */
+  readonly adapterId: string;
+  readonly providerSessionId: string;
+  readonly workingDirectory: string;
+  readonly updatedAt: string;
+  /** The documented command, ready to copy. Shown, never run by the app. */
+  readonly resumeCommand: string;
 }
 
 /** The working copy right now, read with git. What the diff view shows. */
