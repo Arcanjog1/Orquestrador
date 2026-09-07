@@ -21,6 +21,108 @@ Electron.
 
 ---
 
+# Quinta sessão — a pasta é o projeto, e ler o GitHub
+
+Documentos novos: `docs/CLAUDE_CODE_SESSIONS.md` (CLI × Desktop, com as
+citações). HEAD de início: `df8cae7`.
+
+## A pasta é o projeto
+
+O incômodo: selecionar uma pasta produzia "projeto e pasta separados", e
+selecionar a mesma pasta de novo criava duplicata. Duas causas:
+
+1. **Selecionar pasta criava um `workspace` e nenhum `project`.** A sidebar
+   lista projetos; o seletor criava workspace. A pasta aparecia numa lista e
+   nada na outra.
+2. **A comparação era pelo texto do caminho.** No Windows a mesma pasta chega
+   escrita de várias formas: `C:\Proj` e `c:/proj/` eram dois projetos.
+
+Agora `workspace.openProject` **abre** o projeto da pasta e só cria quando não
+há nenhum. E `folderKey` canonicaliza: minúsculas e barra invertida no Windows,
+separador final removido, e resolvido pelo sistema de arquivos quando a pasta
+existe — então uma junction e seu alvo são um projeto só.
+
+O que **não** é unido: maiúsculas no POSIX (lá são duas pastas mesmo), e duas
+pastas que só compartilham o nome final. Uma união errada mistura dois projetos
+e perde trabalho; uma união perdida é uma duplicata visível. O caso incerto
+falha para o lado seguro.
+
+Selecionar uma pasta conhecida era um **erro** ("esta pasta já está
+adicionada"). Agora é simplesmente abrir.
+
+**A migração é aditiva no sentido estrito**: escreve identidade onde não havia
+e cria projeto para pasta que não tem. Nunca apaga, funde, renomeia ou move.
+Onde dois workspaces apontam para a mesma pasta, **os dois ficam e os dois são
+reportados** — cada um tem suas conversas e execuções, e escolher qual história
+sobrevive não é decisão de uma migração. É idempotente.
+
+Renomear o projeto não toca no disco.
+
+## Ler um repositório público do GitHub
+
+Cole o link, peça a análise, sem clonar nada.
+
+**Quem lê é o aplicativo, não o agente.** O Codex roda `--sandbox read-only`
+sem rede, e isso não foi afrouxado. O aplicativo busca pela API REST
+documentada e entrega o conteúdo no prompt — que diz isso com todas as letras:
+*"you have no network access and did not read it yourself; name the files you
+used"*. O snapshot carrega o **sha do commit** e a **lista de arquivos
+realmente abertos**, e os testes verificam isso, não a prosa.
+
+Repositório público é lido **sem login**. Um token só é anexado quando o GitHub
+já está conectado — para elevar o limite ou alcançar um privado autorizado.
+
+Erros são distinguidos porque a próxima ação difere: endereço errado, cota
+esgotada (com o teto real e a hora de reposição), e privado sem autorização —
+que é o mesmo 404 do GitHub, de propósito, porque distinguir vazaria quais
+repositórios privados existem.
+
+## Sessões do Claude Code: por que não aparecem no Desktop
+
+**É documentado e proposital**, não defeito daqui:
+
+> Claude Code leaves sessions created with `claude -p` […] **out of the session
+> picker and out of `claude --continue`**. You can still resume one by passing
+> its session ID to `claude --resume <session-id>`.
+
+E o Desktop: *"Each maintains separate session history."*
+
+Existe `/desktop` para mover uma sessão do CLI para o Desktop — e **não serve
+aqui**: é comando da interface de terminal (indisponível em `-p`), **encerra o
+CLI** (mataria o worker no meio da delegação), e é limitado por plataforma e
+autenticação. Não foi implementado, como você pediu.
+
+O que foi feito: **Detalhes** agora mostra o id real da sessão, o diretório, a
+conexão, e `claude --resume <id>` pronto para copiar. O aplicativo não executa.
+
+A regra de resume continua **mais restrita que a do CLI** de propósito: o
+Claude Code hoje resolve um id "in every other project on this machine"; aqui
+uma sessão gravada para outra pasta não é oferecida.
+
+## Testes
+
+| Suíte | Resultado |
+|---|---|
+| Root (`npm test`) | **617 passando**, 2 pulados (eram 575) |
+| Electron | **28 passando** |
+| Typecheck (4 projetos) | limpo |
+
+Novos: `tests/folder-projects.test.ts` (21), `tests/github-repository-reader.test.ts` (21).
+
+Um teste antigo afirmava uma contagem de projetos que este comportamento muda;
+ele agora afirma o que de fato queria dizer — que o projeto sobrevive ao
+reinício — mais o projeto de pasta que o start-up corretamente adiciona.
+Nenhum teste foi removido e o DoneGate não foi afrouxado.
+
+## O que ficou pendente
+
+**O teste no projeto Replit não foi feito**, e não por esquecimento: não existe
+repositório chamado "Replit" na sua conta, e vários poderiam ser
+(`lucid-pro-ui`, `MyAIBuddy`, `ai-project-lead`, `HUB`). Você pediu para não
+escolher por aproximação, então não escolhi. Falta o link ou a pasta.
+
+---
+
 # Quarta sessão — a troca automática, e a janela que ficava parada
 
 Documentos novos: `docs/AGENT_MESSAGE_BUS.md` (a arquitetura) e
