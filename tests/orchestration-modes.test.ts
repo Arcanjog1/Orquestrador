@@ -1046,3 +1046,94 @@ test('a conversation run gives its agents an empty directory the app owns, never
     await fixture.cleanup();
   }
 });
+
+test('a session the tool no longer has is forgotten and the delegation runs once more, fresh', async () => {
+  const orchestrator = new ScriptedAgent('mock-codex', 'Codex', [
+    JSON.stringify({
+      action: 'delegate',
+      requiresTools: false,
+      task: 'primeira',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+    }),
+    JSON.stringify({
+      action: 'delegate',
+      requiresTools: false,
+      task: 'segunda',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+    }),
+    JSON.stringify({
+      action: 'done',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+      summary: 'Uma resposta final suficientemente longa para o gate.',
+    }),
+  ]);
+
+  // A worker that reports a session, then refuses to resume it - the way a
+  // tool behaves once the session has been pruned or cleared.
+  const worker = new (class extends ScriptedAgent {
+    override async run(input: AgentInput) {
+      const result = await super.run(input);
+      if (input.resumeSessionId) {
+        return {
+          ...result,
+          exitCode: 1,
+          stdout: '',
+          stderr: `No conversation found with session ID: ${input.resumeSessionId}`,
+          sessionId: 'sessao-nova',
+        };
+      }
+      return { ...result, sessionId: 'sessao-nova' };
+    }
+  })('mock-claude', 'Claude', ['respondi']);
+
+  let bound: Array<{ agentId: string; accountId: string | null }> = [];
+  const fixture = createDesktopFixture({
+    createRunners: async () => ({
+      orchestrator,
+      worker,
+      workerAccountId: bound[0]?.accountId ?? null,
+      workers: [
+        {
+          id: 'worker-1',
+          label: 'Claude',
+          runner: worker,
+          accountId: bound[0]?.accountId ?? null,
+          providerId: 'anthropic',
+          connectionKind: 'cli',
+          agentId: bound[0]?.agentId ?? null,
+        },
+      ],
+    }),
+    maxIterations: 4,
+  });
+  try {
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.createConversation', { name: 'Conversa' }),
+    );
+    bound = await bindTeam(fixture, workspace.id, ['Claude']);
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'x' }),
+    );
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'vai' }),
+    );
+    const run = await fixture.services.orchestration.waitFor(sent.run.id);
+
+    // Three worker calls: the first, the failed resume, and the fresh retry.
+    assert.equal(worker.calls.length, 3);
+    assert.equal(worker.calls[1]!.resumeSessionId, 'sessao-nova', 'it tried to continue');
+    assert.equal(worker.calls[2]!.resumeSessionId ?? null, null, 'then started fresh');
+
+    // The recovery is on the record rather than silent.
+    const expired = steps(fixture, sent.run.id).find((s) => s.status === 'session-expired');
+    assert.ok(expired, 'a stale session is recorded, not swallowed');
+
+    // And a stale id did not cost the run.
+    assert.equal(run.status, 'DONE');
+  } finally {
+    await fixture.cleanup();
+  }
+});

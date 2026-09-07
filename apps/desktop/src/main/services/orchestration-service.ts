@@ -1253,15 +1253,33 @@ export class OrchestrationService {
         : undefined;
 
       const startedAt = new Date().toISOString();
-      const result = await slot.runner.run({
-        prompt: task,
-        workingDirectory: cwd,
-        timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
-        runId,
-        iteration,
-        ...(previousSession ? { resumeSessionId: previousSession.provider_session_id } : {}),
-        ...(routed ? { routing: { model: routed.resolvedModel, reasoning: routed.resolvedReasoning } } : {}),
-      });
+      const invoke = (resumeSessionId: string | null) =>
+        slot.runner.run({
+          prompt: task,
+          workingDirectory: cwd,
+          timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
+          runId,
+          iteration,
+          ...(resumeSessionId ? { resumeSessionId } : {}),
+          ...(routed
+            ? { routing: { model: routed.resolvedModel, reasoning: routed.resolvedReasoning } }
+            : {}),
+        });
+
+      let result = await invoke(previousSession?.provider_session_id ?? null);
+
+      // A session the tool no longer has is not a failed delegation - it is a
+      // stale id. Sessions expire (Claude Code prunes them after 30 days by
+      // default) and a person can clear them, so an id recorded weeks ago can
+      // simply be gone. Forget it and do the same delegation once more with a
+      // fresh session, rather than failing a run over bookkeeping.
+      if (previousSession && sessionMissing(result)) {
+        this.database.agentSessions.forget(input.sessionId, slot.accountId!);
+        this.step(runId, iteration, 'worker', 'session-expired', `${slot.label}: sessão anterior expirou`, {
+          workerId: slot.id,
+        });
+        result = await invoke(null);
+      }
 
       // The id the tool reported for the session it just ran, so the next
       // delegation to this same connection continues it instead of meeting
@@ -1681,6 +1699,23 @@ export function usageView(budget: BudgetLedger): {
     costUsd: totals.costUsd > 0 ? totals.costUsd : null,
     unpriced: totals.unpricedInvocations,
   };
+}
+
+/**
+ * True when the tool says the session we asked it to continue is gone.
+ *
+ * Narrow on purpose. This must not swallow a real failure into a silent
+ * retry, so it matches the tool's own wording for this one case - Claude Code
+ * prints `No conversation found with session ID: <id>` - and nothing broader.
+ * Anything else is reported as the failure it is.
+ */
+export function sessionMissing(result: AgentResult): boolean {
+  if (result.exitCode === 0) return false;
+  const said = `${result.stderr}\n${result.stdout}`;
+  return (
+    /no conversation found with session id/i.test(said) ||
+    /session .{0,80}(not found|does not exist)/i.test(said)
+  );
 }
 
 /** A cheap fingerprint of the working tree, to tell one attempt's outcome from the next. */
