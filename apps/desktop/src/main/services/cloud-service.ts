@@ -215,6 +215,17 @@ export class CloudService {
       this.stepOnce(localRunId, event.seq, 'error', String(payload.reason ?? ''));
       return;
     }
+    if (event.kind === 'run.publish') {
+      // Where the work went. This is the one line that tells a person their
+      // run produced something durable rather than something that lived and
+      // died inside a container they never saw.
+      const sentence = publishSentence(payload);
+      this.stepOnce(localRunId, event.seq, 'publish', sentence);
+      if (sessionId) {
+        this.messageOnce(sessionId, localRunId, event.seq, { author: 'system', text: sentence });
+      }
+      return;
+    }
     if (event.kind === 'orchestration.run:progress') {
       const stage = String(payload.stage ?? '');
       const label = String(payload.label ?? '');
@@ -377,6 +388,31 @@ function phraseFor(payload: Record<string, unknown>): string {
   const phase = String(payload.phase ?? '');
   const detail = typeof payload.detail === 'string' && payload.detail ? ` ${payload.detail}` : '';
   return `${PHASE_PHRASE[phase] ?? phase}${detail}`;
+}
+
+/**
+ * What happened to the run's work, in one sentence.
+ *
+ * A branch name and a pull request URL are the two things a person needs from
+ * a cloud run, and they are useless as a JSON blob on a step.
+ */
+function publishSentence(payload: Record<string, unknown>): string {
+  if (payload.published !== true) {
+    const reason = typeof payload.reason === 'string' && payload.reason ? payload.reason : 'nada foi publicado';
+    return `Resultado não publicado: ${reason}.`;
+  }
+  const branch = typeof payload.branch === 'string' ? payload.branch : null;
+  const parts = [branch ? `Resultado publicado na branch ${branch}.` : 'Resultado publicado.'];
+  const pullRequest = payload.pullRequest as { number?: unknown; url?: unknown; created?: unknown } | null;
+  if (pullRequest && typeof pullRequest.url === 'string') {
+    const number = typeof pullRequest.number === 'number' ? `#${pullRequest.number}` : 'pull request';
+    parts.push(
+      pullRequest.created === false
+        ? `Pull request ${number} já estava aberto: ${pullRequest.url}`
+        : `Pull request ${number} aberto: ${pullRequest.url}`,
+    );
+  }
+  return parts.join(' ');
 }
 
 /**

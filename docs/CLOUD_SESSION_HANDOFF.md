@@ -34,6 +34,7 @@ real. O que não existe é a prova contra um host de verdade.
 | 8 | Evidência real na timeline de nuvem | `orchestration-service.ts`, `cloud-service.ts` |
 | 9 | Publicação: branch, commit, push e PR opcional | `src/cloud/publish.ts` |
 | 10 | Escolha de publicação na equipe do projeto | `TeamForm.tsx`, migração 8 |
+| 11 | Branch e PR publicados aparecem na conversa | `cloud-service.ts` |
 
 Detalhes e decisões: `CLOUD_ARCHITECTURE_DECISION.md`,
 `CLOUD_SECURITY_AND_COSTS.md`, `CLOUD_IMPLEMENTATION_PLAN.md`.
@@ -141,15 +142,14 @@ Só depois disso `CLOUD_EXECUTION_VERIFIED` pode ser declarado.
 
 ## Próximo passo menor e concreto
 
-**Mostrar a branch e o PR publicados na timeline.** O coordenador já registra
-o evento `run.publish` com branch, commit e o número do pull request, e o
-`CloudService` já grava esse evento como passo. Falta a interface reconhecê-lo
-e mostrar um link clicável em vez do resumo genérico do evento.
+**O teste real na nuvem.** Todos os blocos de código que não dependem de um
+human gate estão feitos, provados por testes e verdes no CI do Windows. O que
+falta é infraestrutura, e isso é seu: host, imagem, GitHub App e chaves de API
+— os quatro gates listados acima.
 
-*Menor passo:* em `apps/desktop/src/renderer/lib/timeline.ts`, tratar um passo
-de fase `run.publish` como uma entrada própria, com a branch e (quando houver)
-a URL do pull request, e abrir a URL por `api.app.openExternal`. Nada nisso
-depende de um human gate.
+*Menor passo concreto, quando os gates estiverem resolvidos:* rodar o roteiro
+da seção anterior uma vez, de ponta a ponta, com um repositório privado seu. É
+esse teste, e só ele, que autoriza declarar `CLOUD_EXECUTION_VERIFIED`.
 
 ## O que não fazer
 

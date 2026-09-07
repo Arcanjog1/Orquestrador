@@ -665,3 +665,62 @@ test('a local project has no publish choice to make', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('the branch and pull request a run produced arrive as something readable', async () => {
+  // A branch name and a pull request URL are the two things a person needs
+  // from a cloud run, and they are useless as a JSON blob on a step.
+  const sides = await twoSides();
+  try {
+    const run = await sides.service.start({ sessionId: sides.sessionId, objective: 'x' });
+    const remoteId = sides.desktop.runs.require(run.id).remote_run_id!;
+
+    sides.store.append(remoteId, 'run.publish', {
+      published: true,
+      branch: 'ai-orchestrator/rr_1234',
+      commit: 'deadbeef',
+      reason: null,
+      pullRequest: { number: 7, url: 'https://github.com/Arcanjog1/Orquestrador/pull/7', created: true },
+    });
+    await sides.service.sync(run.id);
+
+    const message = sides.desktop.chat
+      .listMessages(sides.sessionId)
+      .map((m) => m.body)
+      .find((body) => body.includes('ai-orchestrator/rr_1234'));
+    assert.ok(message, 'the branch never reached the conversation');
+    assert.match(message, /Pull request #7 aberto/);
+    assert.match(message, /https:\/\/github\.com\/Arcanjog1\/Orquestrador\/pull\/7/);
+
+    // A re-sync does not say it twice.
+    const before = sides.desktop.chat.listMessages(sides.sessionId).length;
+    sides.desktop.driver.run('UPDATE runs SET remote_cursor = 0 WHERE id = ?', [run.id]);
+    await sides.service.sync(run.id);
+    assert.equal(sides.desktop.chat.listMessages(sides.sessionId).length, before);
+  } finally {
+    await sides.close();
+  }
+});
+
+test('a run that published nothing says so, with the reason', async () => {
+  const sides = await twoSides();
+  try {
+    const run = await sides.service.start({ sessionId: sides.sessionId, objective: 'x' });
+    const remoteId = sides.desktop.runs.require(run.id).remote_run_id!;
+    sides.store.append(remoteId, 'run.publish', {
+      published: false,
+      branch: null,
+      commit: null,
+      reason: 'nada mudou nesta execução',
+      pullRequest: null,
+    });
+    await sides.service.sync(run.id);
+    const message = sides.desktop.chat
+      .listMessages(sides.sessionId)
+      .map((m) => m.body)
+      .find((body) => body.includes('não publicado'));
+    assert.ok(message, 'the person was left to guess');
+    assert.match(message, /nada mudou/);
+  } finally {
+    await sides.close();
+  }
+});
