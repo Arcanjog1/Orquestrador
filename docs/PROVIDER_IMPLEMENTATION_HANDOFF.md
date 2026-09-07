@@ -10,8 +10,9 @@ Estado ao fim da quarta sessão: a arquitetura de comunicação, inspirada no Bu
 | Branch desta sessão | `claude/ai-orchestrator-buzz-arch-vblrau` |
 | HEAD do início | `2e06ae5` (ponta de `claude/ai-orchestrator-reorientacao-ytlkw0`) |
 | Branch padrão real | `claude/new-session-3am7mo` — **não é `main`, e `main` não existe** |
-| Instalador | [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — `AI-Orchestrator-Setup.exe`, publicado com a CI verde |
-| CI | [run 82](https://github.com/Arcanjog1/Orquestrador/actions/runs/34161117627) — Windows e Linux **verdes** |
+| Instalador | [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f) — `AI-Orchestrator-Setup.exe`, publicado com a CI verde |
+| CI | [run 88](https://github.com/Arcanjog1/Orquestrador/actions/runs/34167861954) — Windows e Linux **verdes** |
+| Instalador anterior | [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — intacto; a tag é por commit |
 
 Sem reset, sem merge, sem force-push, sem apagar branch. Nenhuma release
 anterior foi sobrescrita: a tag é por commit. A branch desta sessão
@@ -116,10 +117,27 @@ Nenhum teste foi removido e o DoneGate não foi afrouxado.
 
 ## O que ficou pendente
 
-**O teste no projeto Replit não foi feito**, e não por esquecimento: não existe
-repositório chamado "Replit" na sua conta, e vários poderiam ser
-(`lucid-pro-ui`, `MyAIBuddy`, `ai-project-lead`, `HUB`). Você pediu para não
-escolher por aproximação, então não escolhi. Falta o link ou a pasta.
+**O teste no projeto Replit não foi feito**, e não por esquecimento.
+
+Procurei o contexto em **86 sessões** (as 50 mais recentes e 36 anteriores, até
+26/08). Resultado:
+
+- **nenhuma sessão chamada "Replit"**; a palavra não aparece em nenhum
+  registro — nem título, nem contexto, nem URL;
+- só existem **cinco repositórios** em todas as sessões:
+  `MeuBotao.pushbutton` (41), `ModulacaoAutomatica` (35), `Orquestrador` (10),
+  `AbrirModeladorExterno.pushbutton` (2) e `ai-project-lead` (1).
+
+Duas pistas investigadas e descartadas:
+
+- `civix-1106-peaceful-marble` e `civix-1106-woolly-hamster` — nomes de sessão
+  com cara de projeto gerado; ambas apontam para `ModulacaoAutomatica`;
+- `ai-project-lead` — aparece uma única vez, e não como projeto próprio: foi
+  anexado **junto** com o Orquestrador na sessão *"Integração design Lovable no
+  AI Orchestrator"*. É a fonte de design do **Lovable**, não um projeto Replit.
+
+**Falta o link do repositório ou o caminho da pasta local.** Nenhum projeto do
+usuário foi alterado.
 
 ---
 
@@ -393,7 +411,7 @@ Não existem contas Codex/Claude legítimas no CI, e este ambiente não tem
 Windows. O roteiro:
 
 1. baixar o `AI-Orchestrator-Setup.exe` de
-   [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e)
+   [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f)
    e instalar por cima (o SmartScreen avisa: o build não é assinado);
 2. abrir o aplicativo — a base é migrada no lugar, nada é reautenticado;
 3. Configurações → Contas: confirmar Codex e Claude conectados;
