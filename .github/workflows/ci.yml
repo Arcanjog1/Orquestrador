@@ -180,7 +180,7 @@ jobs:
       # The list is explicit rather than a `claude/` prefix: every agent branch
       # publishing a build would bury the ones anybody actually asked for.
       - name: Name this build
-        if: contains(fromJSON('["claude/lovable-on-latest-core","claude/ai-orchestrator-implementation-y7xw98","claude/ai-orchestrator-reorientacao-ytlkw0"]'), github.ref_name)
+        if: contains(fromJSON('["claude/lovable-on-latest-core","claude/ai-orchestrator-implementation-y7xw98","claude/ai-orchestrator-reorientacao-ytlkw0","claude/ai-orchestrator-buzz-arch-vblrau"]'), github.ref_name)
         id: build
         shell: pwsh
         run: |
@@ -189,7 +189,7 @@ jobs:
           "short=$short" >> $env:GITHUB_OUTPUT
 
       - name: Publish this build as a pre-release
-        if: contains(fromJSON('["claude/lovable-on-latest-core","claude/ai-orchestrator-implementation-y7xw98","claude/ai-orchestrator-reorientacao-ytlkw0"]'), github.ref_name)
+        if: contains(fromJSON('["claude/lovable-on-latest-core","claude/ai-orchestrator-implementation-y7xw98","claude/ai-orchestrator-reorientacao-ytlkw0","claude/ai-orchestrator-buzz-arch-vblrau"]'), github.ref_name)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.build.outputs.tag }}
