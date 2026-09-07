@@ -57,6 +57,8 @@ export interface DesktopFixtureOptions {
   secrets?: SecretStore;
   /** HTTP for the provider APIs; a test points it at a scripted transport. */
   providerTransport?: HttpTransport;
+  /** Anything else the orchestration loop takes: leases, sweep interval. */
+  orchestration?: { messageLeaseMs?: number; sweepIntervalMs?: number };
 }
 
 /**
@@ -101,6 +103,7 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
       ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {}),
       ...(options.allowNoChanges !== undefined ? { allowNoChanges: options.allowNoChanges } : {}),
       ...(options.environments ? { environments: options.environments } : {}),
+      ...(options.orchestration ?? {}),
     },
     ...(options.github ? { github: options.github } : {}),
     ...(options.secrets ? { secrets: options.secrets } : {}),

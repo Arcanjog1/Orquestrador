@@ -148,6 +148,8 @@ export interface OrchestrationOptions {
    * 20 minutes.
    */
   messageLeaseMs?: number;
+  /** How often expired leases are reclaimed while a run is going. */
+  sweepIntervalMs?: number;
   maxIterations?: number;
   agentTimeoutMs?: number;
   verificationTimeoutMs?: number;
@@ -219,6 +221,15 @@ const DEFAULTS = {
   maxIterations: 8,
   agentTimeoutMs: 15 * 60_000,
   verificationTimeoutMs: 10 * 60_000,
+  /**
+   * How often expired leases are reclaimed.
+   *
+   * Thirty seconds. The lease itself is twenty minutes - comfortably longer
+   * than `agentTimeoutMs`, so a turn running to its own hard cap returns
+   * normally and is never reclaimed out from under itself. The sweep only has
+   * to be prompt enough that a person notices, not instant.
+   */
+  sweepIntervalMs: 30_000,
 };
 
 /**
@@ -236,6 +247,16 @@ export class OrchestrationService {
   private readonly runners = new Map<string, RunnerPair>();
   /** Environments of in-flight runs, so each is released exactly once. */
   private readonly environments = new Map<string, ExecutionEnvironment>();
+
+  /**
+   * The timer that reclaims expired leases.
+   *
+   * Runs only while something is running: an idle application has nothing to
+   * sweep, and a timer ticking in the background of a window nobody is looking
+   * at is a cost with no benefit. Started when the first run starts, stopped
+   * when the last one ends.
+   */
+  private sweeper: NodeJS.Timeout | null = null;
 
   /**
    * The record of what the agents said to each other.
@@ -412,6 +433,7 @@ export class OrchestrationService {
 
     const controller = new AbortController();
     this.active.set(run.id, controller);
+    this.startSweeping();
 
     void this.execute(run.id, workspace, input.objective, controller)
       .catch((error: unknown) => {
@@ -430,6 +452,7 @@ export class OrchestrationService {
         // of the loop passes through. Hooking each `setStatus` instead would
         // mean eleven call sites and a twelfth one day that forgets.
         this.closeExchange(run.id, session.id);
+        if (this.active.size === 0) this.stopSweeping();
         // Whatever the run cost - a container, a clone, a lease - is given
         // back exactly once, on every path out of the loop.
         const environment = this.environments.get(run.id);
@@ -446,6 +469,9 @@ export class OrchestrationService {
    * the truth is recorded rather than an eternal spinner.
    */
   reconcileInterrupted(): number {
+    // Leases the previous process left behind, reclaimed before anything else
+    // reads them. This is the boot-time half of the same job.
+    this.sweepOnce();
     let count = 0;
     for (const run of this.database.runs.listUnfinished()) {
       if (this.active.has(run.id)) continue;
@@ -1860,6 +1886,68 @@ export class OrchestrationService {
       'satisfied. If it does not, delegate again with what is missing.',
     );
     return lines.join('\n');
+  }
+
+  /**
+   * Reclaims leases that passed their deadline, while anything is running.
+   *
+   * This is what makes "if the worker dies, the application must know" true
+   * rather than merely intended. The loop awaits each delegation, so in the
+   * healthy case the result arrives and the lease is returned; this exists for
+   * the case where it does not - a child that is killed from outside, a
+   * machine that sleeps, a turn that outlives every deadline it was given.
+   *
+   * Without it the reclaim logic would be code that only tests ever ran.
+   */
+  private startSweeping(): void {
+    // Once immediately, and before the guard below.
+    //
+    // The immediate pass matters more than the timer: an orphan left by an
+    // earlier run sits in an application that has gone idle, and an idle
+    // application runs no timer. Waiting for a tick would mean a short run
+    // starting, finishing and stopping the sweeper without ever having swept.
+    //
+    // Unconditional, because the previous run's timer may not have been
+    // cleared yet when the next one starts - and skipping the sweep on that
+    // basis would make whether an orphan is noticed depend on a race.
+    this.sweepOnce();
+    if (this.sweeper) return;
+    const everyMs = this.options.sweepIntervalMs ?? DEFAULTS.sweepIntervalMs;
+    this.sweeper = setInterval(() => this.sweepOnce(), everyMs);
+    // Never hold the process open on account of a timer.
+    this.sweeper.unref?.();
+  }
+
+  private sweepOnce(): void {
+    try {
+      const swept = this.bus.sweep();
+      for (const message of [...swept.requeued, ...swept.dead]) {
+        // Said out loud rather than only recorded: a delegation nobody
+        // answered is exactly the fact a person was previously left to infer
+        // from a window that never changed.
+        this.step(
+          message.runId,
+          message.iteration,
+          'bus',
+          message.status === 'dead' ? 'dead-letter' : 'requeued',
+          message.failureReason ?? 'sem resposta dentro do prazo',
+          { messageType: message.messageType, recipient: message.recipientAgentId },
+        );
+      }
+    } catch {
+      // A sweep that throws must never take the runs down with it.
+    }
+  }
+
+  private stopSweeping(): void {
+    if (!this.sweeper) return;
+    clearInterval(this.sweeper);
+    this.sweeper = null;
+  }
+
+  /** Stops the timer. Called on shutdown, so nothing outlives the window. */
+  dispose(): void {
+    this.stopSweeping();
   }
 
   /**

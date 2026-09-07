@@ -242,6 +242,14 @@ export class AppServices {
       // Where runs execute. Absent means this computer, which is the default
       // for every workspace that has a folder on it.
       ...(explicit.environments ? { environments: explicit.environments } : {}),
+      // How long a delegation may be outstanding, and how often expired ones
+      // are reclaimed. This builder names every option it forwards, so one it
+      // does not name is silently dropped - which is what happened to these
+      // two the first time.
+      ...(explicit.messageLeaseMs !== undefined ? { messageLeaseMs: explicit.messageLeaseMs } : {}),
+      ...(explicit.sweepIntervalMs !== undefined
+        ? { sweepIntervalMs: explicit.sweepIntervalMs }
+        : {}),
       get maxIterations() {
         return explicit.maxIterations ?? setting(SETTING.maxIterations, 1, 50);
       },
@@ -576,6 +584,9 @@ export class AppServices {
   /** Stops everything still running. Called on quit and on test teardown. */
   async shutdown(): Promise<void> {
     this.cloud.stopPolling();
+    // Before the database closes: the sweep reads it, and a tick that fires
+    // against a closed handle would throw on the way out.
+    this.orchestration.dispose();
     await this.processManager.cancelAll();
     this.database.close();
   }

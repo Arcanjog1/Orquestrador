@@ -651,6 +651,112 @@ test('while a worker works, the window is told how long and on what', async () =
   }
 });
 
+test('an expired lease is really reclaimed while the application runs, not only in a unit test', async () => {
+  // The reclaim logic existed and was tested, and was called from nowhere -
+  // so a worker that died silently would still have left the run waiting, and
+  // every test would still have passed. This pins the wiring, not the logic.
+  const orchestrator = new ScriptedProvider(
+    'openai-api',
+    'Codex',
+    [
+      JSON.stringify({
+        action: 'delegate',
+        workerId: 'worker-1',
+        requiresTools: false,
+        task: 'Pense.',
+        acceptanceCriteria: ['pensou'],
+        verificationCommands: [],
+        summary: 'Vou pedir ao Claude.',
+      }),
+      JSON.stringify({
+        action: 'done',
+        acceptanceCriteria: [],
+        verificationCommands: [],
+        satisfiedCriteria: ['pensou'],
+        summary: 'Pronto.',
+      }),
+    ],
+    conversationCapabilities('openai'),
+    'conn-openai',
+    USAGE,
+  );
+  const claude = new ScriptedProvider(
+    'anthropic-api',
+    'Claude Trabalho 1',
+    ['Pensei.'],
+    conversationCapabilities('anthropic'),
+    'conn-claude-1',
+    USAGE,
+  );
+
+  let bound: Array<{ agentId: string; accountId: string | null }> = [];
+  const fixture = createDesktopFixture({
+    createRunners: async () => ({
+      orchestrator,
+      worker: claude,
+      workerAccountId: bound[0]?.accountId ?? null,
+      workers: [
+        {
+          id: 'worker-1',
+          label: 'Claude Trabalho 1',
+          runner: claude,
+          accountId: bound[0]?.accountId ?? null,
+          providerId: 'anthropic',
+          connectionKind: 'api',
+          agentId: bound[0]?.agentId ?? null,
+        },
+      ],
+    }),
+    maxIterations: 4,
+    // A lease shorter than any real turn, and a sweep that ticks fast, so the
+    // wiring is observable without the test waiting twenty minutes.
+    orchestration: { messageLeaseMs: 1, sweepIntervalMs: 20 },
+  });
+
+  try {
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.createConversation', { name: 'Conversa' }),
+    );
+    bound = await bindTeam(fixture, workspace.id, ['Claude Trabalho 1']);
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'c' }),
+    );
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'Pense.' }),
+    );
+    const run = await fixture.services.orchestration.waitFor(sent.run.id);
+
+    // An orphan of the kind a dead worker leaves: leased, never answered.
+    const orphan = fixture.services.orchestration.bus.publish({
+      runId: run.id,
+      conversationId: session.id,
+      iteration: 99,
+      messageType: 'DELEGATION',
+      payload: { task: 'ninguém respondeu' },
+      senderAgentId: 'orchestrator',
+      recipientAgentId: 'worker-1',
+    });
+    fixture.services.orchestration.bus.claim('worker-1');
+    assert.equal(fixture.services.orchestration.bus.find(orphan.message.messageId)?.status, 'leased');
+
+    // A second run starts the sweeper, which is what the wiring is for.
+    const again = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'De novo.' }),
+    );
+    await fixture.services.orchestration.waitFor(again.run.id);
+
+    const deadline = Date.now() + 5_000;
+    let status = fixture.services.orchestration.bus.find(orphan.message.messageId)?.status;
+    while (status === 'leased' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      status = fixture.services.orchestration.bus.find(orphan.message.messageId)?.status;
+    }
+    assert.notEqual(status, 'leased', 'an expired lease must actually be reclaimed at run time');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test('the message events reach the window as the exchange happens', async () => {
   const t = await conversationTeam();
   try {
