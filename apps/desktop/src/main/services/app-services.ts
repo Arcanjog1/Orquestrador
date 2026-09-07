@@ -511,6 +511,29 @@ export class AppServices {
   }
 
   /**
+   * Whether this connection's installed Claude Code can continue a session.
+   *
+   * Answered by the binary's own help page, never assumed: a build without
+   * `--resume` or without `--output-format` simply starts fresh each time,
+   * and the interface says so rather than promising continuity it cannot
+   * deliver.
+   */
+  async supportsSessionResume(connectionId: string | null): Promise<boolean> {
+    const account = connectionId ? this.database.accounts.find(connectionId) : undefined;
+    if (!account || account.connection_kind !== 'cli') return false;
+    try {
+      const adapter = this.claudeAdapterFor(
+        { local_path: '' } as WorkspaceWithAgents,
+        connectionId,
+        null,
+      );
+      return await adapter.supportsResume();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * The API provider for a connection, or null when it is not one.
    *
    * Null covers three cases that must all fall back to the CLI path: there is

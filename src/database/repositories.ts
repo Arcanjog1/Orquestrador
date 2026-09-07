@@ -211,6 +211,90 @@ export class ProviderSecretRepository extends Repository {
   }
 }
 
+/**
+ * The provider's own session, per conversation and per connection.
+ *
+ * Only ids of sessions this application started are ever written here. There
+ * is deliberately no code that enumerates a tool's stored sessions: neither
+ * CLI offers a non-interactive way to list them, and reading their transcript
+ * files directly is documented as liable to break on any release.
+ */
+export interface AgentSessionRecord extends SqlRow {
+  chat_session_id: string;
+  connection_id: string;
+  provider_session_id: string;
+  adapter_id: string;
+  working_directory: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export class AgentSessionRepository extends Repository {
+  /**
+   * The session to continue for this conversation and connection, if any.
+   *
+   * The working directory must match: both tools store sessions per project,
+   * and handing a session from one workspace to a run in another is not
+   * something to do silently.
+   */
+  find(
+    chatSessionId: string,
+    connectionId: string,
+    workingDirectory: string,
+  ): AgentSessionRecord | undefined {
+    const row = this.db.get<AgentSessionRecord>(
+      'SELECT * FROM agent_sessions WHERE chat_session_id = ? AND connection_id = ?',
+      [chatSessionId, connectionId],
+    );
+    if (!row) return undefined;
+    return row.working_directory === workingDirectory ? row : undefined;
+  }
+
+  /** Records the id the tool reported, replacing any earlier one. */
+  remember(input: {
+    chatSessionId: string;
+    connectionId: string;
+    providerSessionId: string;
+    adapterId: string;
+    workingDirectory: string;
+  }): void {
+    const timestamp = now();
+    this.db.run(
+      'INSERT INTO agent_sessions (chat_session_id, connection_id, provider_session_id, adapter_id, working_directory, created_at, updated_at) ' +
+        'VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_session_id, connection_id) DO UPDATE SET ' +
+        'provider_session_id = excluded.provider_session_id, adapter_id = excluded.adapter_id, ' +
+        'working_directory = excluded.working_directory, updated_at = excluded.updated_at',
+      [
+        input.chatSessionId,
+        input.connectionId,
+        input.providerSessionId,
+        input.adapterId,
+        input.workingDirectory,
+        timestamp,
+        timestamp,
+      ],
+    );
+  }
+
+  /** Every session recorded for one conversation. What the details view shows. */
+  listForChatSession(chatSessionId: string): AgentSessionRecord[] {
+    return this.db.all<AgentSessionRecord>(
+      'SELECT * FROM agent_sessions WHERE chat_session_id = ? ORDER BY updated_at DESC',
+      [chatSessionId],
+    );
+  }
+
+  /** Forgets a session, so the next delegation starts a fresh one. */
+  forget(chatSessionId: string, connectionId: string): boolean {
+    return (
+      this.db.run('DELETE FROM agent_sessions WHERE chat_session_id = ? AND connection_id = ?', [
+        chatSessionId,
+        connectionId,
+      ]).changes > 0
+    );
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * Agents
  * ------------------------------------------------------------------ */

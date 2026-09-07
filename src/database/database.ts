@@ -13,6 +13,7 @@ import { DatabaseUnavailableError, type SqlDriver, type SqlRow, type SqlValue } 
 import {
   AccountRepository,
   AgentRepository,
+  AgentSessionRepository,
   ChatRepository,
   CloudWorkspaceRepository,
   ProviderRepository,
@@ -91,6 +92,8 @@ export class Database {
   readonly providers = new ProviderRepository(() => this.driver);
   /** Encrypted API credentials, one row per connection. Never listed with them. */
   readonly providerSecrets = new ProviderSecretRepository(() => this.driver);
+  /** Provider session ids, per conversation and connection. Never shared. */
+  readonly agentSessions = new AgentSessionRepository(() => this.driver);
   readonly accounts = new AccountRepository(() => this.driver);
   readonly agents = new AgentRepository(() => this.driver);
   readonly workspaces = new WorkspaceRepository(() => this.driver);

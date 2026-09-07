@@ -182,6 +182,14 @@ export interface AgentInput {
   env?: Record<string, string | undefined>;
   /** Model and reasoning for this invocation; absent means the adapter's defaults. */
   routing?: InvocationRouting;
+  /**
+   * The provider-side session this invocation should continue.
+   *
+   * Only meaningful for a runner whose tool supports it - `claude -p --resume
+   * <session-id>` is the documented case. Absent means a fresh session, which
+   * is what every invocation was before this field existed.
+   */
+  resumeSessionId?: string | null;
 }
 
 /** How an agent invocation ended. */
@@ -218,6 +226,14 @@ export interface AgentResult {
   failure?: ProviderFailureKind;
   /** Seconds the provider asked us to wait, from its `retry-after`. */
   retryAfterSeconds?: number;
+  /**
+   * The provider's own id for the session this invocation ran in.
+   *
+   * Recorded so the next delegation to the *same* connection can continue it.
+   * Never shared between connections: two accounts' sessions live in two
+   * config directories and are two different rows.
+   */
+  sessionId?: string;
 }
 
 /** Health of an agent CLI, produced by `AgentRunner.healthCheck`. */

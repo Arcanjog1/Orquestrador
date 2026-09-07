@@ -1228,6 +1228,14 @@ export class OrchestrationService {
         { workerId: slot.id, workerLabel: slot.label, ...(planned ? { routing: planned } : {}) },
       );
 
+      // The session this worker already has in this conversation, if any.
+      // Looked up per connection, so one account's session is never handed to
+      // another - and only when the working directory matches, because both
+      // tools store sessions per project.
+      const previousSession = slot.accountId
+        ? this.database.agentSessions.find(input.sessionId, slot.accountId, cwd)
+        : undefined;
+
       const startedAt = new Date().toISOString();
       const result = await slot.runner.run({
         prompt: task,
@@ -1235,8 +1243,22 @@ export class OrchestrationService {
         timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
         runId,
         iteration,
+        ...(previousSession ? { resumeSessionId: previousSession.provider_session_id } : {}),
         ...(routed ? { routing: { model: routed.resolvedModel, reasoning: routed.resolvedReasoning } } : {}),
       });
+
+      // The id the tool reported for the session it just ran, so the next
+      // delegation to this same connection continues it instead of meeting
+      // the codebase again.
+      if (result.sessionId && slot.accountId) {
+        this.database.agentSessions.remember({
+          chatSessionId: input.sessionId,
+          connectionId: slot.accountId,
+          providerSessionId: result.sessionId,
+          adapterId: slot.runner.kind,
+          workingDirectory: cwd,
+        });
+      }
 
       // What was actually sent wins over what was planned: the adapter may
       // have dropped a flag its build does not take.
@@ -1308,6 +1330,9 @@ export class OrchestrationService {
       this.step(runId, iteration, 'worker', result.outcome, task.slice(0, 200), {
         attempt: attempt + 1,
         workerId: slot.id,
+        // Whether this delegation continued a session or started one. The
+        // difference is visible in the record rather than inferred.
+        continuedSession: previousSession ? true : false,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         ...(result.executable ? { executable: result.executable } : {}),

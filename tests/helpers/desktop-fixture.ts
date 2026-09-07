@@ -167,13 +167,25 @@ export class ScriptedAgent implements AgentRunner {
     private readonly script: ReadonlyArray<string | ((input: AgentInput) => string | Promise<string>)>,
   ) {}
 
+  /**
+   * A session id to report back, as a tool that supports resume would.
+   *
+   * Set by a test that wants to exercise continuity; absent means this runner
+   * reports no session, which is what a build without `--resume` does.
+   */
+  sessionId: string | null = null;
+
   async run(input: AgentInput): Promise<AgentResult> {
     this.calls.push(input);
     const step = this.script[Math.min(this.index, this.script.length - 1)];
     this.index += 1;
     const startedAt = new Date().toISOString();
     const stdout = typeof step === 'function' ? await step(input) : (step ?? '');
-    return makeAgentResult({ startedAt, stdout });
+    return makeAgentResult({
+      startedAt,
+      stdout,
+      ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+    });
   }
 
   async cancel(): Promise<void> {}

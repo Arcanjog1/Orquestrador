@@ -18,7 +18,7 @@
 
 import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessRunner } from './adapter-types.js';
 import { makeAgentResult, resolveFixedEffort } from '../core.js';
-import type { WorkerRuntimeCapabilities } from '../core.js';
+import type { InvocationUsage, WorkerRuntimeCapabilities } from '../core.js';
 import {
   describeProbe,
   modelAliases,
@@ -38,6 +38,16 @@ export interface ClaudeAdapterOptions {
   model?: string | null;
   /** Default effort (`--effort`) for invocations that carry no routing. */
   effort?: string | null;
+  /**
+   * The session this worker should continue, when there is one.
+   *
+   * Read at call time rather than fixed at construction, because the id only
+   * exists after the first invocation has answered with it. `claude -p
+   * --resume <session-id>` is the documented way to continue a session
+   * started non-interactively - and it is the *only* way, since sessions
+   * created with `-p` are deliberately left out of the interactive picker.
+   */
+  resumeSessionId?: () => string | null;
 }
 
 export class ClaudeCodeAdapter implements AgentRunner {
@@ -56,7 +66,8 @@ export class ClaudeCodeAdapter implements AgentRunner {
       model: this.options.model ?? null,
       reasoning: this.options.effort ?? null,
     };
-    const plan = await this.buildArgs(executable, input.workingDirectory, routing);
+    const resume = input.resumeSessionId ?? this.options.resumeSessionId?.() ?? null;
+    const plan = await this.buildArgs(executable, input.workingDirectory, routing, resume);
     const env = { ...this.options.buildEnvironment(), ...(input.env ?? {}) };
 
     const controller = new AbortController();
@@ -71,16 +82,24 @@ export class ClaudeCodeAdapter implements AgentRunner {
         timeoutMs: input.timeoutMs,
         signal: controller.signal,
       });
+      // When the build takes `--output-format json`, stdout is a documented
+      // envelope rather than free text: it carries the answer, the session id
+      // to resume next time, and the cost the CLI itself computed. Reading it
+      // is what lets a worker keep its context between delegations instead of
+      // meeting the codebase again on every turn.
+      const envelope = plan.jsonOutput ? readEnvelope(result.stdout) : null;
       return makeAgentResult({
         startedAt,
         outcome: result.outcome,
         exitCode: result.exitCode,
         signal: result.signal,
-        stdout: result.stdout,
+        stdout: envelope?.text ?? result.stdout,
         stderr: result.stderr,
         truncated: result.truncated,
         executable,
         applied: plan.applied,
+        ...(envelope?.sessionId ? { sessionId: envelope.sessionId } : {}),
+        ...(envelope?.usage ? { usage: envelope.usage } : {}),
         ...(result.error ? { error: result.error } : {}),
       });
     } finally {
@@ -168,6 +187,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
     executable: string,
     cwd: string,
     routing: { model: string | null; reasoning: string | null },
+    resumeSessionId: string | null,
   ): Promise<ClaudePlan> {
     const capabilities = await this.readHelp(executable, cwd);
     if (!capabilities.flags.has('--print')) {
@@ -181,6 +201,17 @@ export class ClaudeCodeAdapter implements AgentRunner {
     const args = ['--print'];
     if (capabilities.flags.has('--permission-mode')) {
       args.push('--permission-mode', 'acceptEdits');
+    }
+    // The documented structured envelope. Additive: a build without it keeps
+    // answering as plain text and everything below still works.
+    const jsonOutput = capabilities.flags.has('--output-format');
+    if (jsonOutput) args.push('--output-format', 'json');
+    // Continue where this worker left off, when this conversation has already
+    // produced a session for this account. `--bare` is deliberately never
+    // sent: it does not read the subscription login, and requiring an API key
+    // is exactly the cost this product refuses to impose.
+    if (resumeSessionId && capabilities.flags.has('--resume')) {
+      args.push('--resume', resumeSessionId);
     }
 
     const applied: ClaudePlan['applied'] = { model: null, reasoning: null, fallbackUsed: false, note: null };
@@ -217,13 +248,79 @@ export class ClaudeCodeAdapter implements AgentRunner {
       }
     }
     applied.note = notes.length > 0 ? notes.join('; ') : null;
-    return { args, applied };
+    return { args, applied, jsonOutput };
+  }
+
+  /** True when the installed build can continue a session by id. */
+  async supportsResume(cwd = process.cwd()): Promise<boolean> {
+    const executable = await this.options.resolveExecutable();
+    const capabilities = await this.readHelp(executable, cwd);
+    return capabilities.flags.has('--resume') && capabilities.flags.has('--output-format');
   }
 }
 
 interface ClaudePlan {
   readonly args: string[];
   readonly applied: { model: string | null; reasoning: string | null; fallbackUsed: boolean; note: string | null };
+  /** True when `--output-format json` was sent, so stdout is the envelope. */
+  readonly jsonOutput: boolean;
+}
+
+/**
+ * Reads `--output-format json`.
+ *
+ * Documented fields: `result` (the answer), `session_id`, `total_cost_usd`
+ * and `usage`. The cost is the CLI's own figure, which beats any price table
+ * this application could keep, so it is marked as reported.
+ *
+ * Anything unreadable returns null and the caller falls back to raw stdout -
+ * a build that changed its envelope must not lose the answer.
+ */
+function readEnvelope(
+  stdout: string,
+): { text: string; sessionId: string | null; usage: InvocationUsage | null } | null {
+  const trimmed = stdout.trim();
+  if (!trimmed.startsWith('{')) return null;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const result = parsed.result;
+  const structured = parsed.structured_output;
+  const text =
+    typeof result === 'string'
+      ? result
+      : structured !== undefined
+        ? JSON.stringify(structured)
+        : stdout;
+  const sessionId = typeof parsed.session_id === 'string' ? parsed.session_id : null;
+
+  const raw = (parsed.usage ?? {}) as Record<string, unknown>;
+  const input = numberOrNull(raw.input_tokens);
+  const output = numberOrNull(raw.output_tokens);
+  const cost = numberOrNull(parsed.total_cost_usd);
+  const usage: InvocationUsage | null =
+    input === null && output === null && cost === null
+      ? null
+      : {
+          // The official CLI on the person's own login: the plan pays for it.
+          // A cost figure here is what the run consumed, not a separate bill.
+          billing: 'subscription',
+          inputTokens: input,
+          outputTokens: output,
+          cachedInputTokens: numberOrNull(raw.cache_read_input_tokens),
+          reasoningTokens: null,
+          totalTokens: input === null && output === null ? null : (input ?? 0) + (output ?? 0),
+          costUsd: cost,
+          costReported: cost !== null,
+        };
+  return { text, sessionId, usage };
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 /** Same vocabulary as the Codex side: a failed check is not a verdict. */

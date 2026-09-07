@@ -794,3 +794,182 @@ test('a coding run is still refused when the worker only claims to have changed 
     repo.cleanup();
   }
 });
+
+/* ================================================================== *
+ * Session continuity
+ * ================================================================== */
+
+test('a worker continues its own session between delegations, and never another account\'s', async () => {
+  const orchestrator = new ScriptedAgent('mock-codex', 'Codex', [
+    JSON.stringify({
+      action: 'delegate',
+      workerId: 'worker-1',
+      requiresTools: false,
+      task: 'primeira tarefa',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+    }),
+    JSON.stringify({
+      action: 'delegate',
+      workerId: 'worker-2',
+      requiresTools: false,
+      task: 'tarefa do outro worker',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+    }),
+    JSON.stringify({
+      action: 'delegate',
+      workerId: 'worker-1',
+      requiresTools: false,
+      task: 'segunda tarefa para o primeiro',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+    }),
+    JSON.stringify({
+      action: 'done',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+      summary: 'Pronto, com uma resposta final de tamanho suficiente.',
+    }),
+  ]);
+
+  const one = new ScriptedAgent('mock-claude', 'Claude Trabalho 1', ['ok 1']);
+  one.sessionId = 'session-of-account-one';
+  const two = new ScriptedAgent('mock-claude', 'Claude Trabalho 2', ['ok 2']);
+  two.sessionId = 'session-of-account-two';
+
+  let bound: Array<{ agentId: string; accountId: string | null }> = [];
+  const fixture = createDesktopFixture({
+    createRunners: async () => ({
+      orchestrator,
+      worker: one,
+      workerAccountId: bound[0]?.accountId ?? null,
+      workers: [
+        {
+          id: 'worker-1',
+          label: 'Claude Trabalho 1',
+          runner: one,
+          accountId: bound[0]?.accountId ?? null,
+          providerId: 'anthropic',
+          connectionKind: 'cli',
+          agentId: bound[0]?.agentId ?? null,
+        },
+        {
+          id: 'worker-2',
+          label: 'Claude Trabalho 2',
+          runner: two,
+          accountId: bound[1]?.accountId ?? null,
+          providerId: 'anthropic',
+          connectionKind: 'cli',
+          agentId: bound[1]?.agentId ?? null,
+        },
+      ],
+    }),
+    maxIterations: 5,
+  });
+
+  try {
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.createConversation', { name: 'Conversa' }),
+    );
+    bound = await bindTeam(fixture, workspace.id, ['Claude Trabalho 1', 'Claude Trabalho 2']);
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'x' }),
+    );
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'vai' }),
+    );
+    await fixture.services.orchestration.waitFor(sent.run.id);
+
+    // Worker 1's first call started a session; its second continued that one.
+    assert.equal(one.calls.length, 2);
+    assert.equal(one.calls[0]!.resumeSessionId ?? null, null, 'the first call starts a session');
+    assert.equal(
+      one.calls[1]!.resumeSessionId,
+      'session-of-account-one',
+      'the second call continues the session this worker made',
+    );
+
+    // Worker 2 started its own, and was never handed worker 1's.
+    assert.equal(two.calls.length, 1);
+    assert.equal(two.calls[0]!.resumeSessionId ?? null, null);
+
+    // And the record keeps them apart: one row per connection.
+    const stored = fixture.services.database.agentSessions.listForChatSession(session.id);
+    assert.equal(stored.length, 2);
+    const byConnection = new Map(stored.map((r) => [r.connection_id, r.provider_session_id]));
+    assert.equal(byConnection.get(bound[0]!.accountId!), 'session-of-account-one');
+    assert.equal(byConnection.get(bound[1]!.accountId!), 'session-of-account-two');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('a worker that reports no session simply starts fresh, with nothing promised', async () => {
+  const orchestrator = new ScriptedAgent('mock-codex', 'Codex', [
+    JSON.stringify({
+      action: 'delegate',
+      requiresTools: false,
+      task: 'a',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+    }),
+    JSON.stringify({
+      action: 'delegate',
+      requiresTools: false,
+      task: 'b',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+    }),
+    JSON.stringify({
+      action: 'done',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+      summary: 'Uma resposta final suficientemente longa.',
+    }),
+  ]);
+  // No sessionId: a build without --resume, or one that did not report one.
+  const worker = new ScriptedAgent('mock-claude', 'Claude', ['ok']);
+
+  let bound: Array<{ agentId: string; accountId: string | null }> = [];
+  const fixture = createDesktopFixture({
+    createRunners: async () => ({
+      orchestrator,
+      worker,
+      workerAccountId: bound[0]?.accountId ?? null,
+      workers: [
+        {
+          id: 'worker-1',
+          label: 'Claude',
+          runner: worker,
+          accountId: bound[0]?.accountId ?? null,
+          providerId: 'anthropic',
+          connectionKind: 'cli',
+          agentId: bound[0]?.agentId ?? null,
+        },
+      ],
+    }),
+    maxIterations: 4,
+  });
+  try {
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.createConversation', { name: 'Conversa' }),
+    );
+    bound = await bindTeam(fixture, workspace.id, ['Claude']);
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'x' }),
+    );
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'vai' }),
+    );
+    await fixture.services.orchestration.waitFor(sent.run.id);
+
+    assert.equal(worker.calls.length, 2);
+    for (const call of worker.calls) {
+      assert.equal(call.resumeSessionId ?? null, null, 'nothing is resumed that was never reported');
+    }
+    assert.equal(fixture.services.database.agentSessions.listForChatSession(session.id).length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});

@@ -566,6 +566,45 @@ ALTER TABLE workspaces ADD COLUMN budget_max_tokens INTEGER;
 ALTER TABLE workspaces ADD COLUMN budget_max_cost_usd REAL;
 `,
   },
+  {
+    id: 10,
+    name: 'agent-sessions',
+    sql: `
+-- The provider's own session, per conversation and per connection.
+--
+-- Both official CLIs can continue a session by id ("claude -p --resume <id>",
+-- "codex exec resume <id>"). Keeping the id lets a worker carry what it
+-- learned from one delegation into the next, instead of meeting the codebase
+-- again every turn.
+--
+-- The key is (chat_session, connection) and that is the whole point: two
+-- Claude connections in one conversation get two rows, so Claude Trabalho 1's
+-- session can never be handed to Claude Trabalho 2. Their transcripts already
+-- live in two different CLAUDE_CONFIG_DIRs; this makes the same separation
+-- true of what the application asks for.
+--
+-- What is stored is an identifier the tool gave us for a session the
+-- application itself started. Nothing here reads another program's storage,
+-- and nothing parses a transcript file: that format is internal to the tool
+-- and documented as liable to change on any release.
+CREATE TABLE agent_sessions (
+  chat_session_id      TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  connection_id        TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  -- The id as the tool reported it.
+  provider_session_id  TEXT NOT NULL,
+  -- Which tool, so a resume is never attempted with the wrong CLI.
+  adapter_id           TEXT NOT NULL,
+  -- The directory the session belongs to. A session started in one workspace
+  -- is not offered for another: the tool stores sessions per project, and
+  -- resuming across them is not something to do behind a person's back.
+  working_directory    TEXT NOT NULL DEFAULT '',
+  created_at           TEXT NOT NULL,
+  updated_at           TEXT NOT NULL,
+  PRIMARY KEY (chat_session_id, connection_id)
+);
+CREATE INDEX idx_agent_sessions_connection ON agent_sessions(connection_id, updated_at DESC);
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;
