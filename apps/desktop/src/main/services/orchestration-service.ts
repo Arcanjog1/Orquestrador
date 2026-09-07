@@ -1849,6 +1849,12 @@ export function failureExplanation(failure: ProviderFailureKind): string {
       return 'The provider asked to wait before the next call.';
     case 'timeout':
       return 'The worker did not answer within the time allowed.';
+    case 'no-activity':
+      return (
+        'The worker was running but produced nothing at all for long enough to be ' +
+        'considered stuck. This says nothing about the difficulty of the task, so do ' +
+        'not answer it by asking for a stronger model.'
+      );
     case 'model-unavailable':
       return 'The model requested is not available to this account.';
     default:

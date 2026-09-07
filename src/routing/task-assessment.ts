@@ -173,6 +173,10 @@ const MECHANICAL_FAILURES: ReadonlySet<string> = new Set([
   'rate-limit',
   'network',
   'timeout',
+  // A worker that went silent is stuck, not out of its depth. Escalating to a
+  // stronger model on silence is the exact reflex the previous session removed
+  // for refused permissions, and it is wrong here for the same reason.
+  'no-activity',
 ]);
 
 /**

@@ -72,6 +72,13 @@ export interface ProcessTrace {
   streamsLingered: boolean;
   /** True when the child was still alive after every stop attempt. */
   survivedTermination: boolean;
+  /**
+   * True when the child was stopped for producing nothing, not for taking too
+   * long. Kept apart so the diagnosis names which deadline was crossed.
+   */
+  idleTimedOut: boolean;
+  /** The last moment the child produced any output. */
+  lastActivityAt: string | null;
   termination: { reason: ProcessOutcome; attempts: TerminationAttempt[] } | null;
 }
 
@@ -85,6 +92,30 @@ export interface RunProcessOptions {
   stdin?: string;
   /** Hard timeout. Omit or pass 0 to disable. */
   timeoutMs?: number;
+  /**
+   * How long the child may produce nothing at all before it is stopped.
+   *
+   * Different from `timeoutMs`, and the difference is the point. A hard
+   * timeout answers "has this taken too long?", which a large, legitimate
+   * piece of work fails; an idle timeout answers "is anything still
+   * happening?", which only a stuck process fails. Any byte on stdout or
+   * stderr resets it.
+   *
+   * This is why the window could sit on "executando automaticamente"
+   * indefinitely: a child that hangs before its hard timeout produced no
+   * output, and nothing was watching for the absence.
+   *
+   * Omit or pass 0 to disable.
+   */
+  idleTimeoutMs?: number;
+  /**
+   * Called on the first byte and then at most once per `idleTimeoutMs / 4`.
+   *
+   * The liveness signal the interface shows: "last activity 3s ago" is a
+   * different fact from "running for 40 minutes", and a person watching a run
+   * needs both.
+   */
+  onActivity?: (at: Date) => void;
   /** How long a graceful stop is given before the tree is force-killed. */
   graceMs?: number;
   /** Output capture cap per stream. Default 10 MiB. */
@@ -234,6 +265,8 @@ export class ProcessManager implements ProcessRunner {
       errorCode: null,
       streamsLingered: false,
       survivedTermination: false,
+      idleTimedOut: false,
+      lastActivityAt: null,
       termination: null,
     };
     const finish = (
@@ -301,6 +334,29 @@ export class ProcessManager implements ProcessRunner {
     let outcome: ProcessOutcome = 'completed';
     let errorMessage: string | undefined;
 
+    // Liveness. `resetIdle` is installed below, once the timer exists; until
+    // then activity is still recorded, which matters because a child can write
+    // before the timers are wired.
+    let resetIdle: (() => void) | null = null;
+    let lastReportedActivity = 0;
+    const activityReportEveryMs = Math.max(250, Math.floor((options.idleTimeoutMs ?? 0) / 4));
+    const noteActivity = (): void => {
+      const at = new Date();
+      trace.lastActivityAt = at.toISOString();
+      resetIdle?.();
+      // Throttled: a chatty stream must not turn into one IPC message per
+      // chunk. The interface needs to know activity is happening, not how
+      // many bytes arrived.
+      if (options.onActivity && at.getTime() - lastReportedActivity >= activityReportEveryMs) {
+        lastReportedActivity = at.getTime();
+        try {
+          options.onActivity(at);
+        } catch {
+          // A watcher that throws must never kill the process it is watching.
+        }
+      }
+    };
+
     if (stdio === 'pipe') {
       child.stdout?.setEncoding('utf8');
       child.stderr?.setEncoding('utf8');
@@ -308,12 +364,14 @@ export class ProcessManager implements ProcessRunner {
         trace.firstStdoutAt ??= new Date().toISOString();
         trace.stdoutBytes += Buffer.byteLength(chunk, 'utf8');
         out.push(chunk);
+        noteActivity();
         options.onStdout?.(chunk);
       });
       child.stderr?.on('data', (chunk: string) => {
         trace.firstStderrAt ??= new Date().toISOString();
         trace.stderrBytes += Buffer.byteLength(chunk, 'utf8');
         err.push(chunk);
+        noteActivity();
         options.onStderr?.(chunk);
       });
     }
@@ -328,6 +386,7 @@ export class ProcessManager implements ProcessRunner {
     }
 
     let timer: NodeJS.Timeout | undefined;
+    let idleTimer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
 
     let lingerTimer: NodeJS.Timeout | undefined;
@@ -387,6 +446,28 @@ export class ProcessManager implements ProcessRunner {
           }, options.timeoutMs);
         }
 
+        // The idle deadline: stopped for saying nothing, not for taking long.
+        // Reported separately from the hard timeout so the diagnosis can name
+        // which one was crossed - "40 minutes of work" and "40 minutes of
+        // silence" call for opposite responses.
+        if (options.idleTimeoutMs && options.idleTimeoutMs > 0) {
+          const idleMs = options.idleTimeoutMs;
+          const fire = (): void => {
+            outcome = 'timeout';
+            trace.idleTimedOut = true;
+            errorMessage =
+              `Process produced no output for ${Math.round(idleMs / 1000)}s` +
+              (trace.lastActivityAt ? ` (last activity ${trace.lastActivityAt}).` : ' and never started.');
+            stop('timeout');
+          };
+          idleTimer = setTimeout(fire, idleMs);
+          resetIdle = (): void => {
+            if (settled) return;
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(fire, idleMs);
+          };
+        }
+
         if (options.signal) {
           onAbort = (): void => {
             if (outcome === 'completed') {
@@ -401,6 +482,8 @@ export class ProcessManager implements ProcessRunner {
     );
 
     if (timer) clearTimeout(timer);
+    if (idleTimer) clearTimeout(idleTimer);
+    resetIdle = null;
     if (lingerTimer) clearTimeout(lingerTimer);
     if (pendingStop) await pendingStop;
     const attempts = this.terminationLog.get(child);

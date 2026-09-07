@@ -354,6 +354,10 @@ function failureLabel(kind: string): string {
     permission: "sem permissão para o que foi pedido",
     "rate-limit": "limite de requisições do provider",
     timeout: "o provider não respondeu a tempo",
+    // Deliberately not the same sentence as `timeout`. "Demorou demais" and
+    // "parou de dar sinal" call for opposite reactions, and telling them apart
+    // is the whole reason this kind exists.
+    "no-activity": "o worker ficou sem dar sinal e foi interrompido",
     network: "não foi possível falar com o provider",
     "invalid-request": "o provider recusou o formato da chamada",
     "model-unavailable": "modelo indisponível para esta conta",

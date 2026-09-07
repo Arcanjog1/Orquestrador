@@ -1128,3 +1128,222 @@ test('an envelope this build does not produce falls back to raw stdout rather th
   assert.equal(result.stdout, 'texto simples, não JSON');
   assert.equal(result.sessionId, undefined);
 });
+
+/* ------------------------------------------------------------------ *
+ * Streaming, and what it must not change
+ * ------------------------------------------------------------------ */
+
+/**
+ * A build that offers `stream-json`.
+ *
+ * `--output-format` names its possible values the way the real help page does,
+ * because that listing is exactly what the adapter reads before deciding to
+ * stream. A build that does not name `stream-json` must not be sent it.
+ */
+const CLAUDE_HELP_STREAMING = `Usage: claude [options] [prompt]
+
+Options:
+  -p, --print                       Print response and exit
+      --permission-mode <mode>      Permission mode
+      --output-format <format>      Output format [possible values: text, json, stream-json]
+      --verbose                     Show verbose output
+      --resume <sessionId>          Resume a session
+      --version                     Output the version number
+`;
+
+/** The same build, without a streaming format on offer. */
+const CLAUDE_HELP_JSON_ONLY = `Usage: claude [options] [prompt]
+
+Options:
+  -p, --print                       Print response and exit
+      --output-format <format>      Output format [possible values: text, json]
+      --version                     Output the version number
+`;
+
+/** The last line of a stream is the same envelope `json` prints on its own. */
+function streamOf(result: Record<string, unknown>, steps: Record<string, unknown>[] = []): string {
+  return [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-1' }),
+    ...steps.map((step) => JSON.stringify(step)),
+    JSON.stringify({ type: 'result', ...result }),
+  ].join('\n');
+}
+
+test('Claude streams the turn when the build offers it, so a long run is observable', async () => {
+  const { manager, calls } = fakeProcessManager({
+    '--help': CLAUDE_HELP_STREAMING,
+  });
+  const stream = streamOf(
+    { subtype: 'success', is_error: false, result: 'pronto', session_id: 'sess-1' },
+    [{ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { path: 'x' } }] } }],
+  );
+  // The scripted manager answers the run, and also feeds the adapter's own
+  // stdout hook - which is how the monitor sees anything at all.
+  const streaming = {
+    ...manager,
+    async run(options: RunProcessOptions): Promise<ProcessResult> {
+      const result = await manager.run(options);
+      if ((options.args ?? []).includes('stream-json')) {
+        options.onStdout?.(stream);
+        return { ...result, stdout: stream };
+      }
+      return result;
+    },
+  } as ProcessManager;
+
+  const adapter = new ClaudeCodeAdapter({
+    processManager: streaming,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+
+  const seen: string[] = [];
+  const result = await adapter.run({
+    prompt: 'crie hello.txt',
+    workingDirectory: '/work',
+    timeoutMs: 60_000,
+    runId: 'run-1',
+    iteration: 1,
+    onActivity: (snapshot) => seen.push(snapshot.currentTool ?? ''),
+  });
+
+  const args = calls.at(-1)!.args ?? [];
+  assert.ok(args.includes('stream-json'), `expected a streamed turn, got ${args.join(' ')}`);
+  assert.ok(args.includes('--verbose'), 'stream-json needs --verbose in print mode');
+  // The envelope still means what it meant: the reader is the same one.
+  assert.equal(result.stdout, 'pronto');
+  assert.equal(result.sessionId, 'sess-1');
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.failure, undefined);
+  // And the run was visible while it happened.
+  assert.ok(seen.includes('Write'), `the tool in flight must reach the interface: ${seen.join(',')}`);
+  assert.equal(result.activity?.currentTool, null, 'the result clears the tool');
+});
+
+test('a streamed failure is still a failure, whatever the exit code was', async () => {
+  const { manager } = fakeProcessManager({ '--help': CLAUDE_HELP_STREAMING });
+  const stream = streamOf({
+    subtype: 'error_during_execution',
+    is_error: true,
+    result: '',
+    session_id: 'sess-2',
+    permission_denials: [{ tool_name: 'Write', tool_input: { path: 'C:/segredo/hello.txt' } }],
+  });
+  const streaming = {
+    ...manager,
+    async run(options: RunProcessOptions): Promise<ProcessResult> {
+      const result = await manager.run(options);
+      return (options.args ?? []).includes('stream-json') ? { ...result, stdout: stream } : result;
+    },
+  } as ProcessManager;
+
+  const adapter = new ClaudeCodeAdapter({
+    processManager: streaming,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+  const result = await adapter.run({
+    prompt: 'crie hello.txt',
+    workingDirectory: '/work',
+    timeoutMs: 60_000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  // The exact trap the previous session closed, re-checked on the new path.
+  assert.equal(result.exitCode, 1, 'an envelope that says it failed is a failure');
+  assert.equal(result.failure, 'tool-permission-denied');
+  assert.deepEqual(result.permissionDenials, ['Write']);
+  assert.ok(!JSON.stringify(result).includes('segredo'), 'tool arguments never leave the adapter');
+});
+
+test('a build without stream-json is left on the buffered envelope, not sent a flag it lacks', async () => {
+  const { manager, calls } = fakeProcessManager({
+    '--help': CLAUDE_HELP_JSON_ONLY,
+    '--print --output-format json': JSON.stringify({
+      subtype: 'success',
+      is_error: false,
+      result: 'pronto',
+    }),
+  });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+  const result = await adapter.run({
+    prompt: 'crie hello.txt',
+    workingDirectory: '/work',
+    timeoutMs: 60_000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  const args = calls.at(-1)!.args ?? [];
+  assert.ok(!args.includes('stream-json'));
+  assert.ok(!args.includes('--verbose'));
+  assert.equal(args[args.indexOf('--output-format') + 1], 'json');
+  assert.equal(result.stdout, 'pronto');
+  // And silence is not capped on a build whose silence is documented
+  // behaviour: an idle limit there would kill healthy runs.
+  assert.equal(calls.at(-1)!.idleTimeoutMs, undefined);
+});
+
+test('a streamed turn carries an idle deadline shorter than its hard timeout', async () => {
+  const { manager, calls } = fakeProcessManager({ '--help': CLAUDE_HELP_STREAMING });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+    idleTimeoutMs: 90_000,
+  });
+  await adapter.run({
+    prompt: 'x',
+    workingDirectory: '/work',
+    timeoutMs: 3_600_000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+  const last = calls.at(-1)!;
+  assert.equal(last.idleTimeoutMs, 90_000);
+  assert.ok(last.idleTimeoutMs! < last.timeoutMs!, 'silence must be caught long before the hard cap');
+});
+
+test('a turn stopped for silence is classified as silence, not as a bad answer', async () => {
+  const { manager } = fakeProcessManager({ '--help': CLAUDE_HELP_STREAMING });
+  const stalling = {
+    ...manager,
+    async run(options: RunProcessOptions): Promise<ProcessResult> {
+      const result = await manager.run(options);
+      if (!(options.args ?? []).includes('stream-json')) return result;
+      // What ProcessManager returns for a child killed by the idle deadline:
+      // some output, then nothing, and no envelope ever written.
+      return {
+        ...result,
+        outcome: 'timeout',
+        exitCode: null,
+        stdout: JSON.stringify({ type: 'system', subtype: 'init' }),
+        error: 'Process produced no output for 600s',
+        trace: { idleTimedOut: true, lastActivityAt: new Date().toISOString() },
+      } as ProcessResult;
+    },
+  } as ProcessManager;
+
+  const adapter = new ClaudeCodeAdapter({
+    processManager: stalling,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+  const result = await adapter.run({
+    prompt: 'x',
+    workingDirectory: '/work',
+    timeoutMs: 3_600_000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  assert.equal(result.failure, 'no-activity');
+  // Said in words, on the screen the person actually opens.
+  assert.match(result.stderr, /sem produzir nenhuma saída/);
+  assert.match(result.stderr, /modelo mais forte não destrava/);
+});

@@ -18,6 +18,7 @@
 
 import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessRunner } from './adapter-types.js';
 import { makeAgentResult, resolveFixedEffort } from '../core.js';
+import { ActivityMonitor } from '../../../../../src/agents/activity-monitor.js';
 import type { InvocationUsage, ProviderFailureKind, WorkerRuntimeCapabilities } from '../core.js';
 import {
   describeProbe,
@@ -38,6 +39,13 @@ export interface ClaudeAdapterOptions {
   model?: string | null;
   /** Default effort (`--effort`) for invocations that carry no routing. */
   effort?: string | null;
+  /**
+   * How long a streamed turn may say nothing before it is stopped.
+   *
+   * Only applied when the build can stream; see `run`. Omitted means
+   * `DEFAULT_IDLE_TIMEOUT_MS`.
+   */
+  idleTimeoutMs?: number;
   /**
    * The session this worker should continue, when there is one.
    *
@@ -72,6 +80,20 @@ export class ClaudeCodeAdapter implements AgentRunner {
 
     const controller = new AbortController();
     this.controllers.add(controller);
+
+    // What this invocation is doing, as it does it.
+    //
+    // The reason this exists: with `--output-format json` the CLI says nothing
+    // until it is finished, so a turn that hung and a turn that was working
+    // looked identical from here - for as long as the hard timeout allowed.
+    // `stream-json` makes each step observable, and the monitor turns those
+    // steps into "running for 4m, tool: Write" instead of silence.
+    const idleTimeoutMs = input.idleTimeoutMs ?? this.options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+    const monitor = new ActivityMonitor(new Date(startedAt), {
+      idleTimeoutMs,
+      ...(input.onActivity ? { onChange: input.onActivity } : {}),
+    });
+
     try {
       const result = await this.options.processManager.run({
         command: executable,
@@ -80,14 +102,24 @@ export class ClaudeCodeAdapter implements AgentRunner {
         stdin: input.prompt,
         env,
         timeoutMs: input.timeoutMs,
+        // Silence has its own deadline, shorter than the hard one. A build
+        // that cannot stream is left on the hard timeout alone: capping
+        // silence when silence is the documented behaviour would kill healthy
+        // runs, which would be worse than the problem being fixed.
+        ...(plan.streaming && idleTimeoutMs > 0 ? { idleTimeoutMs } : {}),
         signal: controller.signal,
+        onStdout: (chunk) => monitor.observe(chunk),
       });
       // When the build takes `--output-format json`, stdout is a documented
       // envelope rather than free text: it carries the answer, the session id
       // to resume next time, and the cost the CLI itself computed. Reading it
       // is what lets a worker keep its context between delegations instead of
       // meeting the codebase again on every turn.
-      const envelope = plan.jsonOutput ? readEnvelope(result.stdout) : null;
+      const envelope = plan.streaming
+        ? readStreamEnvelope(result.stdout)
+        : plan.jsonOutput
+          ? readEnvelope(result.stdout)
+          : null;
 
       // The envelope reports a failure *inside* a run that exited 0.
       //
@@ -99,9 +131,17 @@ export class ClaudeCodeAdapter implements AgentRunner {
       // progress and answered by escalating the model. No model can fix a
       // refused permission, so the run escalated to the top and stopped with
       // nobody ever seeing the actual cause.
-      const failure = envelope ? classifyEnvelope(envelope) : null;
+      // A run stopped for producing nothing is its own diagnosis, and it
+      // outranks whatever the (absent or partial) envelope says: there is no
+      // envelope when the CLI never got to write one.
+      const stalled = result.trace?.idleTimedOut === true;
+      const failure: ProviderFailureKind | null = stalled
+        ? 'no-activity'
+        : envelope
+          ? classifyEnvelope(envelope)
+          : null;
       const denials = envelope?.permissionDenials ?? [];
-      const stderr = [result.stderr, describeDenials(denials), envelope?.errorSummary ?? '']
+      const stderr = [result.stderr, describeDenials(denials), envelope?.errorSummary ?? '', stallSummary(stalled, idleTimeoutMs, monitor)]
         .filter((part) => part.trim().length > 0)
         .join('\n');
 
@@ -124,6 +164,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
         ...(envelope?.usage ? { usage: envelope.usage } : {}),
         ...(failure ? { failure } : {}),
         ...(denials.length > 0 ? { permissionDenials: denials } : {}),
+        activity: monitor.snapshot(),
         ...(result.error ? { error: result.error } : {}),
       });
     } finally {
@@ -229,7 +270,20 @@ export class ClaudeCodeAdapter implements AgentRunner {
     // The documented structured envelope. Additive: a build without it keeps
     // answering as plain text and everything below still works.
     const jsonOutput = capabilities.flags.has('--output-format');
-    if (jsonOutput) args.push('--output-format', 'json');
+    // Stream the turn when the build offers it.
+    //
+    // `json` buffers everything until the run ends, which is what made a long
+    // execution unobservable: no output meant no way to tell work from a hang.
+    // `stream-json` emits the same final `result` object as its last line, so
+    // nothing downstream changes - the envelope is read from that line instead
+    // of from the whole of stdout - and every step before it becomes visible.
+    // `--verbose` is required alongside it in `--print` mode.
+    const streaming =
+      jsonOutput &&
+      (optionValues(capabilities.help, '--output-format') ?? []).includes('stream-json') &&
+      capabilities.flags.has('--verbose');
+    if (streaming) args.push('--output-format', 'stream-json', '--verbose');
+    else if (jsonOutput) args.push('--output-format', 'json');
     // Continue where this worker left off, when this conversation has already
     // produced a session for this account. `--bare` is deliberately never
     // sent: it does not read the subscription login, and requiring an API key
@@ -272,7 +326,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
       }
     }
     applied.note = notes.length > 0 ? notes.join('; ') : null;
-    return { args, applied, jsonOutput };
+    return { args, applied, jsonOutput, streaming };
   }
 
   /** True when the installed build can continue a session by id. */
@@ -288,6 +342,8 @@ interface ClaudePlan {
   readonly applied: { model: string | null; reasoning: string | null; fallbackUsed: boolean; note: string | null };
   /** True when `--output-format json` was sent, so stdout is the envelope. */
   readonly jsonOutput: boolean;
+  /** True when the turn was streamed, so stdout is line-delimited events. */
+  readonly streaming: boolean;
 }
 
 interface ClaudeEnvelope {
@@ -456,4 +512,58 @@ export class ClaudeCapabilityError extends Error {
     const reason = probe.state === 'OK' ? 'CAPABILITY_UNSUPPORTED' : REASON_OF_PROBE[probe.state];
     return new ClaudeCapabilityError(reason, REASON_MESSAGE[reason], describeProbe(probe), executable);
   }
+}
+
+
+/**
+ * How long a streamed turn may produce nothing before it is called stuck.
+ *
+ * Ten minutes. Long enough that a genuinely slow tool - a large install, a
+ * full test suite - is never mistaken for a hang, and short enough that a
+ * person is not left watching a dead window for the length of the hard
+ * timeout. Buzz's harness defaults to a comparable figure (620s) for the same
+ * job, which is some evidence the order of magnitude is right.
+ */
+export const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Reads `--output-format stream-json`.
+ *
+ * The stream is line-delimited JSON and its **last** `result` object is the
+ * same envelope `--output-format json` would have printed on its own. So this
+ * finds that line and hands it to the very same reader: one parser, one set of
+ * rules about `is_error` and `permission_denials`, and no second place for the
+ * envelope's meaning to drift.
+ *
+ * A stream that ends without a result object - the process was killed, the
+ * build changed its format - returns null, and the caller falls back to raw
+ * stdout. Losing the output would be worse than not labelling it.
+ */
+export function readStreamEnvelope(stdout: string): ClaudeEnvelope | null {
+  const lines = stdout.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!.trim();
+    if (!line.startsWith('{')) continue;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (parsed.type !== 'result') continue;
+    return readEnvelope(line);
+  }
+  return null;
+}
+
+/** The stall, in the words the details screen shows. Empty when there was none. */
+function stallSummary(stalled: boolean, idleTimeoutMs: number, monitor: ActivityMonitor): string {
+  if (!stalled) return '';
+  const snapshot = monitor.snapshot();
+  const seconds = Math.round(idleTimeoutMs / 1000);
+  const doing = snapshot.currentTool ? ` A última coisa que fez foi usar ${snapshot.currentTool}.` : '';
+  return (
+    `O worker ficou ${seconds}s sem produzir nenhuma saída e foi interrompido.` +
+    `${doing} Isso não é falta de capacidade: um modelo mais forte não destrava um processo parado.`
+  );
 }

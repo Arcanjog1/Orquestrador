@@ -605,6 +605,8 @@ export async function rawSpawn(options: {
     errorCode: null,
     streamsLingered: false,
     survivedTermination: false,
+    idleTimedOut: false,
+    lastActivityAt: null,
     termination: null,
   };
   const base = (partial: Partial<ProcessResult>): ProcessResult => ({

@@ -146,6 +146,8 @@ function fakeResult(partial: Partial<ProcessResult>, trace: Partial<ProcessTrace
       errorCode: null,
       streamsLingered: false,
       survivedTermination: false,
+      idleTimedOut: false,
+      lastActivityAt: null,
       termination: null,
       ...trace,
     },

@@ -68,7 +68,15 @@ export type ProviderFailureKind =
   /** The workspace could not be used: missing, not a folder, not writable. */
   | 'workspace-invalid'
   /** The program could not observe the workspace, so it cannot say what changed. */
-  | 'evidence-unavailable';
+  | 'evidence-unavailable'
+  /**
+   * The agent was alive but produced nothing for long enough to call it stuck.
+   *
+   * Distinct from `timeout`, which is "this took longer than allowed". This one
+   * is "nothing happened at all", and it is the one the person actually hit:
+   * the window sat on "executando automaticamente" because silence had no name.
+   */
+  | 'no-activity';
 
 /**
  * What one invocation consumed.
@@ -192,6 +200,24 @@ export interface AgentInput {
   workingDirectory: string;
   /** Hard timeout for this invocation. */
   timeoutMs: number;
+  /**
+   * How long this invocation may produce nothing before it is stopped.
+   *
+   * Separate from `timeoutMs` on purpose. A large refactor legitimately takes
+   * a long time; no healthy agent goes silent for ten minutes. Conflating the
+   * two is what let a hung child look exactly like a busy one.
+   *
+   * Omitted means the adapter's default; 0 disables it.
+   */
+  idleTimeoutMs?: number;
+  /**
+   * Called as the agent does things, for the interface to show.
+   *
+   * Ephemeral by design: this is the streaming channel, not the durable one.
+   * Nothing on it is a record of what happened - that is what the message bus
+   * and the invocation row are for.
+   */
+  onActivity?: (snapshot: import('../agents/activity-monitor.js').ActivitySnapshot) => void;
   /** Run/iteration labels, used only for logging and artifact naming. */
   runId: string;
   iteration: number;
@@ -224,6 +250,14 @@ export interface AgentResult {
   finishedAt: string;
   /** True when stdout/stderr were truncated because of the capture cap. */
   truncated: boolean;
+  /**
+   * What the agent was observed doing, and when it last did anything.
+   *
+   * Present only for adapters that can see inside a turn. Absent is a real
+   * answer - "this runtime does not report progress" - and is never rendered
+   * as "idle", which would be a claim the application cannot support.
+   */
+  activity?: import('../agents/activity-monitor.js').ActivitySnapshot;
   /** Human-readable failure description when `outcome !== 'completed'`. */
   error?: string;
   /** The executable that ran, so a failure names the binary it came from. */
