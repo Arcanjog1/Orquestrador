@@ -107,7 +107,19 @@ export class GitHubError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    readonly kind: 'auth' | 'network' | 'denied' | 'expired' | 'api' | 'config' = 'api',
+    readonly kind:
+      | 'auth'
+      | 'network'
+      | 'denied'
+      | 'expired'
+      | 'api'
+      | 'config'
+      // Added for reading repositories, where the interface has to tell these
+      // apart: a wrong address is a typo to fix, an exhausted quota is a wait
+      // (or a login), and a refusal is neither.
+      | 'not-found'
+      | 'rate-limit'
+      | 'forbidden' = 'api',
     /**
      * What came back, for "Detalhes": HTTP status, content type, the error
      * code and description, a short excerpt of the body. Never a device

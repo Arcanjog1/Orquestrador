@@ -165,6 +165,28 @@ export class IpcRouter {
     );
     this.handlers.set('agents.list', () => s.agents.list());
     this.handlers.set('agents.status', () => s.agents.status());
+    this.handlers.set('repository.analyse', async (payload) => {
+      const snapshot = await s.repositoryAnalysis.read((payload as { url: string }).url);
+      // The content stays in the main process: the renderer needs to know
+      // *what* was read, and the bytes belong in the supervisor's prompt.
+      return {
+        fullName: snapshot.fullName,
+        description: snapshot.description,
+        primaryLanguage: snapshot.primaryLanguage,
+        isPrivate: snapshot.isPrivate,
+        defaultBranch: snapshot.defaultBranch,
+        ref: snapshot.ref,
+        commitSha: snapshot.commitSha,
+        fileCount: snapshot.paths.length,
+        treeTruncated: snapshot.treeTruncated,
+        filesRead: snapshot.filesRead.map((file) => ({
+          path: file.path,
+          bytes: file.bytes,
+          truncated: file.truncated,
+        })),
+        readAt: snapshot.readAt,
+      };
+    });
 
     this.handlers.set('workspace.list', () => s.workspaces.listWithBranches());
     this.handlers.set('workspace.selectFolder', async () => ({

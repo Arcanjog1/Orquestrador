@@ -301,6 +301,24 @@ export class GitHubService {
     }
   }
 
+  /**
+   * The token when GitHub is connected, and null when it is not.
+   *
+   * For reads that work without one. A public repository must never be made
+   * to ask for a login, so "not connected" is an ordinary answer here rather
+   * than the error `accessToken` raises for operations that genuinely need a
+   * credential.
+   */
+  async accessTokenIfConnected(): Promise<string | null> {
+    if (!this.storedToken()) return null;
+    try {
+      return await this.accessToken();
+    } catch {
+      // A refresh that failed is not a reason to abandon an anonymous read.
+      return null;
+    }
+  }
+
   private async accessToken(): Promise<string> {
     const stored = this.storedToken();
     if (!stored) throw new GitHubServiceError('Conecte o GitHub em Contas e integrações.', 'GITHUB_NOT_CONNECTED');

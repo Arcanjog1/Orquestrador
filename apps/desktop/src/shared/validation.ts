@@ -395,6 +395,10 @@ export const REQUEST_VALIDATORS: {
   'agents.list': noArgs,
   'agents.status': noArgs,
 
+  // A URL, not a path: bounded, and the reader refuses anything that is not a
+  // GitHub repository before a single request is made.
+  'repository.analyse': obj({ url: str({ min: 1, max: 500 }) }),
+
   'workspace.list': noArgs,
   'workspace.selectFolder': noArgs,
   'workspace.openProject': obj({ localPath: absolutePath() }),

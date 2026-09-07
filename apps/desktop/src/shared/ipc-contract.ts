@@ -53,6 +53,8 @@ export const REQUEST_CHANNELS = [
   'agents.list',
   'agents.status',
 
+  'repository.analyse',
+
   'workspace.list',
   'workspace.selectFolder',
   'workspace.openProject',
@@ -238,6 +240,29 @@ export interface OpenFolderView {
   readonly workspace: WorkspaceView;
   readonly projectId: string;
   readonly created: boolean;
+}
+
+/**
+ * What the application read from a repository, as the screen shows it.
+ *
+ * `filesRead` is the part that matters: an analysis that names no file is an
+ * analysis of the model's memory, and this path exists precisely so that it is
+ * not. The content itself does not cross the bridge - it goes into the
+ * supervisor's prompt in the main process, and the renderer only needs to know
+ * what was read.
+ */
+export interface RepositoryAnalysisView {
+  readonly fullName: string;
+  readonly description: string | null;
+  readonly primaryLanguage: string | null;
+  readonly isPrivate: boolean;
+  readonly defaultBranch: string;
+  readonly ref: string;
+  readonly commitSha: string;
+  readonly fileCount: number;
+  readonly treeTruncated: boolean;
+  readonly filesRead: ReadonlyArray<{ readonly path: string; readonly bytes: number; readonly truncated: boolean }>;
+  readonly readAt: string;
 }
 
 export interface AgentView {
@@ -855,6 +880,14 @@ export interface IpcMap {
 
   'agents.list': { request: void; response: readonly AgentView[] };
   'agents.status': { request: void; response: readonly AgentStatusView[] };
+
+  /**
+   * Reads a public GitHub repository so it can be analysed.
+   *
+   * Read-only and remote: nothing is cloned, nothing is written, and no write
+   * scope is asked for. A public repository needs no login.
+   */
+  'repository.analyse': { request: { url: string }; response: RepositoryAnalysisView };
 
   'workspace.list': { request: void; response: readonly WorkspaceView[] };
   'workspace.selectFolder': { request: void; response: { path: string | null } };

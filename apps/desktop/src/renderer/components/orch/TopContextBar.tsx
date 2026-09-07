@@ -297,6 +297,22 @@ export function TopContextBar({
           <button data-testid="project-chip">
             <Chip>
               <span className="truncate">{workspace?.name ?? "Nenhum projeto"}</span>
+              {/* The folder, next to the name.
+                  A project's name is editable and never touches the disk, so
+                  the name alone cannot answer "which folder am I about to
+                  change?" - and that is the question worth answering before a
+                  worker writes a file. Only the last two segments: the whole
+                  path would push everything else off the bar, and the tail is
+                  what distinguishes two folders that share a name. */}
+              {workspace?.localPath ? (
+                <span
+                  className="truncate font-mono text-[11px] text-muted-foreground"
+                  title={workspace.localPath}
+                  data-testid="project-chip-path"
+                >
+                  {tailOf(workspace.localPath)}
+                </span>
+              ) : null}
               <ChevronDown className="size-3 text-muted-foreground" />
             </Chip>
           </button>
@@ -523,4 +539,16 @@ export function TopContextBar({
       </div>
     </div>
   );
+}
+
+
+/**
+ * The tail of a path: the last two segments, which is what tells two folders
+ * apart without spending the whole bar on a path nobody reads in full. The
+ * complete path is the element's `title`.
+ */
+function tailOf(localPath: string): string {
+  const segments = localPath.split(/[\\/]/).filter((part) => part.length > 0);
+  if (segments.length <= 2) return localPath;
+  return `…${localPath.includes('\\') ? '\\' : '/'}${segments.slice(-2).join(localPath.includes('\\') ? '\\' : '/')}`;
 }

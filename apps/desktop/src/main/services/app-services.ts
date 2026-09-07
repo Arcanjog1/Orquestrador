@@ -34,6 +34,7 @@ import { AccountService, type UrlOpener } from './account-service.js';
 import { AgentService, workerAgentIdFor } from './agent-service.js';
 import { ChatService } from './chat-service.js';
 import { ProjectService } from './project-service.js';
+import { RepositoryAnalysisService } from './repository-analysis-service.js';
 import {
   OrchestrationService,
   isConversation,
@@ -201,6 +202,10 @@ export class AppServices {
       options.github ?? {},
     );
     this.workspaces.bindGitHub(this.github);
+    // Reads a public repository over the documented API. Uses the GitHub
+    // connection's token when there is one, and works without it when there
+    // is not - a public repository must never be made to ask for a login.
+    this.repositoryAnalysis = new RepositoryAnalysisService({ github: this.github });
     this.cloudAccount = new CloudAccountService(this.database, options.secrets ?? NO_SECRET_STORE);
     this.cloud = new CloudService({
       database: this.database,
@@ -593,6 +598,9 @@ export class AppServices {
    * Kept so the interface can say it rather than have it happen invisibly -
    * particularly the duplicates, which are the case a person has to resolve.
    */
+  /** Reads a public repository so the supervisor can analyse it. */
+  readonly repositoryAnalysis!: RepositoryAnalysisService;
+
   folderReconciliation: {
     keysBackfilled: number;
     projectsCreated: number;
