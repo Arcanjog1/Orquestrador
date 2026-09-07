@@ -22,6 +22,7 @@ import {
 import { LoginDialog } from "@/components/orch/dialogs";
 import { GitHubCard } from "@/components/orch/GitHubCard";
 import { CloudCard } from "@/components/orch/CloudCard";
+import { ConnectionsCard } from "@/components/orch/ConnectionsCard";
 import { ProviderIcon, SectionLabel } from "@/components/orch/primitives";
 import { cn } from "@/lib/utils";
 import { api, messageOf } from "@/lib/api";
@@ -211,6 +212,18 @@ export function SettingsPage({
               </section>
 
               <section className="border-t border-border pt-6">
+                <SectionLabel>Conexões</SectionLabel>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Cada agente da equipe roda como uma destas conexões. Duas conexões podem
+                  ser do mesmo provider com credenciais diferentes — é assim que “Claude
+                  Trabalho 1” e “Claude Trabalho 2” coexistem sem misturar contexto.
+                </p>
+                <div className="mt-3">
+                  <ConnectionsCard onChanged={reload} />
+                </div>
+              </section>
+
+              <section className="border-t border-border pt-6">
                 <SectionLabel>Development</SectionLabel>
                 <div className="mt-3 space-y-3">
                   <GitHubCard status={github} onChanged={reload} />
@@ -267,6 +280,8 @@ export function SettingsPage({
                 onSave={(n) => save(KEY.verificationTimeoutMinutes, String(n))}
                 testid="setting-verification-timeout"
               />
+
+              <BudgetSection workspace={workspace} onSaved={reload} />
             </div>
           )}
 
@@ -674,6 +689,130 @@ function VerificationsTab({ workspace }: { workspace: WorkspaceView | null }) {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * Spending limits for this project's metered connections.
+ *
+ * Empty means no limit, which is what every project has until someone types
+ * one - so nothing here changes behaviour by existing.
+ *
+ * The paragraph under the fields is the important part of this component. A
+ * limit set here refuses the application's *next* call; it cannot make a
+ * provider refuse one. Saying otherwise would be the most expensive kind of
+ * wrong, so it is said plainly, next to the field it is about.
+ */
+function BudgetSection({
+  workspace,
+  onSaved,
+}: {
+  workspace: WorkspaceView | null;
+  onSaved: () => void;
+}) {
+  const [draft, setDraft] = useState({ invocations: "", tokens: "", cost: "" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft({
+      invocations: workspace?.budget?.maxInvocations?.toString() ?? "",
+      tokens: workspace?.budget?.maxTokens?.toString() ?? "",
+      cost: workspace?.budget?.maxCostUsd?.toString() ?? "",
+    });
+  }, [workspace?.id, workspace?.budget]);
+
+  if (!workspace) {
+    return (
+      <p className="border-t border-border pt-6 text-xs text-muted-foreground">
+        Abra um projeto para configurar os limites de gasto dele.
+      </p>
+    );
+  }
+
+  const parse = (value: string): number | null => {
+    const trimmed = value.trim();
+    if (trimmed === "") return null;
+    const n = Number(trimmed);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  const submit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.workspace.setBudget({
+        workspaceId: workspace.id,
+        maxInvocations: parse(draft.invocations),
+        maxTokens: parse(draft.tokens),
+        maxCostUsd: parse(draft.cost),
+      });
+      onSaved();
+    } catch (e) {
+      setError(messageOf(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="border-t border-border pt-6" data-testid="budget-section">
+      <SectionLabel>Limites de gasto — {workspace.name}</SectionLabel>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Valem para conexões de API, que têm cobrança por uso. Vazio significa sem limite.
+        Chamadas feitas pela ferramenta oficial, na sua assinatura, não entram no limite em
+        dólares.
+      </p>
+      <div className="mt-3 grid grid-cols-3 gap-3">
+        <label className="block space-y-1.5">
+          <span className="text-xs text-muted-foreground">Chamadas por execução</span>
+          <Input
+            value={draft.invocations}
+            inputMode="numeric"
+            placeholder="sem limite"
+            onChange={(e) => setDraft((p) => ({ ...p, invocations: e.target.value }))}
+            data-testid="budget-invocations"
+          />
+        </label>
+        <label className="block space-y-1.5">
+          <span className="text-xs text-muted-foreground">Tokens por execução</span>
+          <Input
+            value={draft.tokens}
+            inputMode="numeric"
+            placeholder="sem limite"
+            onChange={(e) => setDraft((p) => ({ ...p, tokens: e.target.value }))}
+            data-testid="budget-tokens"
+          />
+        </label>
+        <label className="block space-y-1.5">
+          <span className="text-xs text-muted-foreground">Gasto por execução (US$)</span>
+          <Input
+            value={draft.cost}
+            inputMode="decimal"
+            placeholder="sem limite"
+            onChange={(e) => setDraft((p) => ({ ...p, cost: e.target.value }))}
+            data-testid="budget-cost"
+          />
+        </label>
+      </div>
+      <p className="mt-3 text-xs text-muted-foreground">
+        <strong className="text-foreground/85">Importante:</strong> este limite interrompe o
+        aplicativo — ele <strong className="text-foreground/85">não é um teto cobrado pelo
+        provider</strong>. Um teto financeiro de verdade se configura no painel da sua conta
+        OpenAI ou Anthropic. O gasto mostrado aqui é uma estimativa; quando o provider não
+        informa o custo, a execução mostra “não informado”, nunca zero.
+      </p>
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+      <Button
+        className="mt-3"
+        size="sm"
+        disabled={saving}
+        onClick={() => void submit()}
+        data-testid="budget-save"
+      >
+        {saving ? <Loader2 className="size-4 animate-spin" /> : "Salvar limites"}
+      </Button>
+    </section>
   );
 }
 

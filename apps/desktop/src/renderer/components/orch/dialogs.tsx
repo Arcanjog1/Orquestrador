@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Cloud, Copy, ExternalLink, HardDrive, Loader2, X } from "lucide-react";
+import { Check, Cloud, Copy, ExternalLink, HardDrive, Loader2, MessageSquare, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -569,14 +569,19 @@ export function AddProjectDialog({
   // Where this project's work will run. In "Nuvem" no folder is asked for and
   // none is used: the repository is cloned inside the remote workspace when a
   // run starts, which is the whole point of the mode.
-  const [environment, setEnvironment] = useState<"local" | "cloud">("local");
+  // "Conversa" is first because it is the shape most people start in: no
+  // folder, no repository, no server, and nothing to set up before writing an
+  // objective. Local and Nuvem are the ones that need somewhere to work.
+  const [environment, setEnvironment] = useState<"conversation" | "local" | "cloud">(
+    "conversation",
+  );
   const [branches, setBranches] = useState<readonly GitHubBranchView[] | null>(null);
   const [branch, setBranch] = useState<string>("");
   const [branchesError, setBranchesError] = useState<string | null>(null);
   const [cloudRepo, setCloudRepo] = useState<GitHubRepositoryView | null>(null);
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState<"folder" | "clone" | "cloud" | null>(null);
+  const [busy, setBusy] = useState<"folder" | "clone" | "cloud" | "conversation" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [repos, setRepos] = useState<readonly GitHubRepositoryView[] | null>(null);
   const [reposError, setReposError] = useState<string | null>(null);
@@ -640,6 +645,21 @@ export function AddProjectDialog({
     .slice(0, 50);
 
   /** Creates the cloud project. No folder is chosen, because there is none. */
+  /** A project with no folder anywhere: the shape the main flow starts in. */
+  const createConversation = async () => {
+    setBusy("conversation");
+    setError(null);
+    try {
+      const created = await api.workspace.createConversation({ name: name.trim() });
+      onAdded(created.id);
+      onOpenChange(false);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const createCloud = async () => {
     if (!cloudRepo || !branch) return;
     setBusy("cloud");
@@ -711,31 +731,70 @@ export function AddProjectDialog({
           <DialogDescription className="text-xs">
             {environment === "cloud"
               ? "O trabalho acontece em um ambiente isolado na nuvem. Nada é baixado para este computador, e a execução continua com o aplicativo fechado."
-              : "O Orquestrador trabalha dentro de uma pasta do seu computador."}
+              : environment === "conversation"
+                ? "Para analisar, planejar, comparar e revisar. Não precisa de pasta, repositório nem servidor: os agentes conversam entre si e devolvem uma resposta."
+                : "O Orquestrador trabalha dentro de uma pasta do seu computador."}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           {/* Where the work runs. Asked first, because it changes everything
               below it - a cloud project never asks for a folder. */}
-          <div className="grid grid-cols-2 gap-2" data-testid="environment-choice">
-            {(["local", "cloud"] as const).map((choice) => (
+          <div className="grid grid-cols-3 gap-2" data-testid="environment-choice">
+            {(["conversation", "local", "cloud"] as const).map((choice) => (
               <button
                 key={choice}
                 onClick={() => setEnvironment(choice)}
                 disabled={busy !== null}
                 className={cn(
-                  "flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs transition-colors",
+                  "flex items-center justify-center gap-1.5 rounded-lg border px-2 py-2 text-xs transition-colors",
                   environment === choice
                     ? "border-primary/50 bg-accent text-foreground"
                     : "border-border text-muted-foreground hover:border-primary/30",
                 )}
                 data-testid={`environment-${choice}`}
               >
-                {choice === "cloud" ? <Cloud className="size-3.5" /> : <HardDrive className="size-3.5" />}
-                {choice === "cloud" ? "Nuvem" : "Local"}
+                {choice === "cloud" ? (
+                  <Cloud className="size-3.5" />
+                ) : choice === "conversation" ? (
+                  <MessageSquare className="size-3.5" />
+                ) : (
+                  <HardDrive className="size-3.5" />
+                )}
+                {choice === "cloud" ? "Nuvem" : choice === "conversation" ? "Conversa" : "Código"}
               </button>
             ))}
           </div>
+
+          {environment === "conversation" && (
+            <div className="space-y-3" data-testid="conversation-project">
+              <label className="block space-y-1.5">
+                <span className="text-xs text-muted-foreground">Nome do projeto</span>
+                <Input
+                  value={name}
+                  autoFocus
+                  placeholder="Arquitetura, Pesquisa, Planejamento…"
+                  onChange={(e) => setName(e.target.value)}
+                  data-testid="conversation-name"
+                />
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Você pode transformar o resultado em código depois, em um projeto de código.
+                Nesta conversa nenhum arquivo é alterado, e o app não vai dizer que alterou.
+              </p>
+              <Button
+                className="w-full"
+                disabled={busy !== null || name.trim().length === 0}
+                onClick={() => void createConversation()}
+                data-testid="conversation-create"
+              >
+                {busy === "conversation" ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  "Criar projeto de conversa"
+                )}
+              </Button>
+            </div>
+          )}
 
           {environment === "cloud" && !cloudConnected && (
             <p className="rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">

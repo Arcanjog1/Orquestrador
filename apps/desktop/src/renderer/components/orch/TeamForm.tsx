@@ -83,6 +83,21 @@ interface MemberDraft {
   selection: WorkerSelection;
 }
 
+/**
+ * The saved workers as drafts, in slot order.
+ *
+ * A project saved before teams could grow has one worker and reads back as a
+ * list of one, so the form does not need to know which era it came from.
+ */
+function workerDraftsOf(
+  workspace: WorkspaceView | null,
+  byProvider: Record<ProviderName, AccountView[]>,
+): MemberDraft[] {
+  const saved = workspace?.team.workers ?? [];
+  if (saved.length > 0) return saved.map((member) => draftOf(member, undefined));
+  return [draftOf(workspace?.team.worker, byProvider.anthropic[0])];
+}
+
 function draftOf(member: TeamMemberView | undefined, fallback: AccountView | undefined): MemberDraft {
   return {
     accountId: member?.accountId ?? fallback?.id ?? "",
@@ -122,10 +137,13 @@ export function TeamForm({
     return out;
   }, [accounts]);
 
-  const [drafts, setDrafts] = useState<Record<TeamMemberView["role"], MemberDraft>>(() => ({
-    ORCHESTRATOR: draftOf(workspace?.team.orchestrator, byProvider.openai[0]),
-    CODING_WORKER: draftOf(workspace?.team.worker, byProvider.anthropic[0]),
-  }));
+  // One orchestrator, and a list of workers. A team of one is the same shape
+  // with one entry, so a project that never adds a second worker looks and
+  // behaves exactly as it did.
+  const [orchestrator, setOrchestrator] = useState<MemberDraft>(() =>
+    draftOf(workspace?.team.orchestrator, byProvider.openai[0]),
+  );
+  const [workers, setWorkers] = useState<MemberDraft[]>(() => workerDraftsOf(workspace, byProvider));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   // The runtime diagnostic, read here when the caller has none: the
@@ -148,17 +166,39 @@ export function TeamForm({
 
   // Re-seed when the project or the accounts change under the form.
   useEffect(() => {
-    setDrafts({
-      ORCHESTRATOR: draftOf(workspace?.team.orchestrator, byProvider.openai[0]),
-      CODING_WORKER: draftOf(workspace?.team.worker, byProvider.anthropic[0]),
-    });
+    setOrchestrator(draftOf(workspace?.team.orchestrator, byProvider.openai[0]));
+    setWorkers(workerDraftsOf(workspace, byProvider));
     setError(null);
   }, [workspace?.id, workspace?.team, byProvider]);
 
-  const complete = drafts.ORCHESTRATOR.accountId !== "" && drafts.CODING_WORKER.accountId !== "";
+  // Two workers on one connection would be one worker with two names: same
+  // credential, same session, same context. The form says so before saving
+  // rather than letting the main process refuse it later.
+  const duplicate = (() => {
+    const used = new Set<string>();
+    for (const worker of workers) {
+      if (!worker.accountId) continue;
+      if (used.has(worker.accountId)) return true;
+      used.add(worker.accountId);
+    }
+    return false;
+  })();
 
-  const update = (role: TeamMemberView["role"], patch: Partial<MemberDraft>) =>
-    setDrafts((prev) => ({ ...prev, [role]: { ...prev[role], ...patch } }));
+  const complete =
+    orchestrator.accountId !== "" &&
+    workers.length > 0 &&
+    workers.every((w) => w.accountId !== "") &&
+    !duplicate;
+
+  const updateWorker = (index: number, patch: Partial<MemberDraft>) =>
+    setWorkers((prev) => prev.map((w, i) => (i === index ? { ...w, ...patch } : w)));
+
+  /** The next unused Anthropic connection, so adding a worker suggests one. */
+  const addWorker = () => {
+    const used = new Set(workers.map((w) => w.accountId));
+    const free = byProvider.anthropic.find((a) => !used.has(a.id));
+    setWorkers((prev) => [...prev, draftOf(undefined, free)]);
+  };
 
   // What happens to the work when a run ends. Only a cloud project asks: a
   // local one has a working copy the person commits and pushes themselves.
@@ -187,8 +227,11 @@ export function TeamForm({
     try {
       await api.workspace.setTeam({
         workspaceId: workspace.id,
-        orchestrator: toInput(drafts.ORCHESTRATOR),
-        worker: toInput(drafts.CODING_WORKER),
+        orchestrator: toInput(orchestrator),
+        // Slot 0 twice: `worker` for callers that read one, `workers` for the
+        // whole team. The main process prefers the list when it is there.
+        worker: toInput(workers[0]!),
+        workers: workers.map(toInput),
       });
       if (workspace.environment === "cloud") {
         await api.workspace.setPublish({ workspaceId: workspace.id, ...publish });
@@ -215,28 +258,76 @@ export function TeamForm({
     return saved !== DEFAULT && !offered.includes(saved) ? [...offered, saved] : offered;
   };
 
+  // One row per team member: the orchestrator, then each worker in order.
+  // Building the list here rather than branching inside the render keeps the
+  // member card one piece of markup for every role.
+  const rows: Array<{
+    key: string;
+    spec: (typeof ROLES)[number];
+    draft: MemberDraft;
+    prefix: string;
+    index: number;
+    update: (patch: Partial<MemberDraft>) => void;
+    remove: (() => void) | null;
+  }> = [
+    {
+      key: "orchestrator",
+      spec: ROLES[0]!,
+      draft: orchestrator,
+      prefix: "orchestrator",
+      index: 0,
+      update: (patch) => setOrchestrator((prev) => ({ ...prev, ...patch })),
+      remove: null,
+    },
+    ...workers.map((draft, index) => ({
+      key: `worker-${index}`,
+      spec: ROLES[1]!,
+      draft,
+      // Slot 0 keeps the original test ids, so every existing assertion about
+      // "the worker" still points at the first one.
+      prefix: index === 0 ? "worker" : `worker-${index + 1}`,
+      index,
+      update: (patch: Partial<MemberDraft>) => updateWorker(index, patch),
+      // The last worker cannot be removed: a team with no worker cannot run.
+      remove: workers.length > 1 ? () => setWorkers((prev) => prev.filter((_, i) => i !== index)) : null,
+    })),
+  ];
+
   return (
     <div className="space-y-3" data-testid="team-form">
-      {ROLES.map((spec) => {
+      {rows.map(({ key, spec, draft, prefix, index, update: updateRow, remove }) => {
         const options = byProvider[spec.provider];
-        const draft = drafts[spec.role];
-        const prefix = spec.role === "ORCHESTRATOR" ? "orchestrator" : "worker";
         const isWorker = spec.role === "CODING_WORKER";
         const manual = draft.selection === "manual";
+        const update = (_role: TeamMemberView["role"], patch: Partial<MemberDraft>) =>
+          updateRow(patch);
         const runtime = known.find((r) => r.runtimeId === (isWorker ? "claude-code" : "codex"));
         return (
           <div
-            key={spec.role}
+            key={key}
             className="rounded-lg border border-border bg-surface-raised p-3"
             data-testid={`team-${prefix}`}
           >
             <div className="flex items-center gap-2">
               <ProviderIcon provider={spec.provider} />
-              <SectionLabel>{spec.title}</SectionLabel>
+              <SectionLabel>
+                {isWorker && workers.length > 1 ? `${spec.title} ${index + 1}` : spec.title}
+              </SectionLabel>
               <span className="ml-auto text-[11px] text-muted-foreground">
                 {spec.providerLabel} · {spec.agentLabel}
                 {runtime?.version ? ` ${runtime.version}` : ""}
               </span>
+              {remove && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 shrink-0 text-[11px] text-muted-foreground"
+                  onClick={remove}
+                  data-testid={`team-${prefix}-remove`}
+                >
+                  Remover
+                </Button>
+              )}
             </div>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <Labeled label="Provider">
@@ -410,6 +501,30 @@ export function TeamForm({
           </div>
         );
       })}
+
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 text-xs"
+          onClick={addWorker}
+          disabled={workers.length >= 8}
+          data-testid="team-add-worker"
+        >
+          + Adicionar worker
+        </Button>
+        <span className="text-[11px] text-muted-foreground">
+          Cada worker é uma conexão diferente. O orquestrador delega a um deles por vez,
+          nomeando qual.
+        </span>
+      </div>
+
+      {duplicate && (
+        <p className="text-xs text-destructive" data-testid="team-duplicate-warning">
+          Dois workers estão usando a mesma conexão. Escolha uma conexão diferente para cada
+          um — a mesma conexão seria o mesmo worker com dois nomes.
+        </p>
+      )}
 
       {workspace?.environment === "cloud" && (
         <div className="rounded-lg border border-border p-3" data-testid="publish-choice">

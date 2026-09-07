@@ -410,10 +410,35 @@ export class WorkspaceService {
    * for its role (`AgentService.sync`), so the account decides the agent. An
    * account of the wrong provider is refused with a sentence that says so.
    */
-  setTeam(workspaceId: string, orchestrator: TeamMemberInput, worker: TeamMemberInput): WorkspaceView {
+  setTeam(
+    workspaceId: string,
+    orchestrator: TeamMemberInput,
+    /**
+     * The workers, in order. A single member keeps the shape every existing
+     * caller uses; several are stored in slots, and slot 0 stays the project's
+     * `worker`, so nothing that reads one worker has to change.
+     */
+    workers: TeamMemberInput | readonly TeamMemberInput[],
+  ): WorkspaceView {
     this.database.workspaces.require(workspaceId);
+    const list = Array.isArray(workers) ? workers : [workers as TeamMemberInput];
+    if (list.length === 0) {
+      throw new WorkspaceError('Escolha pelo menos um worker para este projeto.');
+    }
+    // Two members on the same connection would be one worker wearing two
+    // names: same credential, same session, same context. Refused here rather
+    // than discovered later as a team that mysteriously does not parallelise.
+    const seen = new Set<string>();
+    for (const member of list) {
+      if (seen.has(member.accountId)) {
+        throw new WorkspaceError(
+          'Dois workers desta equipe usam a mesma conexão. Escolha uma conexão diferente para cada um.',
+        );
+      }
+      seen.add(member.accountId);
+    }
     const orchestratorAccount = this.accountForRole('ORCHESTRATOR', orchestrator.accountId);
-    const workerAccount = this.accountForRole('CODING_WORKER', worker.accountId);
+    const workerAccounts = list.map((member) => this.accountForRole('CODING_WORKER', member.accountId));
     // Makes sure the per-account agents exist before they are bound.
     this.agents.sync();
     // The orchestrator is either the CLI's default or a pinned choice; the
@@ -430,15 +455,35 @@ export class WorkspaceService {
         reasoning: orchestratorSelection === 'manual' ? reasoningOrNull(orchestrator.reasoning) : null,
         selection: orchestratorSelection,
       },
-      {
-        agentId: workerAgentIdFor(workerAccount.id),
-        model: worker.model ?? null,
-        reasoning: reasoningOrNull(worker.reasoning),
+      list.map((member, index) => ({
+        agentId: workerAgentIdFor(workerAccounts[index]!.id),
+        model: member.model ?? null,
+        reasoning: reasoningOrNull(member.reasoning),
         // Absent means automatic; the orchestrator's row never carries one.
-        selection: isWorkerSelection(worker.selection) ? worker.selection : 'auto',
-      },
+        selection: isWorkerSelection(member.selection) ? member.selection : 'auto',
+        // What the person calls this member in the timeline. Falls back to
+        // the connection's own name.
+        label: member.label ?? workerAccounts[index]!.display_name,
+      })),
     );
     return this.toView(record);
+  }
+
+  /**
+   * The project's spending limits for metered connections.
+   *
+   * Every field may be null, which means no limit - and is what every project
+   * has until someone sets one. A limit stops *this application* from making
+   * the next call; it is not a ceiling the provider enforces, and the screen
+   * that writes these says so in those words.
+   */
+  setBudget(
+    workspaceId: string,
+    budget: { maxInvocations: number | null; maxTokens: number | null; maxCostUsd: number | null },
+  ): WorkspaceView {
+    this.database.workspaces.require(workspaceId);
+    this.database.workspaces.setBudget(workspaceId, budget);
+    return this.toView(this.database.workspaces.require(workspaceId));
   }
 
   /**
@@ -743,6 +788,27 @@ export class WorkspaceService {
           record.worker_reasoning,
           isWorkerSelection(record.worker_selection) ? record.worker_selection : 'auto',
         ),
+        // Every worker, in slot order. `worker` above is slot 0, kept so that
+        // everything written before teams could grow reads the same member.
+        workers: this.database.workspaces
+          .team(record.id)
+          .filter((member) => member.role === 'CODING_WORKER')
+          .map((member) => ({
+            ...this.memberView(
+              'CODING_WORKER',
+              member.agentId,
+              member.model,
+              member.reasoning,
+              isWorkerSelection(member.selection) ? member.selection : 'auto',
+            ),
+            workerId: `worker-${member.slot + 1}`,
+            label: member.label,
+          })),
+      },
+      budget: {
+        maxInvocations: positiveOrNull(record.budget_max_invocations),
+        maxTokens: positiveOrNull(record.budget_max_tokens),
+        maxCostUsd: positiveOrNull(record.budget_max_cost_usd),
       },
       createdAt: record.created_at,
       updatedAt: record.updated_at ?? record.created_at,
@@ -860,4 +926,10 @@ function firstLine(text: string): string {
     .map((l) => l.trim())
     .find((l) => l.length > 0);
   return line ? ` ${line.slice(0, 200)}` : '';
+}
+
+/** A stored limit, or null when the column is empty or nonsensical. */
+function positiveOrNull(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }

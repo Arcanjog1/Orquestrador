@@ -258,10 +258,65 @@ export const branchName: Validator<string> = (value, path) => {
 };
 
 /** One role of a workspace team: the account, and how it should run. */
-export const teamMember = obj<{ accountId: string; model?: string; reasoning?: string; selection?: string }>(
-  { accountId: id, model: modelName, reasoning: oneOf(REASONING_LEVELS), selection: oneOf(WORKER_SELECTIONS) },
-  { optional: ['model', 'reasoning', 'selection'] },
+export const teamMember = obj<{
+  accountId: string;
+  model?: string;
+  reasoning?: string;
+  selection?: string;
+  label?: string;
+}>(
+  {
+    accountId: id,
+    model: modelName,
+    reasoning: oneOf(REASONING_LEVELS),
+    selection: oneOf(WORKER_SELECTIONS),
+    label: str({ min: 1, max: 120 }),
+  },
+  { optional: ['model', 'reasoning', 'selection', 'label'] },
 );
+
+/**
+ * A bounded list of validated entries.
+ *
+ * The bound is the point: a team is a handful of people's accounts, and a
+ * request carrying ten thousand members is not a team, it is a way to make the
+ * main process do arbitrary work.
+ */
+/**
+ * A finite number in a range.
+ *
+ * Bounded on both ends deliberately: a spending limit typed as 1e400 is not a
+ * generous limit, it is no limit, and the boundary is where that gets caught.
+ */
+export function num(options: { min: number; max: number }): Validator<number> {
+  return (value, path) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) fail(path, 'must be a number');
+    const n = value as number;
+    if (n < options.min || n > options.max) {
+      fail(path, `must be between ${options.min} and ${options.max}`);
+    }
+    return n;
+  };
+}
+
+/** A whole number in a range. */
+export function int(options: { min: number; max: number }): Validator<number> {
+  const inner = num(options);
+  return (value, path) => {
+    const n = inner(value, path);
+    if (!Number.isInteger(n)) fail(path, 'must be a whole number');
+    return n;
+  };
+}
+
+export function listOf<T>(inner: Validator<T>, max: number): Validator<T[]> {
+  return (value, path) => {
+    if (!Array.isArray(value)) fail(path, 'must be an array');
+    const array = value as unknown[];
+    if (array.length > max) fail(path, `must have at most ${max} entries`);
+    return array.map((entry, index) => inner(entry, `${path}[${index}]`));
+  };
+}
 
 /**
  * A URL that may be handed to the system browser.
@@ -361,6 +416,14 @@ export const REQUEST_VALIDATORS: {
     { optional: ['name', 'repositoryPrivate', 'endpoint'] },
   ),
   'workspace.createConversation': obj({ name: str({ min: 1, max: 120 }) }),
+  'workspace.setBudget': obj({
+    workspaceId: id,
+    maxInvocations: nullable(int({ min: 1, max: 1000 })),
+    maxTokens: nullable(int({ min: 1000, max: 100_000_000 })),
+    // Dollars, as a number. Bounded so a typo cannot become a limit that is
+    // effectively no limit at all.
+    maxCostUsd: nullable(num({ min: 0.01, max: 10_000 })),
+  }),
   'workspace.setPublish': obj({ workspaceId: id, enabled: bool, pullRequest: bool }),
 
   // Connections. The key is bounded but deliberately not pattern-matched: a
@@ -409,11 +472,16 @@ export const REQUEST_VALIDATORS: {
     orchestratorAgentId: id,
     workerAgentId: id,
   }),
-  'workspace.setTeam': obj({
-    workspaceId: id,
-    orchestrator: teamMember,
-    worker: teamMember,
-  }),
+  'workspace.setTeam': obj(
+    {
+      workspaceId: id,
+      orchestrator: teamMember,
+      worker: teamMember,
+      // Eight is well past any real team and far short of a denial of service.
+      workers: listOf(teamMember, 8),
+    },
+    { optional: ['workers'] },
+  ),
   'workspace.changes': obj({ workspaceId: id }),
   'workspace.rename': obj({ workspaceId: id, name: str({ min: 1, max: 120 }) }),
   'workspace.remove': obj({ workspaceId: id }),

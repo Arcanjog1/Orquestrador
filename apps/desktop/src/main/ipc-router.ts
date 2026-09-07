@@ -172,6 +172,14 @@ export class IpcRouter {
     this.handlers.set('workspace.createCloud', (p) =>
       s.workspaces.createCloud(p as IpcMap['workspace.createCloud']['request']),
     );
+    this.handlers.set('workspace.setBudget', (p) => {
+      const input = p as IpcMap['workspace.setBudget']['request'];
+      return s.workspaces.setBudget(input.workspaceId, {
+        maxInvocations: input.maxInvocations,
+        maxTokens: input.maxTokens,
+        maxCostUsd: input.maxCostUsd,
+      });
+    });
     this.handlers.set('workspace.createConversation', (p) =>
       s.workspaces.createConversation(p as IpcMap['workspace.createConversation']['request']),
     );
@@ -242,7 +250,13 @@ export class IpcRouter {
     });
     this.handlers.set('workspace.setTeam', (p) => {
       const input = p as IpcMap['workspace.setTeam']['request'];
-      return s.workspaces.setTeam(input.workspaceId, input.orchestrator, input.worker);
+      // `workers` wins when it is present; `worker` alone remains the shape a
+      // single-worker project saves, and behaves identically.
+      return s.workspaces.setTeam(
+        input.workspaceId,
+        input.orchestrator,
+        input.workers && input.workers.length > 0 ? input.workers : input.worker,
+      );
     });
     this.handlers.set('workspace.rename', (p) => {
       const input = p as { workspaceId: string; name: string };

@@ -586,6 +586,18 @@ export class WorkspaceRepository extends Repository {
     this.db.run('UPDATE workspaces SET updated_at = ? WHERE id = ?', [now(), workspaceId]);
   }
 
+  /** Spending limits for metered connections. Null in a field means no limit. */
+  setBudget(
+    workspaceId: string,
+    budget: { maxInvocations: number | null; maxTokens: number | null; maxCostUsd: number | null },
+  ): void {
+    this.db.run(
+      'UPDATE workspaces SET budget_max_invocations = ?, budget_max_tokens = ?, budget_max_cost_usd = ? WHERE id = ?',
+      [budget.maxInvocations, budget.maxTokens, budget.maxCostUsd, workspaceId] as SqlValue[],
+    );
+    this.touch(workspaceId);
+  }
+
   /**
    * The team, in slot order.
    *

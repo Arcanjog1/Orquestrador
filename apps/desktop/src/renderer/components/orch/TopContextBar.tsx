@@ -8,6 +8,7 @@ import {
   GitBranch,
   HardDrive,
   Loader2,
+  MessageSquare,
   Pencil,
   Plus,
   RefreshCw,
@@ -130,6 +131,9 @@ export function TopContextBar({
   const [query, setQuery] = useState("");
 
   const isCloud = workspace?.environment === "cloud";
+  // A conversation project has no working copy anywhere, so the git chip and
+  // its actions would be offering something that cannot happen.
+  const isConversation = workspace?.environment === "conversation";
   const branch = workspace?.branch ?? workspace?.defaultBranch ?? "—";
   // A cloud project's repository is the one it was created for, named as
   // GitHub names it; a local project's is inferred from its remote.
@@ -143,10 +147,20 @@ export function TopContextBar({
       {/* Where this project's work runs. Not decorative: a person about to send
           a task needs to know whether it will touch their own disk. */}
       <Chip data-testid="environment-chip">
-        {isCloud ? <Cloud className="size-3" /> : <HardDrive className="size-3" />}
-        {isCloud ? "Nuvem" : "Local"}
+        {isCloud ? (
+          <Cloud className="size-3" />
+        ) : isConversation ? (
+          <MessageSquare className="size-3" />
+        ) : (
+          <HardDrive className="size-3" />
+        )}
+        {isCloud ? "Nuvem" : isConversation ? "Conversa" : "Local"}
       </Chip>
-      {/* GitHub chip: who is signed in, this project's remote, and the git actions */}
+      {/* GitHub chip: who is signed in, this project's remote, and the git
+          actions. Absent for a conversation project: there is no working copy
+          to commit, push or open a pull request from, and offering the buttons
+          would promise something the project cannot do. */}
+      {!isConversation && (
       <Popover onOpenChange={(open) => open && onRefreshPullRequest()}>
         <PopoverTrigger asChild>
           <button data-testid="github-chip">
@@ -275,6 +289,7 @@ export function TopContextBar({
           </div>
         </PopoverContent>
       </Popover>
+      )}
 
       {/* Project chip */}
       <Popover>

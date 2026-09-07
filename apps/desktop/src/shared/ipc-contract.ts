@@ -58,6 +58,7 @@ export const REQUEST_CHANNELS = [
   'workspace.createCloud',
   'workspace.createConversation',
   'workspace.setPublish',
+  'workspace.setBudget',
   'connections.list',
   'connections.addApi',
   'connections.replaceKey',
@@ -119,6 +120,7 @@ export const EVENT_CHANNELS = [
   'runtime:progress',
   'account:progress',
   'run:progress',
+  'connections:changed',
 ] as const;
 
 export type EventChannel = (typeof EVENT_CHANNELS)[number];
@@ -278,6 +280,19 @@ export type WorkerSelection = (typeof WORKER_SELECTIONS)[number];
  * account is one of the user's persisted accounts of that provider, named
  * here so the interface never shows a provider where an account belongs.
  */
+/**
+ * One worker on the team, with the id a delegation names it by.
+ *
+ * `workerId` is the application's own id (`worker-1`, `worker-2`), which is
+ * what the orchestrator writes in a decision and what the loop validates
+ * against the real team. It is never a credential and never a model.
+ */
+export interface TeamWorkerView extends TeamMemberView {
+  readonly workerId: string;
+  /** What the person calls this member. Null falls back to the account name. */
+  readonly label: string | null;
+}
+
 export interface TeamMemberView {
   readonly role: TeamRole;
   readonly provider: ProviderName;
@@ -346,7 +361,16 @@ export interface WorkspaceView {
   readonly workerAgentId: string | null;
   readonly team: {
     readonly orchestrator: TeamMemberView;
+    /** Slot 0. Kept so a caller that wants one worker still gets one. */
     readonly worker: TeamMemberView;
+    /** Every worker, in the order the orchestrator is offered them. */
+    readonly workers: readonly TeamWorkerView[];
+  };
+  /** Spending limits for metered connections. Null in a field means no limit. */
+  readonly budget: {
+    readonly maxInvocations: number | null;
+    readonly maxTokens: number | null;
+    readonly maxCostUsd: number | null;
   };
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -780,6 +804,21 @@ export interface IpcMap {
     request: { workspaceId: string; enabled: boolean; pullRequest: boolean };
     response: WorkspaceView;
   };
+  /**
+   * Spending limits for this project's metered connections.
+   *
+   * A null field means no limit. These stop the application from making the
+   * next call; they are not a ceiling the provider enforces.
+   */
+  'workspace.setBudget': {
+    request: {
+      workspaceId: string;
+      maxInvocations: number | null;
+      maxTokens: number | null;
+      maxCostUsd: number | null;
+    };
+    response: WorkspaceView;
+  };
 
   /**
    * Connections.
@@ -847,7 +886,18 @@ export interface IpcMap {
    * level. An account of the wrong provider is refused.
    */
   'workspace.setTeam': {
-    request: { workspaceId: string; orchestrator: TeamMemberInput; worker: TeamMemberInput };
+    request: {
+      workspaceId: string;
+      orchestrator: TeamMemberInput;
+      /** Slot 0, kept for callers that bind a single worker. */
+      worker: TeamMemberInput;
+      /**
+       * The full worker list, when the team has more than one. When present it
+       * replaces `worker`; when absent the team is just `worker`, which is
+       * what every project had before teams could grow.
+       */
+      workers?: readonly TeamMemberInput[];
+    };
     response: WorkspaceView;
   };
   /** Read-only: what changed in the working copy, straight from git. */
