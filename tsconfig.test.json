@@ -10,6 +10,7 @@
     "apps/desktop/src/main/**/*.ts",
     "apps/desktop/src/shared/**/*.ts",
     "apps/desktop/src/preload/bridge.ts",
-    "apps/desktop/src/electron/security.ts"
+    "apps/desktop/src/electron/security.ts",
+    "apps/coordinator/src/**/*.ts"
   ]
 }

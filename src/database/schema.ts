@@ -365,6 +365,101 @@ ALTER TABLE runs ADD COLUMN remote_cursor INTEGER;
 CREATE INDEX idx_runs_remote ON runs(remote_run_id);
 `,
   },
+  {
+    id: 7,
+    name: 'run-coordinator',
+    sql: `
+-- Who a request is acting as. A desktop presents a token; the token names the
+-- principal. Nothing the renderer sends - least of all an accountId - is ever
+-- taken as authorisation.
+CREATE TABLE principals (
+  id           TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  -- Everything this principal owns is scoped to its tenant, and every query
+  -- that reads another principal's data has to say so explicitly.
+  tenant_id    TEXT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'active',
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX idx_principals_tenant ON principals(tenant_id);
+
+-- Desktop sessions, as tokens. Only the hash is stored: a stolen database
+-- does not yield a usable token, and revoking is a row update.
+CREATE TABLE desktop_sessions (
+  id             TEXT PRIMARY KEY,
+  principal_id   TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+  token_hash     TEXT NOT NULL UNIQUE,
+  label          TEXT,
+  created_at     TEXT NOT NULL,
+  last_seen_at   TEXT,
+  expires_at     TEXT,
+  revoked_at     TEXT
+);
+CREATE INDEX idx_desktop_sessions_principal ON desktop_sessions(principal_id);
+
+-- A run the coordinator owns. It exists whether or not any desktop is
+-- connected, which is the whole point: the work continues with the computer
+-- switched off, and the row is what the desktop finds when it comes back.
+CREATE TABLE remote_runs (
+  id                 TEXT PRIMARY KEY,
+  principal_id       TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+  tenant_id          TEXT NOT NULL,
+  -- The desktop's own ids, so a reconnecting desktop can match its rows.
+  client_run_id      TEXT,
+  client_session_id  TEXT,
+  repository         TEXT NOT NULL,
+  branch             TEXT NOT NULL,
+  objective          TEXT NOT NULL,
+  status             TEXT NOT NULL,
+  failure_reason     TEXT,
+  cloud_workspace_id TEXT REFERENCES cloud_workspaces(id) ON DELETE SET NULL,
+  -- The team, as the desktop configured it.
+  team               TEXT NOT NULL DEFAULT '{}',
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  finished_at        TEXT
+);
+CREATE INDEX idx_remote_runs_principal ON remote_runs(principal_id, created_at DESC);
+CREATE INDEX idx_remote_runs_status ON remote_runs(status);
+
+-- Idempotency. A desktop that times out and retries, or reconnects and asks
+-- again, must not get a second run - and must not get a second commit, push
+-- or pull request either. The key is the client's; the answer is ours.
+CREATE TABLE idempotency_keys (
+  key          TEXT NOT NULL,
+  principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+  scope        TEXT NOT NULL,
+  result_id    TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  PRIMARY KEY (principal_id, scope, key)
+);
+
+-- The durable event log. Every event a desktop would have seen live is
+-- written here first, with a per-run sequence number. A desktop that was
+-- closed asks for everything after the last sequence it applied, so catching
+-- up is exact rather than a replay that duplicates steps.
+CREATE TABLE remote_run_events (
+  run_id     TEXT NOT NULL REFERENCES remote_runs(id) ON DELETE CASCADE,
+  seq        INTEGER NOT NULL,
+  kind       TEXT NOT NULL,
+  payload    TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, seq)
+);
+
+-- Exactly one worker may drive a run at a time. A lease is taken to start and
+-- renewed while working; an expired lease is what lets another coordinator
+-- process pick up a run whose owner died, without two of them running the
+-- same loop.
+CREATE TABLE run_leases (
+  run_id     TEXT PRIMARY KEY REFERENCES remote_runs(id) ON DELETE CASCADE,
+  owner      TEXT NOT NULL,
+  acquired_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX idx_run_leases_expiry ON run_leases(expires_at);
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;
