@@ -9,6 +9,8 @@ Estado ao fim da segunda sessão da reorientação.
 | Repositório | `Arcanjog1/Orquestrador` (público) |
 | Branch | `claude/ai-orchestrator-reorientacao-ytlkw0` |
 | HEAD do início desta sessão | `b69a880` |
+| HEAD publicado | `fa97ebc` |
+| Instalador | [`desktop-dev-fa97ebc`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-fa97ebc) |
 | `main` | **não existe** neste repositório |
 
 Sem reset, sem merge, sem force-push, sem apagar branch.
@@ -55,6 +57,7 @@ Sem reset, sem merge, sem force-push, sem apagar branch.
 | Electron (`npm run desktop:test`) | **27 passando** |
 | Packaged smoke | **7 passando** (schema 10) |
 | Typecheck (4 projetos) | limpo |
+| Windows CI | **verde** no run 69 (`fa97ebc`), com NSIS e probes reais |
 
 ## O loop automático — o que já é verdade
 
@@ -82,7 +85,10 @@ de código (arquivo real, evidência do git, verificação re-executada).
 Não existem contas Codex/Claude legítimas no CI, e este ambiente não tem
 Windows. O teste com as suas contas é o que falta, e é simples:
 
-1. instalar o novo `AI-Orchestrator-Setup.exe` por cima da versão anterior;
+1. baixar e instalar o `AI-Orchestrator-Setup.exe` de
+   [`desktop-dev-fa97ebc`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-fa97ebc)
+   por cima da versão anterior (o Windows mostra o aviso do SmartScreen: o
+   build não é assinado);
 2. abrir o aplicativo — a base é migrada no lugar, nada é reautenticado;
 3. Configurações → Contas: confirmar Codex e Claude conectados (se já estavam,
    continuam);
