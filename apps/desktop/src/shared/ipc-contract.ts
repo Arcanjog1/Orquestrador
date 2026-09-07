@@ -604,6 +604,27 @@ export interface RunProgressEvent {
   readonly status: string;
   /** Set when the step produced a chat message the renderer should append. */
   readonly message?: ChatMessageView;
+  /**
+   * What actually changed, when this step collected evidence.
+   *
+   * Carried on the event so a **remote** run's timeline can show real files
+   * and a real diffstat without the repository ever reaching this computer -
+   * which is the whole point of cloud mode. A local run puts the same shape
+   * here; the interface reads one thing either way.
+   */
+  readonly evidence?: RunEvidenceView;
+}
+
+/** The shape of one evidence collection, as the timeline shows it. */
+export interface RunEvidenceView {
+  readonly changed: boolean;
+  readonly changedFiles: readonly string[];
+  readonly insertions: number;
+  readonly deletions: number;
+  /** `git diff --stat`, as git printed it. Truncated for the wire. */
+  readonly diffstat: string;
+  readonly branch: string | null;
+  readonly commit: string | null;
 }
 
 /* ------------------------------------------------------------------ *

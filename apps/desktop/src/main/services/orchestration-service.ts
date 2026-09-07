@@ -53,7 +53,13 @@ import {
   localEnvironment,
   routeWorkerModel,
 } from '../core.js';
-import type { ChatMessageView, RunDetailView, RunView } from '../../shared/ipc-contract.js';
+import type {
+  ChatMessageView,
+  RunDetailView,
+  RunEvidenceView,
+  RunProgressEvent,
+  RunView,
+} from '../../shared/ipc-contract.js';
 import type { EventBus } from '../events.js';
 import { toMessageView, toRunDetailView, toRunView } from './views.js';
 
@@ -532,6 +538,17 @@ export class OrchestrationService {
         'evidence',
         evidence.changedSinceBaseline ? 'changed' : 'unchanged',
         `${evidence.changedFiles.length} arquivo(s)`,
+      );
+      // What actually changed, on the event itself. For a remote run this is
+      // the only way a person sees real files and a real diffstat without the
+      // repository ever reaching their computer.
+      this.progress(
+        runId,
+        sessionId,
+        'evidence',
+        `${evidence.changedFiles.length} arquivo(s)`,
+        'RUNNING',
+        { evidence: toEvidenceView(evidence) },
       );
       if (evidence.changedSinceBaseline) {
         this.say(
@@ -1114,8 +1131,15 @@ export class OrchestrationService {
     return view;
   }
 
-  private progress(runId: string, sessionId: string, stage: string, label: string, status: string): void {
-    this.events.emit('run:progress', { runId, sessionId, stage, label, status });
+  private progress(
+    runId: string,
+    sessionId: string,
+    stage: string,
+    label: string,
+    status: string,
+    extra: Partial<RunProgressEvent> = {},
+  ): void {
+    this.events.emit('run:progress', { runId, sessionId, stage, label, status, ...extra });
   }
 }
 
@@ -1128,6 +1152,34 @@ function verificationNote(results: readonly CommandResult[]): string {
   if (results.length === 0) return 'Nenhuma verificação foi executada nesta iteração.';
   const failed = results.filter((r) => !commandPassed(r)).map((r) => r.command);
   return failed.length === 0 ? 'Todas as verificações passaram.' : `Falharam: ${failed.join(', ')}`;
+}
+
+/**
+ * Evidence as the timeline shows it.
+ *
+ * The full diff is deliberately left behind: it can be megabytes, it is
+ * already on disk under the run's artifacts, and putting it on every event
+ * would make a remote run's log grow with the size of the change rather than
+ * with what happened. The diffstat is what a person reads at a glance.
+ */
+function toEvidenceView(evidence: GitEvidence): RunEvidenceView {
+  const stat = evidence.diffStat ?? '';
+  const totals = /(\d+) insertions?\(\+\)|(\d+) deletions?\(-\)/g;
+  let insertions = 0;
+  let deletions = 0;
+  for (const match of stat.matchAll(totals)) {
+    if (match[1]) insertions = Number(match[1]);
+    if (match[2]) deletions = Number(match[2]);
+  }
+  return {
+    changed: evidence.changedSinceBaseline,
+    changedFiles: evidence.changedFiles.slice(0, 200),
+    insertions,
+    deletions,
+    diffstat: stat.length > 8000 ? `${stat.slice(0, 8000)}\n…` : stat,
+    branch: evidence.branch,
+    commit: evidence.commit,
+  };
 }
 
 function describeFiles(evidence: GitEvidence): string {

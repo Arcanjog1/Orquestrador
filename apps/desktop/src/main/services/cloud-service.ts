@@ -221,7 +221,11 @@ export class CloudService {
       // The remote loop's own progress, replayed onto the local timeline. The
       // sequence number is the step's identity, so re-applying replaces rather
       // than appends.
-      this.stepOnce(localRunId, event.seq, stage, label);
+      //
+      // An evidence step carries what actually changed, so the person sees
+      // real files and a real diffstat without the repository ever reaching
+      // this computer - which is what cloud mode is for.
+      this.stepOnce(localRunId, event.seq, stage, label, evidenceSummary(payload.evidence));
       if (sessionId && payload.message && typeof payload.message === 'object') {
         this.messageOnce(sessionId, localRunId, event.seq, payload.message as Record<string, unknown>);
       }
@@ -254,11 +258,17 @@ export class CloudService {
   // *own* rows - submitting, accepted, unsent - which have no remote sequence
   // and are never replayed; mixing the two is how a re-sync duplicates a
   // timeline, so the split is deliberate rather than incidental.
-  private stepOnce(localRunId: string, seq: number, phase: string, summary: string): void {
+  private stepOnce(
+    localRunId: string,
+    seq: number,
+    phase: string,
+    summary: string,
+    detail?: string | null,
+  ): void {
     const marker = `seq:${seq}`;
     const already = this.database.runs
       .steps(localRunId)
-      .some((step) => step.detail === marker);
+      .some((step) => (step.detail ?? '').startsWith(marker));
     if (already) return;
     this.database.runs.addStep({
       runId: localRunId,
@@ -266,7 +276,9 @@ export class CloudService {
       phase,
       status: 'remote',
       summary,
-      detail: marker,
+      // The marker leads, so the identity check above stays a prefix test even
+      // when the step carries evidence after it.
+      detail: detail ? `${marker}\n${detail}` : marker,
     });
   }
 
@@ -354,6 +366,38 @@ function phraseFor(payload: Record<string, unknown>): string {
   const phase = String(payload.phase ?? '');
   const detail = typeof payload.detail === 'string' && payload.detail ? ` ${payload.detail}` : '';
   return `${PHASE_PHRASE[phase] ?? phase}${detail}`;
+}
+
+/**
+ * The evidence a remote step carried, as lines a person can read.
+ *
+ * Kept as text on the step's `detail` rather than as a new table: the timeline
+ * already reads that column, and a remote run's evidence is exactly as
+ * durable as everything else in the run's record.
+ */
+function evidenceSummary(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const evidence = value as {
+    changed?: unknown;
+    changedFiles?: unknown;
+    insertions?: unknown;
+    deletions?: unknown;
+    diffstat?: unknown;
+    branch?: unknown;
+  };
+  if (evidence.changed !== true) return null;
+  const files = Array.isArray(evidence.changedFiles) ? evidence.changedFiles.map(String) : [];
+  const lines: string[] = [];
+  if (typeof evidence.branch === 'string' && evidence.branch) lines.push(`branch: ${evidence.branch}`);
+  const insertions = typeof evidence.insertions === 'number' ? evidence.insertions : 0;
+  const deletions = typeof evidence.deletions === 'number' ? evidence.deletions : 0;
+  lines.push(`${files.length} arquivo(s), +${insertions} −${deletions}`);
+  for (const file of files.slice(0, 50)) lines.push(`  ${file}`);
+  if (files.length > 50) lines.push(`  (+${files.length - 50})`);
+  if (typeof evidence.diffstat === 'string' && evidence.diffstat.trim()) {
+    lines.push('', evidence.diffstat.trim());
+  }
+  return lines.join('\n');
 }
 
 /** The remote sequence a mirrored message carries, or null for a local one. */

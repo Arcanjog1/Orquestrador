@@ -443,3 +443,60 @@ test('a coordinator reached over plain http on a real network is refused', async
     await fixture.cleanup();
   }
 });
+
+test('a remote run shows real changed files and a real diffstat, with no repository here', async () => {
+  // The point of cloud mode's timeline: the person sees what actually changed
+  // without the repository ever reaching their computer. So the evidence has
+  // to travel on the event, and survive the catch-up.
+  const sides = await twoSides();
+  try {
+    const run = await sides.service.start({ sessionId: sides.sessionId, objective: 'x' });
+    const remoteId = sides.desktop.runs.require(run.id).remote_run_id!;
+
+    sides.store.append(remoteId, 'orchestration.run:progress', {
+      stage: 'evidence',
+      label: '2 arquivo(s)',
+      evidence: {
+        changed: true,
+        changedFiles: ['src/app.ts', 'tests/app.test.ts'],
+        insertions: 42,
+        deletions: 7,
+        diffstat: ' src/app.ts        | 30 +++++++++\n tests/app.test.ts | 19 ++++--',
+        branch: 'main',
+        commit: 'abc1234',
+      },
+    });
+    await sides.service.sync(run.id);
+
+    const step = sides.desktop.runs.steps(run.id).find((s) => s.phase === 'evidence');
+    assert.ok(step, 'the evidence step never arrived');
+    const detail = step.detail ?? '';
+    assert.match(detail, /src\/app\.ts/);
+    assert.match(detail, /tests\/app\.test\.ts/);
+    assert.match(detail, /\+42/);
+    assert.match(detail, /7/);
+    assert.match(detail, /branch: main/);
+
+    // And a second sync does not duplicate it, evidence and all.
+    const before = sides.desktop.runs.steps(run.id).length;
+    sides.desktop.driver.run('UPDATE runs SET remote_cursor = 0 WHERE id = ?', [run.id]);
+    await sides.service.sync(run.id);
+    assert.equal(sides.desktop.runs.steps(run.id).length, before, 'the evidence step was duplicated');
+
+    // An iteration that changed nothing carries no evidence, rather than an
+    // empty block that reads like a failure to collect any.
+    sides.store.append(remoteId, 'orchestration.run:progress', {
+      stage: 'evidence',
+      label: '0 arquivo(s)',
+      evidence: { changed: false, changedFiles: [], insertions: 0, deletions: 0, diffstat: '', branch: 'main' },
+    });
+    await sides.service.sync(run.id);
+    const unchanged = sides.desktop.runs
+      .steps(run.id)
+      .filter((s) => s.phase === 'evidence')
+      .at(-1)!;
+    assert.equal(unchanged.detail?.includes('\n'), false, 'a no-change step carried an evidence block');
+  } finally {
+    await sides.close();
+  }
+});
