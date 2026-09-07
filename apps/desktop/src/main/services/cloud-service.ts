@@ -93,7 +93,7 @@ export class CloudService {
         idempotencyKey: run.id,
         clientRunId: run.id,
         clientSessionId: session.id,
-        team: this.teamOf(workspace.id),
+        team: this.teamOf(workspace),
       });
       this.database.runs.bindRemote(run.id, { remoteRunId: remote.id });
       this.database.runs.setStatus(run.id, 'RUNNING');
@@ -315,13 +315,24 @@ export class CloudService {
     this.database.runs.addStep({ runId, iteration, phase, status, summary });
   }
 
-  private teamOf(workspaceId: string): unknown {
+  /**
+   * The team configuration a run carries into the cloud.
+   *
+   * The verifications travel because the DONE gate re-runs them remotely, and
+   * the publish choice travels because a cloud workspace is disposable: a run
+   * that does not publish produces nothing.
+   */
+  private teamOf(workspace: { id: string; publish_enabled: number; publish_pull_request: number }): unknown {
     return {
-      verifications: this.database.verifications.list(workspaceId).map((v) => ({
+      verifications: this.database.verifications.list(workspace.id).map((v) => ({
         id: v.id,
         label: v.label,
         command: v.command,
       })),
+      publish: {
+        enabled: workspace.publish_enabled !== 0,
+        pullRequest: workspace.publish_pull_request === 1,
+      },
     };
   }
 

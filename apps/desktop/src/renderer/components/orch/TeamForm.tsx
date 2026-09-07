@@ -160,6 +160,19 @@ export function TeamForm({
   const update = (role: TeamMemberView["role"], patch: Partial<MemberDraft>) =>
     setDrafts((prev) => ({ ...prev, [role]: { ...prev[role], ...patch } }));
 
+  // What happens to the work when a run ends. Only a cloud project asks: a
+  // local one has a working copy the person commits and pushes themselves.
+  const [publish, setPublish] = useState({
+    enabled: workspace?.publish?.enabled ?? true,
+    pullRequest: workspace?.publish?.pullRequest ?? false,
+  });
+  useEffect(() => {
+    setPublish({
+      enabled: workspace?.publish?.enabled ?? true,
+      pullRequest: workspace?.publish?.pullRequest ?? false,
+    });
+  }, [workspace?.id, workspace?.publish?.enabled, workspace?.publish?.pullRequest]);
+
   const toInput = (draft: MemberDraft) => ({
     accountId: draft.accountId,
     ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
@@ -177,6 +190,9 @@ export function TeamForm({
         orchestrator: toInput(drafts.ORCHESTRATOR),
         worker: toInput(drafts.CODING_WORKER),
       });
+      if (workspace.environment === "cloud") {
+        await api.workspace.setPublish({ workspaceId: workspace.id, ...publish });
+      }
       onSaved();
     } catch (e) {
       setError(messageOf(e));
@@ -394,6 +410,54 @@ export function TeamForm({
           </div>
         );
       })}
+
+      {workspace?.environment === "cloud" && (
+        <div className="rounded-lg border border-border p-3" data-testid="publish-choice">
+          <div className="text-[11px] tracking-[0.1em] text-muted-foreground uppercase">
+            Resultado
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            O ambiente de nuvem é descartável: o que não for enviado some junto com ele.
+          </p>
+          <label className="mt-3 flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={publish.enabled}
+              onChange={(e) =>
+                setPublish((p) => ({
+                  enabled: e.target.checked,
+                  // Um PR sem branch publicada não existe.
+                  pullRequest: e.target.checked ? p.pullRequest : false,
+                }))
+              }
+              data-testid="publish-enabled"
+            />
+            <span>
+              <span className="text-foreground">Enviar o resultado para uma branch</span>
+              <span className="block text-muted-foreground">
+                Uma branch por execução, criada no repositório. Nada é sobrescrito.
+              </span>
+            </span>
+          </label>
+          <label className="mt-2 flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={publish.pullRequest}
+              disabled={!publish.enabled}
+              onChange={(e) => setPublish((p) => ({ ...p, pullRequest: e.target.checked }))}
+              data-testid="publish-pull-request"
+            />
+            <span>
+              <span className="text-foreground">Abrir um pull request</span>
+              <span className="block text-muted-foreground">
+                Só um por execução. Se já existir, nenhum outro é aberto.
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
 
       {error && (
         <p className="text-xs text-danger" data-testid="team-error">

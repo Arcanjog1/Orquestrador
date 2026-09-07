@@ -360,6 +360,7 @@ export const REQUEST_VALIDATORS: {
     },
     { optional: ['name', 'repositoryPrivate', 'endpoint'] },
   ),
+  'workspace.setPublish': obj({ workspaceId: id, enabled: bool, pullRequest: bool }),
   'cloud.status': noArgs,
   'cloud.connect': obj({
     endpoint: cloudEndpoint,

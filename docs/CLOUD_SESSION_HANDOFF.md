@@ -33,6 +33,7 @@ real. O que não existe é a prova contra um host de verdade.
 | 7 | Modo Nuvem na interface | `dialogs.tsx`, `TopContextBar.tsx`, `CloudCard.tsx` |
 | 8 | Evidência real na timeline de nuvem | `orchestration-service.ts`, `cloud-service.ts` |
 | 9 | Publicação: branch, commit, push e PR opcional | `src/cloud/publish.ts` |
+| 10 | Escolha de publicação na equipe do projeto | `TeamForm.tsx`, migração 8 |
 
 Detalhes e decisões: `CLOUD_ARCHITECTURE_DECISION.md`,
 `CLOUD_SECURITY_AND_COSTS.md`, `CLOUD_IMPLEMENTATION_PLAN.md`.
@@ -140,17 +141,15 @@ Só depois disso `CLOUD_EXECUTION_VERIFIED` pode ser declarado.
 
 ## Próximo passo menor e concreto
 
-**Expor a escolha de publicação na interface.** O coordenador já publica o
-resultado (branch, commit, push) e abre um pull request quando a execução pede,
-mas hoje isso é um campo do `team` que a interface ainda não escreve — então a
-publicação usa o padrão (publica, sem PR) e ninguém consegue pedir o PR pela
-GUI.
+**Mostrar a branch e o PR publicados na timeline.** O coordenador já registra
+o evento `run.publish` com branch, commit e o número do pull request, e o
+`CloudService` já grava esse evento como passo. Falta a interface reconhecê-lo
+e mostrar um link clicável em vez do resumo genérico do evento.
 
-*Menor passo:* dois controles no formulário de equipe de um projeto de nuvem —
-"publicar o resultado em uma branch" (ligado) e "abrir pull request" (desligado)
-— gravados no workspace e enviados no `team` da submissão, que já os aceita.
-Nada nisso depende de um human gate; só o PR *funcionar* depende do GitHub App
-com permissão de escrita.
+*Menor passo:* em `apps/desktop/src/renderer/lib/timeline.ts`, tratar um passo
+de fase `run.publish` como uma entrada própria, com a branch e (quando houver)
+a URL do pull request, e abrir a URL por `api.app.openExternal`. Nada nisso
+depende de um human gate.
 
 ## O que não fazer
 

@@ -222,6 +222,10 @@ export interface WorkspaceRecord extends SqlRow {
   branch: string | null;
   /** The coordinator runs are sent to; null means the configured default. */
   cloud_endpoint: string | null;
+  /** 1 when a cloud run pushes its work to a branch. Default 1. */
+  publish_enabled: number;
+  /** 1 when a cloud run also opens a pull request. Default 0. */
+  publish_pull_request: number;
 }
 
 export interface WorkspaceWithAgents extends WorkspaceRecord {
@@ -292,6 +296,14 @@ export class WorkspaceRepository extends Repository {
       ],
     );
     return this.require(input.id);
+  }
+
+  /** How a cloud project's work is published when a run ends. */
+  setPublish(id: string, input: { enabled: boolean; pullRequest: boolean }): void {
+    this.db.run(
+      'UPDATE workspaces SET publish_enabled = ?, publish_pull_request = ?, updated_at = ? WHERE id = ?',
+      [input.enabled ? 1 : 0, input.pullRequest ? 1 : 0, now(), id],
+    );
   }
 
   list(): WorkspaceWithAgents[] {

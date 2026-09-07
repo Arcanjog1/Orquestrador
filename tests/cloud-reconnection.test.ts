@@ -18,6 +18,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Database } from '../src/database/database.js';
 import { RunStore } from '../src/cloud/coordinator/store.js';
 import { Coordinator } from '../apps/coordinator/src/coordinator.js';
@@ -569,5 +572,96 @@ test('cancelling a cloud run reaches the coordinator, not only this window', asy
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await coordinator.shutdown();
     cloud.close();
+  }
+});
+
+test('the publish choice a person makes is what the run carries into the cloud', async () => {
+  // A cloud workspace is disposable, so a run that does not publish produces
+  // nothing. The choice therefore has to reach the coordinator, not stay a
+  // checkbox in a window that is about to close.
+  const cloud = memoryDatabase();
+  const coordinator = new Coordinator({
+    database: cloud,
+    provisioner: stalling,
+    credentials: { openaiApiKey: 'sk-test' },
+  });
+  const principal = coordinator.store.createPrincipal({ displayName: 'Pessoa' });
+  const token = coordinator.store.issueSession({ principalId: principal.id }).token;
+  const server = createCoordinatorServer({ coordinator });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+
+  const fixture = createDesktopFixture({ secrets: fakeSecretStore() });
+  try {
+    value(
+      await fixture.router.handle('cloud.connect', { endpoint: `http://127.0.0.1:${port}`, token }),
+    );
+    const workspace = value<{ id: string; publish: { enabled: boolean; pullRequest: boolean } }>(
+      await fixture.router.handle('workspace.createCloud', {
+        repository: 'Arcanjog1/Orquestrador',
+        branch: 'main',
+      }),
+    );
+    // Publishing defaults on, the pull request defaults off.
+    assert.deepEqual(workspace.publish, { enabled: true, pullRequest: false });
+
+    const updated = value<{ publish: { enabled: boolean; pullRequest: boolean } }>(
+      await fixture.router.handle('workspace.setPublish', {
+        workspaceId: workspace.id,
+        enabled: true,
+        pullRequest: true,
+      }),
+    );
+    assert.deepEqual(updated.publish, { enabled: true, pullRequest: true });
+
+    value(await fixture.router.handle('accounts.create', { name: 'Claude', provider: 'anthropic' }));
+    const agents = value<Array<{ id: string; role: string }>>(
+      await fixture.router.handle('agents.list', null),
+    );
+    value(
+      await fixture.router.handle('workspace.setAgents', {
+        workspaceId: workspace.id,
+        orchestratorAgentId: agents.find((a) => a.role === 'ORCHESTRATOR')!.id,
+        workerAgentId: agents.find((a) => a.role === 'CODING_WORKER')!.id,
+      }),
+    );
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'c' }),
+    );
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'faça' }),
+    );
+
+    const remoteId = fixture.services.database.runs.require(sent.run.id).remote_run_id!;
+    const team = JSON.parse(coordinator.store.requireRunUnscoped(remoteId).team) as {
+      publish?: { enabled?: boolean; pullRequest?: boolean };
+    };
+    assert.deepEqual(team.publish, { enabled: true, pullRequest: true });
+  } finally {
+    await fixture.cleanup();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await coordinator.shutdown();
+    cloud.close();
+  }
+});
+
+test('a local project has no publish choice to make', async () => {
+  // It has a working copy the person commits and pushes themselves; a switch
+  // that did nothing would be worse than none.
+  const fixture = createDesktopFixture();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-local-publish-'));
+  try {
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.create', { name: 'Local', localPath: dir }),
+    );
+    const refused = await fixture.router.handle('workspace.setPublish', {
+      workspaceId: workspace.id,
+      enabled: false,
+      pullRequest: false,
+    });
+    assert.equal(refused.ok, false);
+  } finally {
+    await fixture.cleanup();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

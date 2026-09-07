@@ -300,6 +300,21 @@ export class WorkspaceService {
   }
 
   /**
+   * What happens to a cloud project's work when a run ends.
+   *
+   * Only meaningful for a cloud project: a local one has a working copy the
+   * person commits and pushes themselves, and nothing here would apply.
+   */
+  setPublish(workspaceId: string, input: { enabled: boolean; pullRequest: boolean }): WorkspaceView {
+    const workspace = this.database.workspaces.require(workspaceId);
+    if (workspace.environment !== 'cloud') {
+      throw new WorkspaceError('Só um projeto de nuvem publica o resultado automaticamente.');
+    }
+    this.database.workspaces.setPublish(workspaceId, input);
+    return this.toView(this.database.workspaces.require(workspaceId));
+  }
+
+  /**
    * Clones into `parentPath/name` using the managed git.
    *
    * The destination must not exist yet: refusing is safer than merging into
@@ -670,6 +685,10 @@ export class WorkspaceService {
       localPath: record.local_path,
       repository: record.repository_full_name,
       repositoryPrivate: record.repository_private === 1,
+      publish: {
+        enabled: record.publish_enabled !== 0,
+        pullRequest: record.publish_pull_request === 1,
+      },
       repositoryUrl: record.repository_url,
       defaultBranch: record.default_branch,
       // Filled in by `listWithBranches`; a plain view does not touch the disk.

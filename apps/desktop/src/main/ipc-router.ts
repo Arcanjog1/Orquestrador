@@ -172,6 +172,13 @@ export class IpcRouter {
     this.handlers.set('workspace.createCloud', (p) =>
       s.workspaces.createCloud(p as IpcMap['workspace.createCloud']['request']),
     );
+    this.handlers.set('workspace.setPublish', (p) => {
+      const input = p as IpcMap['workspace.setPublish']['request'];
+      return s.workspaces.setPublish(input.workspaceId, {
+        enabled: input.enabled,
+        pullRequest: input.pullRequest,
+      });
+    });
     this.handlers.set('workspace.clone', (p) =>
       s.workspaces.clone(p as { repositoryUrl: string; parentPath: string; name: string }),
     );

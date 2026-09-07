@@ -460,6 +460,25 @@ CREATE TABLE run_leases (
 CREATE INDEX idx_run_leases_expiry ON run_leases(expires_at);
 `,
   },
+  {
+    id: 8,
+    name: 'cloud-publish-choice',
+    sql: `
+-- What happens to a cloud run's work when it ends.
+--
+-- A cloud workspace is disposable, so a run that is not published produces
+-- nothing: the edits go with the workspace. Publishing therefore defaults to
+-- ON, and turning it off is a deliberate choice for a run whose point is only
+-- to look. Opening a pull request defaults to OFF, because that is an
+-- outward-facing act on somebody's repository and should be a choice a person
+-- made, not something that happens because a run finished.
+--
+-- Both are ignored by a local project, which has a working copy the person
+-- commits and pushes themselves.
+ALTER TABLE workspaces ADD COLUMN publish_enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE workspaces ADD COLUMN publish_pull_request INTEGER NOT NULL DEFAULT 0;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

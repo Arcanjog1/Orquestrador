@@ -56,6 +56,7 @@ export const REQUEST_CHANNELS = [
   'workspace.selectFolder',
   'workspace.create',
   'workspace.createCloud',
+  'workspace.setPublish',
   'workspace.clone',
   'workspace.setAgents',
   'workspace.setTeam',
@@ -310,6 +311,14 @@ export interface WorkspaceView {
   /** `owner/name` for a cloud project; null for a local one. */
   readonly repository: string | null;
   readonly repositoryPrivate: boolean;
+  /**
+   * What happens to a cloud project's work when a run ends.
+   *
+   * A cloud workspace is disposable, so a run that is not published produces
+   * nothing - hence `enabled` defaults on. `pullRequest` defaults off: opening
+   * one is an outward-facing act on somebody's repository.
+   */
+  readonly publish: { readonly enabled: boolean; readonly pullRequest: boolean };
   readonly repositoryUrl: string | null;
   readonly defaultBranch: string | null;
   /**
@@ -702,6 +711,10 @@ export interface IpcMap {
       repositoryPrivate?: boolean;
       endpoint?: string | null;
     };
+    response: WorkspaceView;
+  };
+  'workspace.setPublish': {
+    request: { workspaceId: string; enabled: boolean; pullRequest: boolean };
     response: WorkspaceView;
   };
   'workspace.clone': {
