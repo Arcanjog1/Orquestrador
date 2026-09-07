@@ -20,7 +20,7 @@ import { Database } from '../src/database/database.js';
 import { ProcessManager } from '../src/process/process-manager.js';
 import { createGitFixture } from './helpers/git-fixture.js';
 import { RunStore, hashToken } from '../src/cloud/coordinator/store.js';
-import { Coordinator } from '../apps/coordinator/src/coordinator.js';
+import { Coordinator, RunRefusedError } from '../apps/coordinator/src/coordinator.js';
 import { createCoordinatorServer } from '../apps/coordinator/src/http.js';
 import { Reaper } from '../apps/coordinator/src/reaper.js';
 import type { AddressInfo } from 'node:net';
@@ -773,6 +773,161 @@ test('a run waiting for a person is terminal, and is not picked up or billed for
     assert.deepEqual(swept.orphaned, ['cw-human']);
     assert.deepEqual(provisioner.released, ['handle-human']);
   } finally {
+    database.close();
+  }
+});
+
+/* -- what the provisioner will not pretend to do --------------------------- */
+
+test('a network restriction the provisioner cannot enforce is refused, not ignored', async () => {
+  // The dangerous version of this is the quiet one: accepting an allowlist,
+  // enforcing nothing, and leaving an operator planning around a boundary that
+  // is not there. A container runtime's flags cannot express "these hosts and
+  // no others", so the provisioner says so.
+  const { ContainerWorkspaceProvisioner } = await import('../src/cloud/container-provisioner.js');
+  const { DEFAULT_LIMITS, ProvisioningError, WORKSPACE_EGRESS_HOSTS } = await import(
+    '../src/cloud/provisioner.js'
+  );
+  const calls: unknown[] = [];
+  const host: ProcessRunner = {
+    async run(options) {
+      calls.push(options);
+      return { outcome: 'completed', exitCode: 0, signal: null, stdout: '', stderr: '', durationMs: 1, truncated: false } as ProcessResult;
+    },
+    async cancelAll() {},
+  };
+  const provisioner = new ContainerWorkspaceProvisioner({
+    host,
+    runtimeCommand: 'docker',
+    image: 'img',
+    repositoryAccess: { async token() { return { value: 't', expiresAt: '', identity: 'x' }; } },
+  });
+
+  // It does not claim what it cannot do.
+  assert.equal(provisioner.capabilities.networkPolicy, false);
+  // ...and it still claims what it does do.
+  assert.equal(provisioner.capabilities.resourceLimits, true);
+  assert.equal(provisioner.capabilities.isolated, true);
+
+  await assert.rejects(
+    provisioner.provision({
+      cloudWorkspaceId: 'cw-1',
+      repository: 'o/r',
+      branch: 'main',
+      privateRepository: false,
+      limits: { ...DEFAULT_LIMITS, allowedHosts: ['github.com'] },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof ProvisioningError);
+      assert.equal(error.reason, 'LIMITS_UNSUPPORTED');
+      assert.match(error.userMessage, /firewall|política de rede/i);
+      return true;
+    },
+  );
+  assert.deepEqual(calls, [], 'nothing was created for a request that could not be honoured');
+
+  // The default asks for no restriction, so the default deployment works...
+  assert.equal(DEFAULT_LIMITS.allowedHosts, null);
+  // ...and the hosts a workspace actually needs are still written down, for an
+  // operator restricting egress somewhere the runtime cannot.
+  assert.ok(WORKSPACE_EGRESS_HOSTS.includes('api.github.com'));
+  assert.ok(WORKSPACE_EGRESS_HOSTS.includes('api.anthropic.com'));
+});
+
+/* -- costs: a token cannot spend without limit ----------------------------- */
+
+test('one principal cannot start unbounded runs, and a retry is not refused for its own quota', async () => {
+  const database = memoryDatabase();
+  const coordinator = new Coordinator({
+    database,
+    provisioner: fakeProvisioner(),
+    credentials: { openaiApiKey: 'sk-test' },
+    maxConcurrentRuns: 2,
+  });
+  try {
+    const principal = coordinator.store.createPrincipal({ displayName: 'A' });
+    const submit = (key?: string) =>
+      coordinator.submit({
+        principal,
+        repository: 'o/r',
+        branch: 'main',
+        objective: 'x',
+        ...(key ? { idempotencyKey: key } : {}),
+      });
+
+    const first = await submit('k1');
+    const second = await submit('k2');
+    assert.ok(first.created && second.created);
+
+    // The third would be a third workspace billing by the second.
+    await assert.rejects(submit('k3'), (error: unknown) => {
+      assert.ok(error instanceof RunRefusedError);
+      assert.equal(error.reason, 'TOO_MANY_ACTIVE_RUNS');
+      return true;
+    });
+
+    // But a retry of one that already exists must still be answered with that
+    // run - refusing it for a quota its own run occupies would turn a flaky
+    // network into a permanently stuck client.
+    const retry = await submit('k1');
+    assert.equal(retry.created, false);
+    assert.equal(retry.run.id, first.run.id);
+
+    // Finishing one frees the slot.
+    coordinator.store.setStatus(first.run.id, 'DONE');
+    const fourth = await submit('k4');
+    assert.equal(fourth.created, true);
+
+    // A different principal has their own ceiling; one tenant cannot starve
+    // another out of the service.
+    const other = coordinator.store.createPrincipal({ displayName: 'B' });
+    const theirs = await coordinator.submit({
+      principal: other,
+      repository: 'o/r',
+      branch: 'main',
+      objective: 'y',
+      idempotencyKey: 'k1',
+    });
+    assert.equal(theirs.created, true);
+  } finally {
+    await coordinator.shutdown();
+    database.close();
+  }
+});
+
+test('the API answers a refused run with 429, not a 500', async () => {
+  const database = memoryDatabase();
+  const coordinator = new Coordinator({
+    database,
+    provisioner: fakeProvisioner(),
+    credentials: { openaiApiKey: 'sk-test' },
+    maxConcurrentRuns: 1,
+  });
+  try {
+    const principal = coordinator.store.createPrincipal({ displayName: 'A' });
+    const token = coordinator.store.issueSession({ principalId: principal.id }).token;
+    await withServer(coordinator, async (base) => {
+      const post = (key: string) =>
+        fetch(`${base}/v1/runs`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${token}`,
+            'content-type': 'application/json',
+            'idempotency-key': key,
+          },
+          body: JSON.stringify({ repository: 'o/r', branch: 'main', objective: 'x' }),
+        });
+
+      assert.equal((await post('a')).status, 201);
+      const refused = await post('b');
+      // The request was well formed and the caller may make it - just not now.
+      assert.equal(refused.status, 429);
+      const body = (await refused.json()) as { error: { code: string; message: string } };
+      assert.equal(body.error.code, 'TOO_MANY_ACTIVE_RUNS');
+      assert.match(body.error.message, /em andamento/);
+    });
+  } finally {
+    await coordinator.shutdown();
     database.close();
   }
 });

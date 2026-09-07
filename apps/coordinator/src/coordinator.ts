@@ -137,9 +137,32 @@ export interface CoordinatorOptions {
   verificationTimeoutMs?: number;
   /** Lease lifetime and how often it is renewed while a run is driven. */
   leaseTtlMs?: number;
+  /**
+   * How many runs one principal may have going at once.
+   *
+   * Each one holds a workspace that bills by the second, so without a ceiling
+   * a single token - or a single loop in a client that retries badly - can
+   * spend without limit. A refusal a person can read is better than a bill
+   * they cannot.
+   */
+  maxConcurrentRuns?: number;
+}
+
+/** A run was refused before it started, and why. */
+export class RunRefusedError extends Error {
+  readonly userMessage: string;
+  constructor(
+    readonly reason: 'TOO_MANY_ACTIVE_RUNS',
+    userMessage: string,
+  ) {
+    super(userMessage);
+    this.name = 'RunRefusedError';
+    this.userMessage = userMessage;
+  }
 }
 
 const LEASE_TTL_MS = 60_000;
+const MAX_CONCURRENT_RUNS = 3;
 
 /**
  * The loop's vocabulary, translated into the coordinator's.
@@ -218,6 +241,21 @@ export class Coordinator {
     clientSessionId?: string | null;
     team?: unknown;
   }): Promise<{ run: RemoteRunRecord; created: boolean }> {
+    // Checked before the row exists, and only for a submission that would
+    // really start something: a retry carrying an idempotency key that already
+    // produced a run must still be answered with that run, never refused for a
+    // quota its own run is occupying.
+    const ceiling = this.options.maxConcurrentRuns ?? MAX_CONCURRENT_RUNS;
+    const alreadyMade = input.idempotencyKey
+      ? this.store.findRunByIdempotencyKey(input.principal, input.idempotencyKey)
+      : null;
+    if (!alreadyMade && this.store.activeRunCount(input.principal) >= ceiling) {
+      throw new RunRefusedError(
+        'TOO_MANY_ACTIVE_RUNS',
+        `Já há ${ceiling} execuções em andamento. Espere uma terminar, ou cancele uma, antes de enviar outra.`,
+      );
+    }
+
     const result = this.store.createRun(input);
     if (result.created) this.track(this.drive(result.run.id));
     return result;

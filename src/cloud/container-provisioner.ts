@@ -173,7 +173,12 @@ export class ContainerWorkspaceProvisioner implements WorkspaceProvisioner {
   readonly id = 'container';
   readonly capabilities: ProvisionerCapabilities = {
     isolated: true,
-    networkPolicy: true,
+    // A container runtime's own flags cannot express "these hosts and no
+    // others": `--network none` is all or nothing, and anything finer is a
+    // firewall or a proxy outside the runtime. Saying `true` here would be
+    // claiming a boundary an operator would plan around and that is not
+    // there, so a request that asks for one is refused below instead.
+    networkPolicy: false,
     resourceLimits: true,
     // A container outlives the process that created it: that is exactly what
     // lets a run continue after the desktop is closed.
@@ -184,6 +189,14 @@ export class ContainerWorkspaceProvisioner implements WorkspaceProvisioner {
 
   async provision(request: WorkspaceRequest): Promise<ProvisionedWorkspace> {
     const { host, runtimeCommand, image } = this.options;
+    // A requirement this provisioner cannot meet is refused, not ignored.
+    if (request.limits.allowedHosts && request.limits.allowedHosts.length > 0) {
+      throw new ProvisioningError(
+        'LIMITS_UNSUPPORTED',
+        'Este provisionador não consegue restringir a rede do ambiente a uma lista de hosts.',
+        'restrinja a saída no firewall do host, ou use um provisionador que aplique política de rede',
+      );
+    }
     const name = `orq-${request.cloudWorkspaceId}`;
     const user = this.options.user ?? '1000:1000';
     request.onProgress?.('preparing');

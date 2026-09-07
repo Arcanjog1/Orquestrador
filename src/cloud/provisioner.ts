@@ -63,11 +63,14 @@ export interface WorkspaceLimits {
   /** Reclaimed early when nothing has run for this long. */
   readonly idleTimeoutMs: number;
   /**
-   * Hosts the workspace may reach. Empty means no outbound network at all.
-   * A provisioner that cannot enforce this must report `network: false` in its
-   * capabilities rather than silently allow everything.
+   * Hosts the workspace may reach, when egress is to be restricted at all.
+   *
+   * `null` asks for no restriction. A **list** is a requirement, not a hint:
+   * a provisioner that cannot enforce it must refuse the request with
+   * `LIMITS_UNSUPPORTED` rather than accept it and allow everything, which
+   * would leave an operator believing in a boundary that is not there.
    */
-  readonly allowedHosts: readonly string[];
+  readonly allowedHosts: readonly string[] | null;
 }
 
 /** How a workspace gets at a repository, without ever holding a lasting secret. */
@@ -109,7 +112,12 @@ export interface ProvisionedWorkspace {
 export interface ProvisionerCapabilities {
   /** True when workspaces are isolated from each other and from the host. */
   readonly isolated: boolean;
-  /** True when `allowedHosts` is really enforced. */
+  /**
+   * True only when `allowedHosts` is really enforced.
+   *
+   * Claiming this without enforcing it is worse than not offering it: it is a
+   * boundary an operator would plan around and that does not exist.
+   */
   readonly networkPolicy: boolean;
   /** True when cpu/memory/disk ceilings are really applied. */
   readonly resourceLimits: boolean;
@@ -165,13 +173,27 @@ export const DEFAULT_LIMITS: WorkspaceLimits = {
   diskMb: 20480,
   maxLifetimeMs: 4 * 60 * 60_000,
   idleTimeoutMs: 30 * 60_000,
-  allowedHosts: [
-    'github.com',
-    'api.github.com',
-    'codeload.github.com',
-    'api.openai.com',
-    'chatgpt.com',
-    'api.anthropic.com',
-    'registry.npmjs.org',
-  ],
+  // No egress restriction requested by default, because the provisioner this
+  // product ships with cannot enforce one - see ContainerWorkspaceProvisioner.
+  // A default that named hosts would read as a boundary the product does not
+  // actually have.
+  allowedHosts: null,
 };
+
+/**
+ * The hosts a workspace genuinely needs, for an operator restricting egress
+ * outside the container runtime - a host firewall, or a network policy in
+ * whatever schedules the workspace.
+ *
+ * Kept here because it is knowledge about this product, not about any one
+ * deployment; it is documentation with a type, not an enforcement point.
+ */
+export const WORKSPACE_EGRESS_HOSTS: readonly string[] = [
+  'github.com',
+  'api.github.com',
+  'codeload.github.com',
+  'api.openai.com',
+  'chatgpt.com',
+  'api.anthropic.com',
+  'registry.npmjs.org',
+];

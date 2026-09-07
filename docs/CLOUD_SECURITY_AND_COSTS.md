@@ -68,8 +68,26 @@ alteração não commitada da outra.
 | Entrypoint não é shell | `sleep infinity` |
 | Rastreável após crash | `--label cloudWorkspaceId=…` |
 
-> `src/cloud/container-provisioner.ts` · teste: *"a workspace is created with
-> least privilege and a ceiling on every resource"*.
+### O que este provisionador **não** faz: filtrar a rede
+
+As flags de um runtime de contêiner não expressam "estes hosts e nenhum
+outro": `--network none` é tudo ou nada, e qualquer coisa mais fina é firewall
+ou proxy **fora** do runtime.
+
+Então o provisionador declara `networkPolicy: false` e **recusa** um pedido que
+traga uma lista de hosts, com `LIMITS_UNSUPPORTED`, em vez de aceitá-lo e não
+aplicar nada. Aceitar em silêncio seria pior do que não oferecer: deixaria um
+operador planejando em torno de uma fronteira que não existe.
+
+Para restringir a saída de verdade, faça isso onde é possível — firewall do
+host, ou política de rede de quem agenda o workspace. Os hosts que um workspace
+realmente precisa estão em `WORKSPACE_EGRESS_HOSTS`
+(`src/cloud/provisioner.ts`): github.com, api.github.com, codeload.github.com,
+api.openai.com, chatgpt.com, api.anthropic.com, registry.npmjs.org.
+
+> Teste: *"a network restriction the provisioner cannot enforce is refused, not
+> ignored"* — verifica que nada é criado para um pedido que não poderia ser
+> honrado, e que o provisionador continua afirmando o que de fato faz.
 
 ## 5. Repositório privado, sem credencial durável
 
@@ -155,7 +173,26 @@ fechado que um contêiner esquecido custa mais.
 | Disco | 20480 MB | `ORQ_LIMIT_DISK_MB` |
 | Vida máxima | 4 h | `ORQ_LIMIT_LIFETIME_MS` |
 | Ociosidade | 30 min | `ORQ_LIMIT_IDLE_MS` |
-| Rede | lista de hosts | `ORQ_ALLOWED_HOSTS` |
+| Rede | sem restrição pedida | `ORQ_ALLOWED_HOSTS` (definir faz o provisionador de contêiner recusar — ver acima) |
+| Execuções simultâneas | 3 por principal | `maxConcurrentRuns` |
+
+### Teto de execuções simultâneas
+
+Cada execução segura um workspace que cobra por segundo, então um único token —
+ou um único laço num cliente que repete mal — poderia gastar sem limite. Um
+principal tem no máximo **3** execuções em andamento (`ORQ_MAX_CONCURRENT_RUNS`
+não existe ainda; hoje é `maxConcurrentRuns` na construção do coordenador).
+Além disso a API responde **429**, não 400 nem 500: o pedido está correto e o
+chamador tem direito de fazê-lo — só não agora.
+
+A contagem vem do store durável, não da memória: um reinício não zera o teto, e
+dois processos coordenadores não liberam uma cota cheia cada. E uma repetição
+com a mesma chave de idempotência **não** é recusada pela cota que a própria
+execução dela ocupa — isso transformaria uma rede instável num cliente travado
+para sempre.
+
+> Teste: *"one principal cannot start unbounded runs, and a retry is not
+> refused for its own quota"*, e *"the API answers a refused run with 429"*.
 
 ### Reaper
 

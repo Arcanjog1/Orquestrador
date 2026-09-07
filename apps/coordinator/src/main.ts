@@ -94,10 +94,13 @@ export async function main(): Promise<void> {
     diskMb: positive('ORQ_LIMIT_DISK_MB', DEFAULT_LIMITS.diskMb),
     maxLifetimeMs: positive('ORQ_LIMIT_LIFETIME_MS', DEFAULT_LIMITS.maxLifetimeMs),
     idleTimeoutMs: positive('ORQ_LIMIT_IDLE_MS', DEFAULT_LIMITS.idleTimeoutMs),
-    allowedHosts: (process.env.ORQ_ALLOWED_HOSTS ?? DEFAULT_LIMITS.allowedHosts.join(','))
-      .split(',')
-      .map((host) => host.trim())
-      .filter(Boolean),
+    // Unset means no restriction is *requested*. Setting it is a requirement,
+    // and the container provisioner refuses rather than accepting one it
+    // cannot enforce - see WORKSPACE_EGRESS_HOSTS for what to allow in a host
+    // firewall instead.
+    allowedHosts: process.env.ORQ_ALLOWED_HOSTS
+      ? process.env.ORQ_ALLOWED_HOSTS.split(',').map((host) => host.trim()).filter(Boolean)
+      : null,
   };
 
   // One access object, shared by the clone and the publish: it caches the

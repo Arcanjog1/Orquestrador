@@ -14,7 +14,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import type { Coordinator } from './coordinator.js';
+import { RunRefusedError, type Coordinator } from './coordinator.js';
 import type { PrincipalRecord } from '../../../src/cloud/coordinator/store.js';
 
 /** Bodies are small - an objective and a few ids. Anything larger is refused. */
@@ -68,16 +68,28 @@ async function handle(
         error: { code: 'invalid', message: 'repository, branch e objective são obrigatórios.' },
       });
     }
-    const { run, created } = await coordinator.submit({
-      principal,
-      repository,
-      branch,
-      objective,
-      idempotencyKey: header(request, 'idempotency-key') ?? string(body.idempotencyKey),
-      clientRunId: string(body.clientRunId),
-      clientSessionId: string(body.clientSessionId),
-      team: body.team,
-    });
+    let submitted: Awaited<ReturnType<Coordinator['submit']>>;
+    try {
+      submitted = await coordinator.submit({
+        principal,
+        repository,
+        branch,
+        objective,
+        idempotencyKey: header(request, 'idempotency-key') ?? string(body.idempotencyKey),
+        clientRunId: string(body.clientRunId),
+        clientSessionId: string(body.clientSessionId),
+        team: body.team,
+      });
+    } catch (error) {
+      if (error instanceof RunRefusedError) {
+        // 429, not 400 or 500: the request was well formed and the caller is
+        // allowed to make it - just not right now. A client can tell that
+        // apart and act on it; a 500 would look like our fault to retry into.
+        return send(response, 429, { error: { code: error.reason, message: error.userMessage } });
+      }
+      throw error;
+    }
+    const { run, created } = submitted;
     // 200 rather than 201 when the key had already made this run, so a client
     // can tell a retry that was absorbed from a new run it just caused.
     return send(response, created ? 201 : 200, { run: toView(run), created });

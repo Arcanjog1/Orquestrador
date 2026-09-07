@@ -203,6 +203,15 @@ export class RunStore {
     });
   }
 
+  /** The run an idempotency key already produced, if any. */
+  findRunByIdempotencyKey(principal: PrincipalRecord, key: string): RemoteRunRecord | null {
+    const existing = this.db.get<{ result_id: string }>(
+      'SELECT result_id FROM idempotency_keys WHERE principal_id = ? AND scope = ? AND key = ?',
+      [principal.id, 'run.create', key],
+    );
+    return existing ? this.findRun(existing.result_id, principal) : null;
+  }
+
   /**
    * One run, **only** if this principal owns it.
    *
@@ -216,6 +225,24 @@ export class RunStore {
         id,
         principal.id,
       ]) ?? null
+    );
+  }
+
+  /**
+   * How many of this principal's runs are still going.
+   *
+   * Each one holds a workspace that bills by the second, so this is the number
+   * a ceiling is applied to. Counted from the durable store rather than from
+   * memory, so a restart does not reset it and two coordinator processes
+   * cannot each allow a full quota.
+   */
+  activeRunCount(principal: PrincipalRecord): number {
+    return (
+      this.db.get<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM remote_runs
+          WHERE principal_id = ? AND status NOT IN ('DONE','FAILED','CANCELLED','NEEDS_HUMAN')`,
+        [principal.id],
+      )?.n ?? 0
     );
   }
 
