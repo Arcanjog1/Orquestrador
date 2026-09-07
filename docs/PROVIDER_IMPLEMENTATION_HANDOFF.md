@@ -87,6 +87,17 @@ Silêncio vira `no-activity`, que não é `timeout`, e é **mecânico**: nenhum
 modelo mais forte destrava um processo parado. Mesmo reflexo removido para
 permissões recusadas na sessão passada.
 
+Vale para **os dois lados**. O travamento que você viu foi no worker, mas um
+supervisor travado deixa a mesma janela em branco. No Codex nada precisou mudar
+no formato: `codex exec` já escreve o transcrito em stdout enquanto trabalha —
+ninguém observava. A decisão continua vindo de `--output-last-message`.
+
+E a varredura que recolhe um *lease* vencido **roda de verdade**: uma vez ao
+iniciar qualquer execução, uma vez no boot, e a cada 30 s enquanto algo estiver
+rodando. Na primeira versão desta sessão ela existia, era testada e não era
+chamada de lugar nenhum — todos os testes passavam enquanto uma delegação órfã
+teria ficado ali para sempre. Encontrei revendo o próprio diff.
+
 ## Na tela
 
 No painel que já existia — não há uma segunda interface:
@@ -120,13 +131,13 @@ durante o turno (`stream-json`).
 
 | Suíte | Resultado |
 |---|---|
-| Root (`npm test`) | **572 passando**, 2 pulados (eram 517) |
+| Root (`npm test`) | **575 passando**, 2 pulados (eram 517) |
 | Electron (`npm run desktop:test`) | **28 passando** (eram 27) |
 | Typecheck (4 projetos) | limpo |
 
 Novos: `tests/agent-message-bus.test.ts` (20), `tests/agent-activity.test.ts`
-(19), `tests/agent-exchange-e2e.test.ts` (8), mais casos em
-`desktop-adapters`, `desktop-team` e a integração Electron.
+(19), `tests/agent-exchange-e2e.test.ts` (9), mais casos em
+`desktop-adapters` (8), `desktop-team` (3) e a integração Electron (1).
 
 Os dois E2E que o pedido nomeia:
 

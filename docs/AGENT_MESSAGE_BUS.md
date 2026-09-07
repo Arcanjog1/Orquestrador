@@ -174,8 +174,25 @@ uma carta morta com motivo. O que nunca acontece é a execução esperar para
 sempre.
 
 O prazo tem de ser maior que o turno legítimo mais longo, ou um worker lento e
-saudável é declarado morto. O Buzz deriva o mesmo número do mesmo jeito
-(`max_turn_duration + buffer`), pela mesma razão.
+saudável é declarado morto. São **20 minutos**, contra `agentTimeoutMs` de 15:
+um turno que vai até o próprio limite rígido volta normalmente e nunca é
+recolhido por baixo dos próprios pés. O Buzz deriva o mesmo número do mesmo
+jeito (`max_turn_duration + buffer`), pela mesma razão.
+
+**A varredura roda de verdade.** Uma vez ao iniciar qualquer execução, uma vez
+no boot junto da reconciliação de runs interrompidos, e a cada 30 s enquanto
+algo estiver rodando — nunca em um aplicativo ocioso, que não tem o que varrer.
+
+A passagem imediata importa mais que o timer: um órfão deixado por uma execução
+anterior espera em um aplicativo ocioso, e um aplicativo ocioso não roda timer
+nenhum. Esperar por um tique significaria uma execução curta começar, terminar
+e parar o varredor sem nunca ter varrido.
+
+*(Na primeira versão desta sessão a varredura existia, era testada, e não era
+chamada de lugar nenhum — todos os testes passavam enquanto uma delegação órfã
+de verdade teria ficado ali para sempre. O teste que fecha isso verifica a
+**ligação**, não a lógica: deixa um órfão, inicia uma execução, e exige que o
+órfão deixe de estar `leased`.)*
 
 ### Nada é descartado em silêncio
 
@@ -254,6 +271,14 @@ para a tela dizer *"executando há 4m · ferramenta: Write"* em vez de um
 spinner. Apenas **nomes** de ferramenta: um argumento carrega o arquivo sendo
 escrito e o comando sendo rodado, e isso não pode chegar a uma linha de status
 nem a um log.
+
+**Os dois lados, não um.** O travamento que o usuário viu foi no worker, mas um
+supervisor travado deixa a mesma janela em branco. O Codex também tem prazo de
+silêncio — e ali nada precisou mudar no formato de saída: `codex exec` já
+escreve um transcrito legível em stdout enquanto trabalha, então os bytes
+sempre chegaram; ninguém os observava. A resposta continua sendo lida de
+`--output-last-message`, nunca do stdout, então observar o transcrito não pode
+alterar o que é interpretado.
 
 O silêncio é classificado como `no-activity`, que deliberadamente não é
 `timeout`, e é **mecânico**: nenhum modelo mais forte destrava um processo
