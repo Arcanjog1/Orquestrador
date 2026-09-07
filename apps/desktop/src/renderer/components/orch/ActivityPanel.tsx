@@ -11,6 +11,49 @@ export type Step = {
 };
 
 /**
+ * What the agent running right now is doing.
+ *
+ * The panel used to show a spinner and a run state, which is why a run that
+ * hung and a run that was working looked the same for as long as anyone was
+ * willing to wait. These are the three facts that decide whether waiting is
+ * reasonable: how long it has been going, how long since it last did anything,
+ * and what it is inside.
+ *
+ * Null means the runtime does not report progress - which is a real answer,
+ * and is rendered as such. It is never rendered as "idle": claiming an agent
+ * is doing nothing because we cannot see it is the mistake this replaces.
+ */
+export type Liveness = {
+  agentLabel: string;
+  elapsedMs: number;
+  idleMs: number;
+  currentTool: string | null;
+  /** How long silence may last before the invocation is stopped, if capped. */
+  idleTimeoutMs: number | null;
+};
+
+/** The delivery state of the exchange, as counts. */
+export type ExchangeCounts = {
+  /** Delegations handed over and not yet answered. */
+  inFlight: number;
+  /** Messages that ran out of attempts. Never zero silently - see below. */
+  dead: number;
+};
+
+/** Long silence is worth naming; a short pause is not a symptom. */
+const IDLE_WORTH_MENTIONING_MS = 15_000;
+
+function duration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return `${hours}h${String(minutes).padStart(2, "0")}m`;
+  if (minutes > 0) return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
+
+/**
  * The activity panel, exactly as approved.
  *
  * Width (286), section order, dividers, the pulsing run dot and the step rows
@@ -32,6 +75,9 @@ export function ActivityPanel({
   tests,
   contextPercent,
   onOpenStep,
+  liveness,
+  exchange,
+  onCancel,
 }: {
   state: RunState;
   iteration: number;
@@ -44,6 +90,12 @@ export function ActivityPanel({
   tests: { passed: number; total: number } | null;
   contextPercent: number | null;
   onOpenStep: (index: number) => void;
+  /** Live activity of the agent in flight, when its runtime reports any. */
+  liveness: Liveness | null;
+  /** How the exchange between the agents is going. */
+  exchange: ExchangeCounts | null;
+  /** Stops the run. Always offered while one is going. */
+  onCancel: () => void;
 }) {
   const meta = runStateMeta[state];
   const running = !["IDLE", "DONE", "CANCELLED", "FAILED", "PAUSED", "NEEDS_HUMAN"].includes(
@@ -99,6 +151,66 @@ export function ActivityPanel({
             )}
           </div>
         </div>
+
+        {running && (
+          <div className="border-t border-border pt-4">
+            <SectionLabel>Agora</SectionLabel>
+            {liveness ? (
+              <>
+                <p className="mt-2 text-sm">
+                  {liveness.agentLabel} · executando há{" "}
+                  <span className="font-mono">{duration(liveness.elapsedMs)}</span>
+                </p>
+                {liveness.currentTool && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Ferramenta: <span className="font-mono">{liveness.currentTool}</span>
+                  </p>
+                )}
+                {liveness.idleMs >= IDLE_WORTH_MENTIONING_MS && (
+                  <p
+                    className={cn(
+                      "mt-1 text-xs",
+                      liveness.idleTimeoutMs && liveness.idleMs >= liveness.idleTimeoutMs / 2
+                        ? "text-attention"
+                        : "text-muted-foreground",
+                    )}
+                  >
+                    Sem atividade há{" "}
+                    <span className="font-mono">{duration(liveness.idleMs)}</span>
+                    {liveness.idleTimeoutMs
+                      ? ` · será interrompido após ${duration(liveness.idleTimeoutMs)} de silêncio`
+                      : ""}
+                  </p>
+                )}
+              </>
+            ) : (
+              // Not "idle". The application cannot see inside this runtime, and
+              // saying so is the honest answer; claiming the agent is doing
+              // nothing would be a guess dressed as a fact.
+              <p className="mt-2 text-xs text-muted-foreground">
+                Este runtime não informa progresso durante a execução.
+              </p>
+            )}
+            {exchange && (exchange.inFlight > 0 || exchange.dead > 0) && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                {exchange.inFlight > 0 && `${exchange.inFlight} delegação(ões) aguardando resposta`}
+                {exchange.inFlight > 0 && exchange.dead > 0 && " · "}
+                {/* A message that ran out of attempts is named, never dropped
+                    quietly: an abandoned result the person never hears about is
+                    the failure this whole layer exists to prevent. */}
+                {exchange.dead > 0 && (
+                  <span className="text-danger">{exchange.dead} sem resposta</span>
+                )}
+              </p>
+            )}
+            <button
+              onClick={onCancel}
+              className="mt-3 w-full rounded-md border border-border bg-surface-raised px-2 py-1.5 text-xs text-foreground/85 transition-colors hover:bg-accent"
+            >
+              Cancelar execução
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-4 border-t border-border pt-4">
           <StatBlock

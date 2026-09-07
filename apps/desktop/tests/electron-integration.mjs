@@ -43,7 +43,7 @@ const load = (relative) => import(pathToFileURL(join(dist, relative)).href);
 const { Database } = await load('src/database/database.js');
 const { AppServices } = await load('apps/desktop/src/main/services/app-services.js');
 const { IpcRouter } = await load('apps/desktop/src/main/ipc-router.js');
-const { REQUEST_CHANNELS } = await load('apps/desktop/src/shared/ipc-contract.js');
+const { REQUEST_CHANNELS, EVENT_CHANNELS } = await load('apps/desktop/src/shared/ipc-contract.js');
 const { WEB_PREFERENCES } = await load('apps/desktop/src/electron/security.js');
 
 const cases = [];
@@ -193,6 +193,37 @@ test('the bridge exposes exactly the contract, and no command escape hatch', asy
       !exposed.some((name) => name.split('.').pop() === forbidden),
       `bridge must not expose ${forbidden}`,
     );
+  }
+});
+
+test('every event channel is reachable from the renderer, and each returns its unsubscribe', async () => {
+  const window = await openWindow();
+  // The contract's event half, which nothing checked before the liveness and
+  // message channels were added. A channel the main process emits and the
+  // renderer cannot listen to is a silent dead end: the window would simply
+  // never update, with nothing failing anywhere to say so.
+  const expected = EVENT_CHANNELS.map((channel) => {
+    const [group, rest] = channel.split(':');
+    return `${group}${rest.charAt(0).toUpperCase()}${rest.slice(1)}`;
+  });
+  const exposed = await window.webContents.executeJavaScript(
+    '(() => Object.keys(window.api.events))()',
+  );
+  assert.deepEqual([...exposed].sort(), [...expected].sort());
+
+  // Subscribing really works, and hands back a function that unsubscribes -
+  // a listener that cannot be removed leaks a dead window into every run.
+  const outcome = await window.webContents.executeJavaScript(`(() => {
+    const results = {};
+    for (const name of ${JSON.stringify(expected)}) {
+      const off = window.api.events[name](() => {});
+      results[name] = typeof off === 'function';
+      if (typeof off === 'function') off();
+    }
+    return results;
+  })()`);
+  for (const name of expected) {
+    assert.equal(outcome[name], true, `${name} must return an unsubscribe function`);
   }
 });
 

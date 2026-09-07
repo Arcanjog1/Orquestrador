@@ -5,7 +5,12 @@ import { AppSidebar } from "@/components/orch/AppSidebar";
 import { ProjectDialog } from "@/components/orch/ProjectDialog";
 import { TopContextBar } from "@/components/orch/TopContextBar";
 import { TimelineView } from "@/components/orch/Timeline";
-import { ActivityPanel, type Step } from "@/components/orch/ActivityPanel";
+import {
+  ActivityPanel,
+  type ExchangeCounts,
+  type Liveness,
+  type Step,
+} from "@/components/orch/ActivityPanel";
 import { Composer } from "@/components/orch/Composer";
 import { DiffDialog, EvidenceDialog, RunDetailDialog } from "@/components/orch/RunDialogs";
 import { CommitDialog, CreateBranchDialog, PullRequestDialog } from "@/components/orch/GitDialogs";
@@ -41,6 +46,8 @@ import type {
   WorkspaceChangesView,
   ChatSessionView,
   ProjectView,
+  RunActivityEvent,
+  AgentMessageEvent,
   RunProgressEvent,
   RunView,
   WorkspaceView,
@@ -82,6 +89,15 @@ export function WorkspacePage({
   const [detailRunId, setDetailRunId] = useState<string | null>(null);
   const [changes, setChanges] = useState<WorkspaceChangesView | null>(null);
   const [runDetail, setRunDetail] = useState<RunDetailView | null>(null);
+  /**
+   * What the agent in flight is doing, from the ephemeral channel.
+   *
+   * Cleared whenever a run leaves the running state, so the panel can never
+   * show a stale "executando há 4m" for an agent that finished ten minutes
+   * ago - which would be the same lie, wearing a nicer number.
+   */
+  const [liveness, setLiveness] = useState<Liveness | null>(null);
+  const [exchange, setExchange] = useState<ExchangeCounts>({ inFlight: 0, dead: 0 });
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const [branches, setBranches] = useState<WorkspaceBranchesView | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
@@ -434,10 +450,64 @@ export function WorkspacePage({
     [sessionId, refreshChanges],
   );
 
+  // Liveness. Nothing here is stored: it is the answer to "is it still
+  // working?", which stops being true the moment the run ends.
+  useEffect(
+    () =>
+      api.events.runActivity((event: RunActivityEvent) => {
+        if (sessionId && event.sessionId !== sessionId) return;
+        setLiveness({
+          agentLabel: event.agentLabel,
+          elapsedMs: event.elapsedMs,
+          idleMs: event.idleMs,
+          currentTool: event.currentTool,
+          idleTimeoutMs: event.idleTimeoutMs,
+        });
+      }),
+    [sessionId],
+  );
+
+  // The delivery state of the exchange. Counted from the events rather than
+  // polled, so a delegation that was handed over and never answered shows up
+  // as one still waiting instead of as nothing at all.
+  useEffect(
+    () =>
+      api.events.runMessage((event: AgentMessageEvent) => {
+        if (sessionId && event.conversationId !== sessionId) return;
+        setExchange((prev) => {
+          if (event.messageType !== "DELEGATION") return prev;
+          if (event.status === "leased" || event.status === "started") {
+            return { ...prev, inFlight: prev.inFlight + 1 };
+          }
+          if (event.status === "dead") {
+            return { inFlight: Math.max(0, prev.inFlight - 1), dead: prev.dead + 1 };
+          }
+          if (["completed", "cancelled", "pending", "failed"].includes(event.status)) {
+            return { ...prev, inFlight: Math.max(0, prev.inFlight - 1) };
+          }
+          return prev;
+        });
+      }),
+    [sessionId],
+  );
+
   // -- Derived -------------------------------------------------------------
 
   const runState = runStateOf(run, stage);
   const iteration = run?.iterations ?? 0;
+  const running = !["IDLE", "DONE", "CANCELLED", "FAILED", "PAUSED", "NEEDS_HUMAN"].includes(
+    runState,
+  );
+
+  // A finished run has no "now". Keeping the last snapshot on screen would
+  // show "executando há 4m" for an agent that stopped ten minutes ago, which
+  // is the same untruth in nicer clothes.
+  useEffect(() => {
+    if (!running) {
+      setLiveness(null);
+      setExchange({ inFlight: 0, dead: 0 });
+    }
+  }, [running]);
 
   // Agent, account, model and reasoning are four different things, and the
   // header, the timeline and the team dialog all read them from the same
@@ -756,6 +826,9 @@ export function WorkspacePage({
                 }
                 contextPercent={null}
                 onOpenStep={() => (run ? setDetailRunId(run.id) : setEvidenceOpen(true))}
+                liveness={liveness}
+                exchange={exchange}
+                onCancel={() => setCancelOpen(true)}
               />
             </div>
           ) : (

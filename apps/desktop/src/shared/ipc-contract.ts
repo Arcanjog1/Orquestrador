@@ -120,6 +120,8 @@ export const EVENT_CHANNELS = [
   'runtime:progress',
   'account:progress',
   'run:progress',
+  'run:activity',
+  'run:message',
   'connections:changed',
 ] as const;
 
