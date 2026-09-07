@@ -14,6 +14,7 @@ import {
   AccountRepository,
   AgentRepository,
   ChatRepository,
+  CloudWorkspaceRepository,
   ProviderRepository,
   RunRepository,
   VerificationDefinitionRepository,
@@ -94,6 +95,7 @@ export class Database {
   readonly projects = new ProjectRepository(() => this.driver);
   readonly runs = new RunRepository(() => this.driver);
   readonly verifications = new VerificationDefinitionRepository(() => this.driver);
+  readonly cloudWorkspaces = new CloudWorkspaceRepository(() => this.driver);
 }
 
 /** Shared helpers for the repositories. */

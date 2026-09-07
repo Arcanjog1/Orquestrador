@@ -1,0 +1,11 @@
+#!/bin/sh
+# git's GIT_ASKPASS helper.
+#
+# git calls this asking for a username, then for a password. Answering from a
+# 0600 file means the token is never in the remote URL, never in .git/config,
+# never in argv and never in a log line - the four places a credential leaks
+# from in practice.
+case "$1" in
+  *[Uu]sername*) printf '%s' "${ORQ_TOKEN_USER:-x-access-token}" ;;
+  *) [ -r "$ORQ_TOKEN_FILE" ] && cat "$ORQ_TOKEN_FILE" ;;
+esac

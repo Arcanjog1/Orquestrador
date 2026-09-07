@@ -305,6 +305,66 @@ ALTER TABLE chat_sessions ADD COLUMN project_id TEXT REFERENCES projects(id) ON 
 CREATE INDEX idx_chat_sessions_project ON chat_sessions(project_id, updated_at DESC);
 `,
   },
+  {
+    id: 6,
+    name: 'cloud-execution',
+    sql: `
+-- Where a workspace's runs execute. 'local' is the folder on this computer,
+-- which is what every existing row is and what the column defaults to, so an
+-- installation upgrading to this version keeps working exactly as it did.
+-- 'cloud' means an isolated workspace provisioned somewhere else: there is no
+-- folder on this computer at all, which is why local_path becomes optional
+-- from here on (SQLite cannot drop NOT NULL, so cloud rows carry '').
+ALTER TABLE workspaces ADD COLUMN environment TEXT NOT NULL DEFAULT 'local';
+-- The repository a cloud workspace works on, as GitHub names it, and the
+-- branch runs start from. Local workspaces already have repository_url and
+-- default_branch; these are the selection a person made in the interface.
+ALTER TABLE workspaces ADD COLUMN repository_full_name TEXT;
+ALTER TABLE workspaces ADD COLUMN repository_private INTEGER;
+ALTER TABLE workspaces ADD COLUMN branch TEXT;
+-- The coordinator this workspace's runs are sent to. NULL means the built-in
+-- one; a self-hosted deployment names its own.
+ALTER TABLE workspaces ADD COLUMN cloud_endpoint TEXT;
+
+-- A remote workspace: one isolated checkout, provisioned for one session.
+-- The row outlives the process that made it, which is what lets a desktop
+-- that was closed find its work again.
+CREATE TABLE cloud_workspaces (
+  id             TEXT PRIMARY KEY,
+  workspace_id   TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  session_id     TEXT REFERENCES chat_sessions(id) ON DELETE SET NULL,
+  -- Which provisioner made it, so a row is never handed to the wrong one.
+  provisioner    TEXT NOT NULL,
+  -- The provisioner's own handle (a container id, a machine name). Opaque here.
+  handle         TEXT,
+  repository     TEXT NOT NULL,
+  branch         TEXT NOT NULL,
+  -- The repository's absolute path INSIDE the environment. Never a path here.
+  working_dir    TEXT NOT NULL,
+  status         TEXT NOT NULL,
+  status_detail  TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  -- When the environment may be reclaimed. Enforced by the coordinator's
+  -- reaper, not by the desktop: the desktop may be closed.
+  expires_at     TEXT,
+  released_at    TEXT
+);
+CREATE INDEX idx_cloud_workspaces_workspace ON cloud_workspaces(workspace_id, updated_at DESC);
+CREATE INDEX idx_cloud_workspaces_status ON cloud_workspaces(status, expires_at);
+
+-- A run that executes remotely. The local run row stays the one source of
+-- truth for the person; this records where its work is happening and how far
+-- the desktop has caught up with it.
+ALTER TABLE runs ADD COLUMN cloud_workspace_id TEXT REFERENCES cloud_workspaces(id) ON DELETE SET NULL;
+ALTER TABLE runs ADD COLUMN remote_run_id TEXT;
+-- The last event sequence number this desktop has applied. Reconnecting asks
+-- for everything after it, which is what makes catching up idempotent rather
+-- than a replay that duplicates steps.
+ALTER TABLE runs ADD COLUMN remote_cursor INTEGER;
+CREATE INDEX idx_runs_remote ON runs(remote_run_id);
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

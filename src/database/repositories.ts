@@ -199,6 +199,12 @@ export class AgentRepository extends Repository {
 export interface WorkspaceRecord extends SqlRow {
   id: string;
   display_name: string;
+  /**
+   * The folder on this computer, for a `local` workspace.
+   *
+   * Empty for a `cloud` workspace: there is no folder on this computer, which
+   * is the whole point of cloud mode. Read `environment` before this.
+   */
   local_path: string;
   repository_url: string | null;
   default_branch: string | null;
@@ -206,6 +212,16 @@ export interface WorkspaceRecord extends SqlRow {
   created_at: string;
   updated_at: string | null;
   last_opened_at: string | null;
+  /** `local` (this computer) or `cloud` (an isolated workspace elsewhere). */
+  environment: string;
+  /** `owner/name`, as GitHub names it. Set for cloud workspaces. */
+  repository_full_name: string | null;
+  /** 1 when the selected repository is private. */
+  repository_private: number | null;
+  /** The branch a cloud run starts from. */
+  branch: string | null;
+  /** The coordinator runs are sent to; null means the configured default. */
+  cloud_endpoint: string | null;
 }
 
 export interface WorkspaceWithAgents extends WorkspaceRecord {
@@ -239,13 +255,23 @@ export class WorkspaceRepository extends Repository {
   create(input: {
     id: string;
     name: string;
+    /** Empty for a cloud workspace: there is no folder on this computer. */
     localPath: string;
     repositoryUrl?: string | null;
     defaultBranch?: string | null;
+    /** `local` (default) or `cloud`. */
+    environment?: string;
+    repositoryFullName?: string | null;
+    repositoryPrivate?: boolean | null;
+    branch?: string | null;
+    cloudEndpoint?: string | null;
   }): WorkspaceWithAgents {
     const timestamp = now();
     this.db.run(
-      'INSERT INTO workspaces (id, display_name, local_path, repository_url, default_branch, created_at, updated_at) VALUES (?,?,?,?,?,?,?)',
+      `INSERT INTO workspaces
+         (id, display_name, local_path, repository_url, default_branch, created_at, updated_at,
+          environment, repository_full_name, repository_private, branch, cloud_endpoint)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         input.id,
         input.name,
@@ -254,6 +280,15 @@ export class WorkspaceRepository extends Repository {
         input.defaultBranch ?? null,
         timestamp,
         timestamp,
+        input.environment ?? 'local',
+        input.repositoryFullName ?? null,
+        input.repositoryPrivate === null || input.repositoryPrivate === undefined
+          ? null
+          : input.repositoryPrivate
+            ? 1
+            : 0,
+        input.branch ?? null,
+        input.cloudEndpoint ?? null,
       ],
     );
     return this.require(input.id);
@@ -1008,5 +1043,147 @@ export class RecordNotFoundError extends Error {
   ) {
     super(`No ${entity} with id ${entityId}`);
     this.name = 'RecordNotFoundError';
+  }
+}
+
+/* ------------------------------------------------------------------------- *
+ * Cloud execution
+ * ------------------------------------------------------------------------- */
+
+/**
+ * One isolated workspace provisioned somewhere that is not this computer.
+ *
+ * The row is the durable part. Whatever the provisioner made - a container, a
+ * machine, a directory on a host - is named only by `handle`, which this layer
+ * never interprets. That is what lets the same table describe a workspace made
+ * by a local container runtime today and by a managed service later, and what
+ * lets a desktop that was closed find work that kept going without it.
+ */
+export interface CloudWorkspaceRecord extends SqlRow {
+  id: string;
+  workspace_id: string;
+  session_id: string | null;
+  provisioner: string;
+  handle: string | null;
+  repository: string;
+  branch: string;
+  /** The repository's absolute path **inside the environment**. */
+  working_dir: string;
+  /** `provisioning` | `ready` | `failed` | `released`. */
+  status: string;
+  status_detail: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
+  released_at: string | null;
+}
+
+export type CloudWorkspaceStatus = 'provisioning' | 'ready' | 'failed' | 'released';
+
+export class CloudWorkspaceRepository extends Repository {
+  create(input: {
+    id: string;
+    workspaceId: string;
+    sessionId?: string | null;
+    provisioner: string;
+    repository: string;
+    branch: string;
+    workingDir: string;
+    /** How long the environment may live before the reaper may reclaim it. */
+    ttlMs?: number | null;
+  }): CloudWorkspaceRecord {
+    const timestamp = now();
+    this.db.run(
+      `INSERT INTO cloud_workspaces
+         (id, workspace_id, session_id, provisioner, handle, repository, branch, working_dir,
+          status, status_detail, created_at, updated_at, expires_at, released_at)
+       VALUES (?,?,?,?,NULL,?,?,?,'provisioning',NULL,?,?,?,NULL)`,
+      [
+        input.id,
+        input.workspaceId,
+        input.sessionId ?? null,
+        input.provisioner,
+        input.repository,
+        input.branch,
+        input.workingDir,
+        timestamp,
+        timestamp,
+        input.ttlMs ? new Date(Date.now() + input.ttlMs).toISOString() : null,
+      ],
+    );
+    return this.require(input.id);
+  }
+
+  find(id: string): CloudWorkspaceRecord | undefined {
+    return this.db.get<CloudWorkspaceRecord>('SELECT * FROM cloud_workspaces WHERE id = ?', [id]);
+  }
+
+  require(id: string): CloudWorkspaceRecord {
+    const row = this.find(id);
+    if (!row) throw new RecordNotFoundError('cloud workspace', id);
+    return row;
+  }
+
+  /** The workspaces of one project, newest first. */
+  list(workspaceId: string): CloudWorkspaceRecord[] {
+    return this.db.all<CloudWorkspaceRecord>(
+      'SELECT * FROM cloud_workspaces WHERE workspace_id = ? ORDER BY updated_at DESC',
+      [workspaceId],
+    );
+  }
+
+  /**
+   * The live workspace of one session, if it still has one.
+   *
+   * Sessions get their own: two conversations in the same project must not
+   * write over each other's uncommitted work.
+   */
+  findLiveForSession(sessionId: string): CloudWorkspaceRecord | undefined {
+    return this.db.get<CloudWorkspaceRecord>(
+      `SELECT * FROM cloud_workspaces
+        WHERE session_id = ? AND status IN ('provisioning','ready')
+        ORDER BY updated_at DESC LIMIT 1`,
+      [sessionId],
+    );
+  }
+
+  setHandle(id: string, handle: string): void {
+    this.db.run('UPDATE cloud_workspaces SET handle = ?, updated_at = ? WHERE id = ?', [
+      handle,
+      now(),
+      id,
+    ]);
+  }
+
+  setStatus(id: string, status: CloudWorkspaceStatus, detail?: string | null): void {
+    this.db.run(
+      `UPDATE cloud_workspaces
+          SET status = ?, status_detail = ?, updated_at = ?,
+              released_at = CASE WHEN ? = 'released' THEN ? ELSE released_at END
+        WHERE id = ?`,
+      [status, detail ?? null, now(), status, now(), id],
+    );
+  }
+
+  /**
+   * Workspaces the reaper may reclaim: past their expiry, or left behind by a
+   * process that ended. Cleanup is the coordinator's job precisely because the
+   * desktop may be closed when the time comes.
+   */
+  listReclaimable(nowIso = now()): CloudWorkspaceRecord[] {
+    return this.db.all<CloudWorkspaceRecord>(
+      `SELECT * FROM cloud_workspaces
+        WHERE status IN ('provisioning','ready')
+          AND expires_at IS NOT NULL AND expires_at <= ?
+        ORDER BY expires_at ASC`,
+      [nowIso],
+    );
+  }
+
+  /** Everything still holding resources, whatever its session. */
+  listLive(): CloudWorkspaceRecord[] {
+    return this.db.all<CloudWorkspaceRecord>(
+      "SELECT * FROM cloud_workspaces WHERE status IN ('provisioning','ready') ORDER BY created_at ASC",
+    );
   }
 }
