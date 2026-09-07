@@ -684,6 +684,12 @@ export interface RunRecord extends SqlRow {
   artifacts_path: string | null;
   started_at: string;
   finished_at: string | null;
+  /** The remote workspace this ran in, for a cloud run. */
+  cloud_workspace_id: string | null;
+  /** The coordinator's own id for this run. Null for a local run. */
+  remote_run_id: string | null;
+  /** The last event sequence this desktop applied. Null before the first sync. */
+  remote_cursor: number | null;
 }
 
 export interface RunStepRecord extends SqlRow {
@@ -771,6 +777,44 @@ export class RunRepository extends Repository {
 
   setIteration(id: string, iteration: number): void {
     this.db.run('UPDATE runs SET iteration = ? WHERE id = ?', [iteration, id]);
+  }
+
+  /** Binds a local run to the remote one that is actually executing it. */
+  bindRemote(id: string, input: { remoteRunId: string; cloudWorkspaceId?: string | null }): void {
+    this.db.run('UPDATE runs SET remote_run_id = ?, cloud_workspace_id = ? WHERE id = ?', [
+      input.remoteRunId,
+      input.cloudWorkspaceId ?? null,
+      id,
+    ]);
+  }
+
+  /**
+   * How far this desktop has caught up with a remote run's event log.
+   *
+   * Stored rather than remembered, so an application that was closed for a
+   * week resumes from the same place as one closed for a second - and neither
+   * replays a step it already applied.
+   */
+  remoteCursor(id: string): number {
+    return this.db.get<{ remote_cursor: number | null }>('SELECT remote_cursor FROM runs WHERE id = ?', [id])
+      ?.remote_cursor ?? 0;
+  }
+
+  /** Advances the cursor. Never moves backwards: a stale sync cannot rewind it. */
+  setRemoteCursor(id: string, cursor: number): void {
+    this.db.run('UPDATE runs SET remote_cursor = MAX(COALESCE(remote_cursor, 0), ?) WHERE id = ?', [
+      cursor,
+      id,
+    ]);
+  }
+
+  /** Local runs bound to a remote one that has not finished here yet. */
+  listUnfinishedRemote(): RunRecord[] {
+    return this.db.all<RunRecord>(
+      `SELECT * FROM runs
+        WHERE remote_run_id IS NOT NULL AND status NOT IN ('DONE','FAILED','CANCELLED')
+        ORDER BY started_at ASC`,
+    );
   }
 
   addStep(input: {

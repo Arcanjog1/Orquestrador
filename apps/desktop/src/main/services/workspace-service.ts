@@ -194,7 +194,12 @@ export class WorkspaceService {
     return Promise.all(
       records.map(async (record) => ({
         ...this.toView(record),
-        branch: await this.currentBranch(record.local_path),
+        // A cloud project's branch is the one it was created for; there is no
+        // working copy on this computer to read it from.
+        branch:
+          record.environment === 'cloud'
+            ? record.branch
+            : await this.currentBranch(record.local_path),
       })),
     );
   }
@@ -239,6 +244,57 @@ export class WorkspaceService {
       localPath,
       repositoryUrl: input.repositoryUrl ?? null,
       defaultBranch: input.defaultBranch ?? null,
+    });
+    return this.toView(record);
+  }
+
+  /**
+   * A project whose runs execute in the cloud.
+   *
+   * No folder is asked for and none is checked, because there is none: the
+   * repository is cloned inside the remote workspace when a run starts. That
+   * is the whole promise of cloud mode, and a hidden `resolve(localPath)`
+   * here would quietly break it - which is exactly what the first version of
+   * this did.
+   */
+  createCloud(input: {
+    name?: string;
+    /** `owner/name`, as GitHub names it. */
+    repository: string;
+    branch: string;
+    repositoryPrivate?: boolean;
+    /** The coordinator to send runs to. Null uses the configured default. */
+    endpoint?: string | null;
+  }): WorkspaceView {
+    const repository = input.repository.trim();
+    if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repository)) {
+      throw new WorkspaceError('Escolha um repositório no formato dono/nome.');
+    }
+    const branch = input.branch.trim();
+    if (!branch) throw new WorkspaceError('Escolha a branch em que o trabalho começa.');
+
+    // One project per repository *and* branch: two branches of the same
+    // repository are two lines of work, and merging them into one project
+    // would mix their conversations and their history.
+    const existing = this.database.workspaces
+      .list()
+      .find((w) => w.environment === 'cloud' && w.repository_full_name === repository && w.branch === branch);
+    if (existing) {
+      throw new WorkspaceError(`${repository} (${branch}) já está adicionado como projeto de nuvem.`);
+    }
+
+    const record = this.database.workspaces.create({
+      id: newId('ws'),
+      name: input.name?.trim() || repository,
+      // Deliberately empty. Nothing on this computer belongs to this project.
+      localPath: '',
+      environment: 'cloud',
+      repositoryFullName: repository,
+      repositoryPrivate: input.repositoryPrivate ?? null,
+      branch,
+      repositoryUrl: `https://github.com/${repository}`,
+      defaultBranch: branch,
+      cloudEndpoint: input.endpoint ?? null,
     });
     return this.toView(record);
   }
@@ -610,7 +666,10 @@ export class WorkspaceService {
     return {
       id: record.id,
       name: record.display_name,
+      environment: record.environment === 'cloud' ? 'cloud' : 'local',
       localPath: record.local_path,
+      repository: record.repository_full_name,
+      repositoryPrivate: record.repository_private === 1,
       repositoryUrl: record.repository_url,
       defaultBranch: record.default_branch,
       // Filled in by `listWithBranches`; a plain view does not touch the disk.

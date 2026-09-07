@@ -290,7 +290,19 @@ export interface TeamMemberInput {
 export interface WorkspaceView {
   readonly id: string;
   readonly name: string;
+  /**
+   * Where a run executes.
+   *
+   * `local` is a folder on this computer. `cloud` is an isolated workspace
+   * provisioned elsewhere, and then there is **no folder on this computer at
+   * all** - `localPath` is empty, and the interface must not offer to open it.
+   */
+  readonly environment: 'local' | 'cloud';
+  /** Empty for a cloud project. Read `environment` before this. */
   readonly localPath: string;
+  /** `owner/name` for a cloud project; null for a local one. */
+  readonly repository: string | null;
+  readonly repositoryPrivate: boolean;
   readonly repositoryUrl: string | null;
   readonly defaultBranch: string | null;
   /**
