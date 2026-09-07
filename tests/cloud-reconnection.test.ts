@@ -26,7 +26,14 @@ import { CloudClient, CloudError } from '../apps/desktop/src/main/services/cloud
 import { CloudService } from '../apps/desktop/src/main/services/cloud-service.js';
 import { EventBus } from '../apps/desktop/src/main/events.js';
 import { newId } from '../src/database/repositories.js';
+import { createDesktopFixture, fakeSecretStore } from './helpers/desktop-fixture.js';
+import type { IpcResult } from '../apps/desktop/src/shared/ipc-contract.js';
 import type { ProvisionedWorkspace, WorkspaceProvisioner } from '../src/cloud/provisioner.js';
+
+function value<T>(result: IpcResult<unknown>): T {
+  assert.equal(result.ok, true, result.ok === false ? result.error.message : '');
+  return (result as { ok: true; value: T }).value;
+}
 
 function memoryDatabase(): Database {
   return new Database({ filePath: ':memory:' });
@@ -322,5 +329,117 @@ test('the client refuses a token the coordinator does not know, and says which i
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await coordinator.shutdown();
     cloud.close();
+  }
+});
+
+/* -- the interface's own path ---------------------------------------------- */
+
+test('sending a message in a cloud project goes to the cloud, not to a local folder', async () => {
+  // The rule the interface depends on: where work goes is a property of the
+  // project, not of which button was pressed. A cloud project with no folder
+  // on this computer must never fall through to the local loop, which would
+  // fail on a path that does not exist - or, far worse, succeed against one
+  // that happens to.
+  const cloud = memoryDatabase();
+  const coordinator = new Coordinator({
+    database: cloud,
+    provisioner: stalling,
+    credentials: { openaiApiKey: 'sk-test' },
+  });
+  const principal = coordinator.store.createPrincipal({ displayName: 'Pessoa' });
+  const token = coordinator.store.issueSession({ principalId: principal.id }).token;
+  const server = createCoordinatorServer({ coordinator });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+
+  const fixture = createDesktopFixture({ secrets: fakeSecretStore() });
+  try {
+    const status = value<{ configured: boolean }>(
+      await fixture.router.handle('cloud.connect', {
+        endpoint: `http://127.0.0.1:${port}`,
+        token,
+      }),
+    );
+    assert.equal(status.configured, true);
+    // The token is stored, never handed back.
+    assert.ok(!JSON.stringify(status).includes(token), 'the device token was echoed to the renderer');
+
+    const workspace = value<{ id: string; environment: string; localPath: string }>(
+      await fixture.router.handle('workspace.createCloud', {
+        repository: 'Arcanjog1/Orquestrador',
+        branch: 'main',
+        repositoryPrivate: true,
+      }),
+    );
+    assert.equal(workspace.environment, 'cloud');
+    assert.equal(workspace.localPath, '', 'a cloud project must not claim a folder on this computer');
+
+    value(await fixture.router.handle('accounts.create', { name: 'Claude', provider: 'anthropic' }));
+    const agents = value<Array<{ id: string; role: string }>>(
+      await fixture.router.handle('agents.list', null),
+    );
+    value(
+      await fixture.router.handle('workspace.setAgents', {
+        workspaceId: workspace.id,
+        orchestratorAgentId: agents.find((a) => a.role === 'ORCHESTRATOR')!.id,
+        workerAgentId: agents.find((a) => a.role === 'CODING_WORKER')!.id,
+      }),
+    );
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'c' }),
+    );
+
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', {
+        sessionId: session.id,
+        text: 'faça algo na nuvem',
+      }),
+    );
+
+    // It reached the coordinator, and the local row knows which run it is.
+    const local = fixture.services.database.runs.require(sent.run.id);
+    assert.ok(local.remote_run_id, 'the message never reached the cloud');
+    const remote = coordinator.store.requireRunUnscoped(local.remote_run_id!);
+    assert.equal(remote.repository, 'Arcanjog1/Orquestrador');
+    assert.equal(remote.branch, 'main');
+    assert.equal(remote.objective, 'faça algo na nuvem');
+
+    // Disconnecting is local: the run in the cloud is untouched.
+    value(await fixture.router.handle('cloud.disconnect', null));
+    const after = value<{ configured: boolean }>(await fixture.router.handle('cloud.status', null));
+    assert.equal(after.configured, false);
+    assert.equal(coordinator.store.requireRunUnscoped(local.remote_run_id!).status, remote.status);
+  } finally {
+    await fixture.cleanup();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await coordinator.shutdown();
+    cloud.close();
+  }
+});
+
+test('a coordinator reached over plain http on a real network is refused', async () => {
+  // A device token in clear on a network is the credential gone, and there is
+  // no option to allow it. Loopback is the one exception, for a self-hosted
+  // coordinator on the same machine.
+  const fixture = createDesktopFixture({ secrets: fakeSecretStore() });
+  try {
+    const refused = await fixture.router.handle('cloud.connect', {
+      endpoint: 'http://coordenador.exemplo.invalid',
+      token: 'orq_aaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    assert.equal(refused.ok, false);
+    assert.match(
+      refused.ok === false ? refused.error.message : '',
+      /https/i,
+      'the refusal must say why',
+    );
+    // And a credential smuggled into the URL is refused as well.
+    const withCredential = await fixture.router.handle('cloud.connect', {
+      endpoint: 'https://user:secret@coordenador.exemplo.invalid',
+      token: 'orq_aaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    assert.equal(withCredential.ok, false);
+  } finally {
+    await fixture.cleanup();
   }
 });

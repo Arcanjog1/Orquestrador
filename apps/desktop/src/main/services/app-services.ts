@@ -35,6 +35,8 @@ import { RuntimeService } from './runtime-service.js';
 import { VerificationService } from './verification-service.js';
 import { WorkspaceService, orchestratorSelectionOf } from './workspace-service.js';
 import { GitHubService, type SecretStore } from './github-service.js';
+import { CloudAccountService } from './cloud-account-service.js';
+import { CloudService } from './cloud-service.js';
 import type { GitHubClientOptions } from '../core.js';
 import { CodexAdapter } from '../adapters/codex-adapter.js';
 import { DECISION_JSON_SCHEMA } from '../core.js';
@@ -92,6 +94,10 @@ export class AppServices {
   readonly chat: ChatService;
   readonly projects: ProjectService;
   readonly github: GitHubService;
+  /** This computer's connection to a Run Coordinator. */
+  readonly cloudAccount: CloudAccountService;
+  /** Cloud runs: submitting them, and catching up with them. */
+  readonly cloud: CloudService;
 
   constructor(options: AppServicesOptions = {}) {
     this.paths = options.paths ?? appPaths();
@@ -148,6 +154,12 @@ export class AppServices {
       options.github ?? {},
     );
     this.workspaces.bindGitHub(this.github);
+    this.cloudAccount = new CloudAccountService(this.database, options.secrets ?? NO_SECRET_STORE);
+    this.cloud = new CloudService({
+      database: this.database,
+      events: this.events,
+      clientFor: (endpoint) => this.cloudAccount.clientFor(endpoint),
+    });
 
     this.database.providers.ensureSeeded();
     this.agents.sync();
@@ -312,6 +324,7 @@ export class AppServices {
 
   /** Stops everything still running. Called on quit and on test teardown. */
   async shutdown(): Promise<void> {
+    this.cloud.stopPolling();
     await this.processManager.cancelAll();
     this.database.close();
   }

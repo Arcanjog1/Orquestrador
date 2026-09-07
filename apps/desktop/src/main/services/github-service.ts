@@ -205,6 +205,32 @@ export class GitHubService {
   }
 
   /**
+   * The branches of one repository, default first.
+   *
+   * The cloud picker needs this because a cloud project has no working copy to
+   * read branches from - the repository lives only on GitHub until a run
+   * clones it remotely.
+   */
+  async branches(repository: string): Promise<{ name: string; protected: boolean; isDefault: boolean }[]> {
+    const [owner, name] = repository.split('/');
+    if (!owner || !name) throw new GitHubServiceError('Escolha um repositório no formato dono/nome.');
+    const token = await this.accessToken();
+    const repositories = await this.client.repositories(token);
+    const known = repositories.find((r) => r.fullName.toLowerCase() === repository.toLowerCase());
+    const fallback = known?.defaultBranch ?? 'main';
+    const branches = await this.client.branches(token, owner, name);
+    return branches
+      .map((branch) => ({
+        name: branch.name,
+        protected: branch.protected,
+        isDefault: branch.name === fallback,
+      }))
+      // The default branch is what a person means nine times out of ten;
+      // scrolling for it every time is a small daily tax.
+      .sort((a, b) => Number(b.isDefault) - Number(a.isDefault) || a.name.localeCompare(b.name));
+  }
+
+  /**
    * The environment git needs to reach a github.com remote as this login.
    * Empty for any other remote, and when nobody is signed in - git then
    * behaves exactly as it would without the application.

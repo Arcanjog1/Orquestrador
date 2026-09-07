@@ -21,6 +21,7 @@ import {
 import { IpcValidationError, REQUEST_VALIDATORS } from '../shared/validation.js';
 import { RecordNotFoundError } from './core.js';
 import type { AppServices } from './services/app-services.js';
+import { toMessageView } from './services/views.js';
 
 /** Capabilities the router needs that only the shell can provide. */
 export interface ShellBridge {
@@ -138,6 +139,9 @@ export class IpcRouter {
     this.handlers.set('github.cancelConnect', () => ({ cancelled: s.github.cancelConnect() }));
     this.handlers.set('github.disconnect', () => s.github.disconnect());
     this.handlers.set('github.repositories', () => s.github.repositories());
+    this.handlers.set('github.branches', (p) =>
+      s.github.branches((p as { repository: string }).repository),
+    );
     this.handlers.set('github.pullRequestStatus', (p) =>
       s.workspaces.pullRequestStatus((p as { workspaceId: string }).workspaceId),
     );
@@ -164,6 +168,9 @@ export class IpcRouter {
     }));
     this.handlers.set('workspace.create', (p) =>
       s.workspaces.create(p as { name: string; localPath: string; repositoryUrl?: string }),
+    );
+    this.handlers.set('workspace.createCloud', (p) =>
+      s.workspaces.createCloud(p as IpcMap['workspace.createCloud']['request']),
     );
     this.handlers.set('workspace.clone', (p) =>
       s.workspaces.clone(p as { repositoryUrl: string; parentPath: string; name: string }),
@@ -273,10 +280,32 @@ export class IpcRouter {
     this.handlers.set('chat.listMessages', (p) =>
       s.chat.listMessages((p as { sessionId: string }).sessionId),
     );
-    this.handlers.set('chat.sendMessage', (p) => {
+    this.handlers.set('chat.sendMessage', async (p) => {
       const input = p as { sessionId: string; text: string };
+      // Where the message goes is a property of the project, not of the
+      // button: a cloud project's work is submitted to the coordinator, and
+      // this window is then free to close.
+      const session = s.database.chat.requireSession(input.sessionId);
+      const workspace = s.database.workspaces.require(session.workspace_id);
+      if (workspace.environment === 'cloud') {
+        const message = s.database.chat.addMessage({
+          sessionId: session.id,
+          author: 'user',
+          body: input.text,
+        });
+        const run = await s.cloud.start({ sessionId: session.id, objective: input.text });
+        s.database.chat.setMessageRun(message.id, run.id);
+        return { message: toMessageView(message), run };
+      }
       return s.chat.sendMessage(input.sessionId, input.text);
     });
+
+    this.handlers.set('cloud.status', () => s.cloudAccount.status());
+    this.handlers.set('cloud.connect', (p) =>
+      s.cloudAccount.connect(p as IpcMap['cloud.connect']['request']),
+    );
+    this.handlers.set('cloud.disconnect', () => s.cloudAccount.disconnect());
+    this.handlers.set('cloud.sync', async () => ({ applied: await s.cloud.syncAll() }));
 
     this.handlers.set('run.get', (p) => s.orchestration.view((p as { runId: string }).runId));
     this.handlers.set('run.list', (p) =>

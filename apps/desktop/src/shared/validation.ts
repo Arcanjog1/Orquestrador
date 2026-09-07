@@ -185,6 +185,44 @@ function nullable<T>(inner: Validator<T>): Validator<T | null> {
 export const runtimeId = oneOf(['codex', 'claude-code', 'git'] as const);
 
 /**
+ * `owner/name`, as GitHub names a repository.
+ *
+ * Kept narrow on purpose: this string reaches a clone URL and a container
+ * label, so no slashes beyond the one, no `..`, no whitespace, nothing that
+ * could be read as a path or another argument.
+ */
+export const repositoryFullName: Validator<string> = (value, path) => {
+  const text = str({ min: 3, max: 200 })(value, path);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(text)) {
+    fail(path, 'must look like dono/nome');
+  }
+  if (text.includes('..')) fail(path, 'must not contain ".."');
+  return text;
+};
+
+/**
+ * A coordinator's base URL.
+ *
+ * https only, except on loopback: a device token travelling in clear over a
+ * network is the credential gone. There is no option to turn this off.
+ */
+export const cloudEndpoint: Validator<string> = (value, path) => {
+  const text = str({ min: 8, max: 2048 })(value, path);
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return fail(path, 'must be a URL');
+  }
+  const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
+    fail(path, 'must use https (http is allowed only for 127.0.0.1)');
+  }
+  if (url.username || url.password) fail(path, 'must not carry a credential in the URL');
+  return text;
+};
+
+/**
  * A model name as the CLIs take it (`gpt-5.1-codex`, `claude-opus-5`,
  * `provider/model`). Never whitespace, never a leading dash: this becomes one
  * argv entry after `--model`, and must not be readable as another flag.
@@ -282,6 +320,7 @@ export const REQUEST_VALIDATORS: {
   'github.cancelConnect': noArgs,
   'github.disconnect': noArgs,
   'github.repositories': noArgs,
+  'github.branches': obj({ repository: repositoryFullName }),
   'github.pullRequestStatus': obj({ workspaceId: id }),
   'github.createPullRequest': obj(
     {
@@ -311,6 +350,25 @@ export const REQUEST_VALIDATORS: {
     },
     { optional: ['repositoryUrl', 'defaultBranch'] },
   ),
+  'workspace.createCloud': obj(
+    {
+      repository: repositoryFullName,
+      branch: branchName,
+      name: str({ min: 1, max: 120 }),
+      repositoryPrivate: bool,
+      endpoint: nullable(cloudEndpoint),
+    },
+    { optional: ['name', 'repositoryPrivate', 'endpoint'] },
+  ),
+  'cloud.status': noArgs,
+  'cloud.connect': obj({
+    endpoint: cloudEndpoint,
+    // The device token, pasted from the coordinator. Long, opaque, and never
+    // echoed back to the renderer once it is stored.
+    token: str({ min: 16, max: 4096, pattern: /^[A-Za-z0-9._~+/=-]+$/, what: 'um token' }),
+  }),
+  'cloud.disconnect': noArgs,
+  'cloud.sync': noArgs,
   'workspace.clone': obj({
     repositoryUrl,
     parentPath: absolutePath(),

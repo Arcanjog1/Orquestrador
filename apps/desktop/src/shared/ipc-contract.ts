@@ -42,6 +42,7 @@ export const REQUEST_CHANNELS = [
   'github.cancelConnect',
   'github.disconnect',
   'github.repositories',
+  'github.branches',
   'github.pullRequestStatus',
   'github.createPullRequest',
   'workspace.fetch',
@@ -54,6 +55,7 @@ export const REQUEST_CHANNELS = [
   'workspace.list',
   'workspace.selectFolder',
   'workspace.create',
+  'workspace.createCloud',
   'workspace.clone',
   'workspace.setAgents',
   'workspace.setTeam',
@@ -63,6 +65,11 @@ export const REQUEST_CHANNELS = [
   'workspace.branches',
   'workspace.checkout',
   'workspace.openFolder',
+
+  'cloud.status',
+  'cloud.connect',
+  'cloud.disconnect',
+  'cloud.sync',
 
   'verifications.list',
   'verifications.create',
@@ -517,6 +524,30 @@ export interface GitHubRepositoryView {
   readonly permissions: { readonly push: boolean; readonly admin: boolean };
 }
 
+/** One branch of a repository, for the cloud picker. */
+export interface GitHubBranchView {
+  readonly name: string;
+  readonly protected: boolean;
+  /** True when this is the repository's default branch. */
+  readonly isDefault: boolean;
+}
+
+/**
+ * Whether this computer can reach the cloud, and as whom.
+ *
+ * `configured` is about this application; `reachable` is about the network.
+ * Keeping them apart is what lets the interface say "the work is still going,
+ * this window just cannot see it" instead of "failed".
+ */
+export interface CloudStatusView {
+  readonly configured: boolean;
+  readonly reachable: boolean;
+  readonly endpoint: string | null;
+  /** How the coordinator names this device. Never the token. */
+  readonly deviceLabel: string | null;
+  readonly problem: string | null;
+}
+
 export interface PullRequestView {
   readonly number: number;
   readonly htmlUrl: string;
@@ -618,6 +649,10 @@ export interface IpcMap {
   'github.cancelConnect': { request: void; response: { cancelled: boolean } };
   'github.disconnect': { request: void; response: GitHubStatusView };
   'github.repositories': { request: void; response: readonly GitHubRepositoryView[] };
+  'github.branches': {
+    request: { repository: string };
+    response: readonly GitHubBranchView[];
+  };
   'github.pullRequestStatus': { request: { workspaceId: string }; response: PullRequestStatusView };
   'github.createPullRequest': {
     request: { workspaceId: string; title: string; body?: string; base?: string };
@@ -636,6 +671,16 @@ export interface IpcMap {
   'workspace.selectFolder': { request: void; response: { path: string | null } };
   'workspace.create': {
     request: { name: string; localPath: string; repositoryUrl?: string; defaultBranch?: string };
+    response: WorkspaceView;
+  };
+  'workspace.createCloud': {
+    request: {
+      repository: string;
+      branch: string;
+      name?: string;
+      repositoryPrivate?: boolean;
+      endpoint?: string | null;
+    };
     response: WorkspaceView;
   };
   'workspace.clone': {
@@ -680,6 +725,16 @@ export interface IpcMap {
    * anything. Nothing here executes a command: the loop resolves an id to the
    * stored command when a run asks for it.
    */
+  'cloud.status': { request: void; response: CloudStatusView };
+  'cloud.connect': {
+    /** The coordinator and the device token a person pasted from it. */
+    request: { endpoint: string; token: string };
+    response: CloudStatusView;
+  };
+  'cloud.disconnect': { request: void; response: CloudStatusView };
+  /** Catches every unfinished cloud run up. Returns how many events applied. */
+  'cloud.sync': { request: void; response: { applied: number } };
+
   'verifications.list': {
     request: { workspaceId: string };
     response: readonly VerificationView[];
