@@ -340,6 +340,15 @@ function providerLabel(providerId: string): string {
 /** A classified provider failure, in words rather than a code. */
 function failureLabel(kind: string): string {
   const labels: Record<string, string> = {
+    // The five this product learned to tell apart. Naming them in Portuguese
+    // matters more here than anywhere else: "tool-permission-denied" on screen
+    // is the difference between a person knowing to authorise something and a
+    // person concluding the application is broken.
+    "tool-permission-denied": "uma ferramenta necessária foi recusada",
+    "approval-required": "faltou uma aprovação que ninguém pôde dar",
+    "empty-response": "o worker executou e não devolveu nada",
+    "workspace-invalid": "a pasta do projeto não pôde ser usada",
+    "evidence-unavailable": "não foi possível observar a pasta",
     "insufficient-credit": "conta sem saldo ou fora da cota",
     authentication: "credencial não aceita",
     permission: "sem permissão para o que foi pedido",

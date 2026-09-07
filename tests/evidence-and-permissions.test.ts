@@ -14,7 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GitEvidenceCollector } from '../src/git/git-evidence-collector.js';
@@ -368,4 +368,40 @@ test('genuine no-progress still escalates, so the fix does not blunt the router'
     'BALANCED',
     `real no-progress still escalates (${routed.selectionReason})`,
   );
+});
+
+/**
+ * Every failure kind the program can classify is named on screen.
+ *
+ * This test exists because the map had already drifted: the five kinds this
+ * session added were classified, recorded and reasoned about, and then shown
+ * to the person as `tool-permission-denied` - the raw English key, in the one
+ * dialog whose entire job is answering "why did nothing change?".
+ *
+ * The labels live in a renderer component that the root suite cannot import,
+ * so this reads both files. Comparing the text is cruder than calling the
+ * function, and it is still the difference between noticing and not.
+ */
+test('every classified failure has a label a person can read', () => {
+  // Paths from the repository root, not from `import.meta.url`: this suite
+  // runs from `dist-tests/`, and these two files are never compiled there.
+  const root = process.cwd();
+  const types = readFileSync(join(root, 'src', 'core', 'types.ts'), 'utf8');
+  const declaration = types.slice(types.indexOf('export type ProviderFailureKind'));
+  const kinds = [...declaration.slice(0, declaration.indexOf(';')).matchAll(/'([a-z-]+)'/g)].map(
+    (match) => match[1],
+  );
+  assert.ok(kinds.length >= 17, `found ${kinds.length} failure kinds`);
+
+  const dialog = readFileSync(
+    join(root, 'apps', 'desktop', 'src', 'renderer', 'components', 'orch', 'RunDialogs.tsx'),
+    'utf8',
+  );
+  const labels = dialog.slice(dialog.indexOf('function failureLabel'));
+  const body = labels.slice(0, labels.indexOf('};'));
+
+  const missing = kinds.filter(
+    (kind) => !body.includes(`"${kind}":`) && !new RegExp(`\\b${kind}:`).test(body),
+  );
+  assert.deepEqual(missing, [], `failure kinds shown to the person as raw keys: ${missing.join(', ')}`);
 });
