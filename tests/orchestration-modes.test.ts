@@ -275,6 +275,26 @@ test('E2E: objective, orchestrator, Claude 1, review, Claude 2, review, DONE - w
     assert.equal(record.invocation_count, 5, 'three orchestrator calls and two worker calls');
     // Five metered calls at one cent each, summed as they happened.
     assert.equal(Math.round((record.total_cost_usd ?? 0) * 100), 5);
+
+    // What "Detalhes" shows: who answered, reached how, as which team member,
+    // and what it consumed. This is the timeline's evidence, and it comes from
+    // the record rather than from anything reconstructed for display.
+    const detail = t.fixture.services.orchestration.detail(sent.run.id);
+    assert.equal(detail.invocations.length, 5);
+    const workerCalls = detail.invocations.filter((i) => i.role === 'CODING_WORKER');
+    assert.deepEqual(
+      workerCalls.map((i) => i.workerId),
+      ['worker-1', 'worker-2'],
+      'each delegation names the member it went to',
+    );
+    for (const invocation of detail.invocations) {
+      assert.equal(invocation.providerId !== null, true, 'the vendor is on the record');
+      assert.equal(invocation.connectionKind, 'api');
+      assert.equal(invocation.billing, 'api-metered');
+      assert.equal(invocation.totalTokens, 1200);
+      assert.equal(invocation.costUsd, 0.01);
+      assert.equal(invocation.failureKind, null);
+    }
   } finally {
     await t.cleanup();
   }

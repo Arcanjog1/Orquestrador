@@ -303,6 +303,63 @@ function parseDetail(step: RunStepView): Record<string, unknown> | null {
   }
 }
 
+/** The vendor's name, as a person recognises it. */
+function providerLabel(providerId: string): string {
+  return providerId === "openai" ? "OpenAI" : providerId === "anthropic" ? "Anthropic" : providerId;
+}
+
+/** A classified provider failure, in words rather than a code. */
+function failureLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    "insufficient-credit": "conta sem saldo ou fora da cota",
+    authentication: "credencial não aceita",
+    permission: "sem permissão para o que foi pedido",
+    "rate-limit": "limite de requisições do provider",
+    timeout: "o provider não respondeu a tempo",
+    network: "não foi possível falar com o provider",
+    "invalid-request": "o provider recusou o formato da chamada",
+    "model-unavailable": "modelo indisponível para esta conta",
+    schema: "resposta em formato inesperado",
+    "provider-error": "erro do provider",
+    cancelled: "cancelada",
+    "budget-exceeded": "limite desta execução atingido",
+  };
+  return labels[kind] ?? kind;
+}
+
+/**
+ * What one invocation consumed.
+ *
+ * The rule this function exists for: a figure the provider did not report is
+ * "não informado", never zero. An invocation that spent an unknown amount must
+ * not read like one that spent nothing.
+ */
+function usageLine(inv: {
+  billing: string | null;
+  totalTokens: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+}): string {
+  const parts: string[] = [];
+  if (inv.billing === "subscription") parts.push("assinatura");
+  else if (inv.billing === "api-metered") parts.push("cobrança por uso");
+
+  const tokens = inv.totalTokens ?? ((inv.inputTokens ?? 0) + (inv.outputTokens ?? 0) || null);
+  parts.push(tokens === null ? "tokens não informados" : `${tokens.toLocaleString("pt-BR")} tokens`);
+
+  if (inv.billing === "api-metered") {
+    parts.push(
+      inv.costUsd === null
+        ? "custo não informado"
+        : `US$ ${inv.costUsd.toFixed(inv.costUsd < 1 ? 4 : 2)} (estimado)`,
+    );
+  } else if (inv.costUsd !== null) {
+    parts.push(`US$ ${inv.costUsd.toFixed(4)} (informado pelo CLI)`);
+  }
+  return parts.join(" · ");
+}
+
 export function RunDetailDialog({
   runId,
   onOpenChange,
@@ -397,14 +454,33 @@ export function RunDetailDialog({
               <SectionLabel>Invocações</SectionLabel>
               <ul className="mt-2 space-y-1">
                 {detail.invocations.map((inv) => (
-                  <li key={inv.id} className="text-xs">
+                  <li key={inv.id} className="text-xs" data-testid="invocation-row">
                     <span className="font-mono text-muted-foreground">it. {inv.iteration}</span>{" "}
-                    <span className="font-semibold">{inv.role === "ORCHESTRATOR" ? "Codex" : "Claude Code"}</span>{" "}
+                    <span className="font-semibold">
+                      {inv.role === "ORCHESTRATOR" ? "Orquestrador" : (inv.workerId ?? "Worker")}
+                    </span>{" "}
                     <span className="text-muted-foreground">
+                      {/* Who answered and how it was reached: a person needs to
+                          know whether this invocation was on their plan or on a
+                          metered key, and no other line says so. */}
+                      {inv.providerId ? `${providerLabel(inv.providerId)} · ` : ""}
+                      {inv.connectionKind === "api"
+                        ? "API "
+                        : inv.connectionKind === "cli"
+                          ? "ferramenta oficial "
+                          : ""}
                       {inv.outcome}
                       {inv.exitCode !== null ? ` · código ${inv.exitCode}` : ""}
                       {inv.durationMs !== null ? ` · ${(inv.durationMs / 1000).toFixed(1)}s` : ""}
                     </span>
+                    {inv.failureKind && (
+                      <p className="mt-0.5 text-danger" data-testid="invocation-failure">
+                        Falha: {failureLabel(inv.failureKind)}
+                      </p>
+                    )}
+                    <p className="mt-0.5 text-muted-foreground" data-testid="invocation-usage">
+                      {usageLine(inv)}
+                    </p>
                     {inv.task && <p className="mt-0.5 truncate text-muted-foreground">{inv.task}</p>}
                     {inv.selectionMode && (
                       <p className="mt-0.5 text-muted-foreground" data-testid="invocation-routing">

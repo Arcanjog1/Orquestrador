@@ -150,6 +150,17 @@ export function toRunDetailView(
       selectionMode: str(row.selection_mode),
       selectionReason: str(row.selection_reason) === null ? null : redact(str(row.selection_reason)!),
       fallbackUsed: flag(row.fallback_used),
+      providerId: str(row.provider_id),
+      connectionKind: str(row.connection_kind),
+      workerId: str(row.worker_id),
+      billing: str(row.billing),
+      // Nulls stay null all the way to the screen: a provider that reported
+      // nothing must not read as an invocation that consumed nothing.
+      inputTokens: num(row.input_tokens),
+      outputTokens: num(row.output_tokens),
+      totalTokens: num(row.total_tokens),
+      costUsd: num(row.cost_usd),
+      failureKind: str(row.failure_kind),
     })),
     verifications: verifications.map((row) => ({
       iteration: num(row.iteration) ?? 0,

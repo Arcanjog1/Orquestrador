@@ -503,6 +503,23 @@ export interface RunInvocationView {
   readonly selectionMode: string | null;
   readonly selectionReason: string | null;
   readonly fallbackUsed: boolean | null;
+  /** Which vendor answered, and reached how. Null on rows from before this. */
+  readonly providerId: string | null;
+  readonly connectionKind: string | null;
+  /** Which team member this was, by the id the orchestrator delegates with. */
+  readonly workerId: string | null;
+  /** `subscription` or `api-metered`. Null when nothing said. */
+  readonly billing: string | null;
+  /**
+   * What this invocation consumed. Every field may be null, and null means
+   * "not reported" - rendered as such, never as zero.
+   */
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly totalTokens: number | null;
+  readonly costUsd: number | null;
+  /** The classified provider failure, when there was one. */
+  readonly failureKind: string | null;
 }
 
 export interface RunVerificationView {
