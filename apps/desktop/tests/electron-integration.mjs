@@ -279,6 +279,70 @@ test('a workspace added over IPC is persisted and listed back', async () => {
   }
 });
 
+test('a cloud project is created through the real bridge, and never claims a folder', async () => {
+  // The property this exists for: a cloud project must not require, create or
+  // report a folder on the user's computer. It is asserted through the real
+  // preload bridge, in a real Electron window, because that is the surface a
+  // person actually reaches - a service-level test could not catch a renderer
+  // that quietly sent a path anyway.
+  const window = await openWindow();
+
+  const created = await window.webContents.executeJavaScript(
+    `window.api.workspace.createCloud(${JSON.stringify({
+      repository: 'Arcanjog1/Orquestrador',
+      branch: 'main',
+      repositoryPrivate: true,
+    })})`,
+  );
+  assert.equal(created.environment, 'cloud');
+  assert.equal(created.localPath, '', 'a cloud project claimed a folder');
+  assert.equal(created.repository, 'Arcanjog1/Orquestrador');
+  assert.equal(created.repositoryPrivate, true);
+
+  const listed = await window.webContents.executeJavaScript('window.api.workspace.list()');
+  const back = listed.find((w) => w.id === created.id);
+  assert.ok(back, 'the cloud project was not listed back');
+  assert.equal(back.environment, 'cloud');
+  assert.equal(back.branch, 'main', 'the branch must survive without a working copy');
+
+  // The same repository and branch twice is refused rather than silently
+  // merged: two projects sharing one line of work would mix their history.
+  const again = await window.webContents.executeJavaScript(
+    `window.api.workspace.createCloud(${JSON.stringify({
+      repository: 'Arcanjog1/Orquestrador',
+      branch: 'main',
+    })}).then(() => 'created', (e) => 'refused: ' + e.message)`,
+  );
+  assert.match(again, /^refused:/);
+
+  // And a repository name that is really a path is refused at the boundary,
+  // before any service sees it.
+  const smuggled = await window.webContents.executeJavaScript(
+    `window.api.workspace.createCloud(${JSON.stringify({
+      repository: '../../etc/passwd',
+      branch: 'main',
+    })}).then(() => 'created', (e) => 'refused: ' + e.message)`,
+  );
+  assert.match(smuggled, /^refused:/);
+});
+
+test('the cloud connection refuses plain http on a network, and never reads the token back', async () => {
+  const window = await openWindow();
+
+  const overHttp = await window.webContents.executeJavaScript(
+    `window.api.cloud.connect(${JSON.stringify({
+      endpoint: 'http://coordenador.exemplo.invalid',
+      token: 'orq_aaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    })}).then(() => 'connected', (e) => 'refused: ' + e.message)`,
+  );
+  assert.match(overHttp, /^refused:/, 'a device token would have travelled in clear');
+
+  // Nothing is connected, and the status says so without inventing a token.
+  const status = await window.webContents.executeJavaScript('window.api.cloud.status()');
+  assert.equal(status.configured, false);
+  assert.ok(!JSON.stringify(status).includes('orq_'), 'the status leaked a token');
+});
+
 test('a verification is added, edited and switched off on the real Settings screen', async () => {
   const window = await openWindow();
   const dir = mkdtempSync(join(tmpdir(), 'lao-electron-verif-'));

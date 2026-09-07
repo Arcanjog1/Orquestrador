@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, ExternalLink, Loader2, X } from "lucide-react";
+import { Check, Cloud, Copy, ExternalLink, HardDrive, Loader2, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -31,6 +31,7 @@ import type { TimelineEntry } from "@/lib/timeline";
 import type {
   AccountProgressEvent,
   AccountView,
+  GitHubBranchView,
   GitHubRepositoryView,
   WorkspaceView,
 } from "@shared/ipc-contract";
@@ -555,16 +556,27 @@ export function AddProjectDialog({
   onOpenChange,
   onAdded,
   githubConnected = false,
+  cloudConnected = false,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onAdded: (workspaceId: string) => void;
   /** With a GitHub login the person picks from their repositories. */
   githubConnected?: boolean;
+  /** With a coordinator connected, "Nuvem" is a real choice rather than a hint. */
+  cloudConnected?: boolean;
 }) {
+  // Where this project's work will run. In "Nuvem" no folder is asked for and
+  // none is used: the repository is cloned inside the remote workspace when a
+  // run starts, which is the whole point of the mode.
+  const [environment, setEnvironment] = useState<"local" | "cloud">("local");
+  const [branches, setBranches] = useState<readonly GitHubBranchView[] | null>(null);
+  const [branch, setBranch] = useState<string>("");
+  const [branchesError, setBranchesError] = useState<string | null>(null);
+  const [cloudRepo, setCloudRepo] = useState<GitHubRepositoryView | null>(null);
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState<"folder" | "clone" | null>(null);
+  const [busy, setBusy] = useState<"folder" | "clone" | "cloud" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [repos, setRepos] = useState<readonly GitHubRepositoryView[] | null>(null);
   const [reposError, setReposError] = useState<string | null>(null);
@@ -588,9 +600,65 @@ export function AddProjectDialog({
     };
   }, [open, githubConnected]);
 
+  // The chosen repository's branches, read from GitHub - a cloud project has
+  // no working copy on this computer to read them from.
+  useEffect(() => {
+    if (environment !== "cloud" || !cloudRepo) {
+      setBranches(null);
+      setBranchesError(null);
+      return;
+    }
+    let alive = true;
+    setBranches(null);
+    setBranchesError(null);
+    setBranch(cloudRepo.defaultBranch);
+    api.github
+      .branches({ repository: cloudRepo.fullName })
+      .then((list) => {
+        if (!alive) return;
+        setBranches(list);
+        const preferred = list.find((b) => b.isDefault) ?? list[0];
+        if (preferred) setBranch(preferred.name);
+      })
+      .catch((e: unknown) => alive && setBranchesError(messageOf(e)));
+    return () => {
+      alive = false;
+    };
+  }, [environment, cloudRepo]);
+
+  useEffect(() => {
+    if (!open) {
+      setEnvironment("local");
+      setCloudRepo(null);
+      setBranch("");
+      setError(null);
+    }
+  }, [open]);
+
   const visibleRepos = (repos ?? [])
     .filter((r) => r.fullName.toLowerCase().includes(repoQuery.trim().toLowerCase()))
     .slice(0, 50);
+
+  /** Creates the cloud project. No folder is chosen, because there is none. */
+  const createCloud = async () => {
+    if (!cloudRepo || !branch) return;
+    setBusy("cloud");
+    setError(null);
+    try {
+      const created = await api.workspace.createCloud({
+        repository: cloudRepo.fullName,
+        branch,
+        name: cloudRepo.name,
+        repositoryPrivate: cloudRepo.private,
+      });
+      onOpenChange(false);
+      onAdded(created.id);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const fail = (e: unknown) =>
     setError(e instanceof Error ? e.message : "Não foi possível adicionar o projeto.");
@@ -641,10 +709,47 @@ export function AddProjectDialog({
         <DialogHeader>
           <DialogTitle className="text-sm">Adicionar projeto</DialogTitle>
           <DialogDescription className="text-xs">
-            O Orquestrador trabalha dentro de uma pasta do seu computador.
+            {environment === "cloud"
+              ? "O trabalho acontece em um ambiente isolado na nuvem. Nada é baixado para este computador, e a execução continua com o aplicativo fechado."
+              : "O Orquestrador trabalha dentro de uma pasta do seu computador."}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
+          {/* Where the work runs. Asked first, because it changes everything
+              below it - a cloud project never asks for a folder. */}
+          <div className="grid grid-cols-2 gap-2" data-testid="environment-choice">
+            {(["local", "cloud"] as const).map((choice) => (
+              <button
+                key={choice}
+                onClick={() => setEnvironment(choice)}
+                disabled={busy !== null}
+                className={cn(
+                  "flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs transition-colors",
+                  environment === choice
+                    ? "border-primary/50 bg-accent text-foreground"
+                    : "border-border text-muted-foreground hover:border-primary/30",
+                )}
+                data-testid={`environment-${choice}`}
+              >
+                {choice === "cloud" ? <Cloud className="size-3.5" /> : <HardDrive className="size-3.5" />}
+                {choice === "cloud" ? "Nuvem" : "Local"}
+              </button>
+            ))}
+          </div>
+
+          {environment === "cloud" && !cloudConnected && (
+            <p className="rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
+              Conecte este computador a um coordenador em <strong>Configurações → Nuvem</strong> antes
+              de criar um projeto de nuvem.
+            </p>
+          )}
+          {environment === "cloud" && cloudConnected && !githubConnected && (
+            <p className="rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
+              Conecte o GitHub para escolher o repositório.
+            </p>
+          )}
+
+          {environment === "local" && (
           <button
             onClick={() => void pickFolder()}
             disabled={busy !== null}
@@ -656,6 +761,7 @@ export function AddProjectDialog({
             {busy === "folder" && <Loader2 className="size-3.5 animate-spin" />}
             Selecionar pasta local
           </button>
+          )}
 
           {githubConnected && (
             <div className="border-t border-border pt-4">
@@ -679,12 +785,17 @@ export function AddProjectDialog({
                   <button
                     key={repo.fullName}
                     onClick={() => {
+                      if (environment === "cloud") {
+                        setCloudRepo(repo);
+                        return;
+                      }
                       setUrl(repo.cloneUrl);
                       setName(repo.name);
                     }}
                     className={cn(
                       "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
-                      url === repo.cloneUrl && "bg-accent",
+                      (environment === "cloud" ? cloudRepo?.fullName === repo.fullName : url === repo.cloneUrl) &&
+                        "bg-accent",
                     )}
                     data-testid={`repo-${repo.fullName}`}
                   >
@@ -700,6 +811,58 @@ export function AddProjectDialog({
             </div>
           )}
 
+          {environment === "cloud" && cloudRepo && (
+            <div className="border-t border-border pt-4">
+              <SectionLabel>Branch onde o trabalho começa</SectionLabel>
+              {branchesError && <p className="mt-2 text-xs text-danger">{branchesError}</p>}
+              {branches === null && !branchesError && (
+                <p className="mt-2 text-xs text-muted-foreground">Lendo as branches…</p>
+              )}
+              {branches !== null && (
+                <div className="mt-2 max-h-32 space-y-0.5 overflow-y-auto" data-testid="branch-list">
+                  {branches.length === 0 && (
+                    <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                      Este repositório não tem branches visíveis.
+                    </p>
+                  )}
+                  {branches.map((b) => (
+                    <button
+                      key={b.name}
+                      onClick={() => setBranch(b.name)}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
+                        branch === b.name && "bg-accent",
+                      )}
+                      data-testid={`branch-${b.name}`}
+                    >
+                      <span className="truncate font-mono">{b.name}</span>
+                      {b.isDefault && (
+                        <span className="ml-auto shrink-0 rounded bg-muted px-1 text-[10px] uppercase text-muted-foreground">
+                          padrão
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <Button
+                size="sm"
+                className="mt-3 w-full"
+                disabled={!cloudRepo || !branch || busy !== null || !cloudConnected}
+                onClick={() => void createCloud()}
+                data-testid="create-cloud-project"
+              >
+                {busy === "cloud" && <Loader2 className="size-3.5 animate-spin" />}
+                Criar projeto na nuvem
+              </Button>
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                Nenhuma pasta é criada neste computador. O repositório é clonado dentro do ambiente
+                remoto quando a primeira tarefa começa.
+              </p>
+            </div>
+          )}
+
+          {environment === "local" && (
           <div className="border-t border-border pt-4">
             <SectionLabel>{githubConnected ? "Ou informe a URL" : "Ou clonar do GitHub"}</SectionLabel>
             <div className="mt-2 space-y-2">
@@ -725,6 +888,7 @@ export function AddProjectDialog({
               </Button>
             </div>
           </div>
+          )}
 
           {error && <p className="text-xs text-danger">{error}</p>}
         </div>

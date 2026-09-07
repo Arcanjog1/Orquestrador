@@ -32,6 +32,7 @@ import { api, messageOf } from "@/lib/api";
 import { Link, useRouter } from "@/router";
 import type {
   AccountView,
+  CloudStatusView,
   GitHubStatusView,
   PullRequestStatusView,
   ChatMessageView,
@@ -59,6 +60,7 @@ export function WorkspacePage({
   workspace,
   accounts,
   github,
+  cloud,
   reload,
   onSelectWorkspace,
 }: {
@@ -66,6 +68,8 @@ export function WorkspacePage({
   workspace: WorkspaceView | null;
   accounts: readonly AccountView[];
   github: GitHubStatusView | null;
+  /** Whether this computer can reach a coordinator. Null before it is known. */
+  cloud: CloudStatusView | null;
   reload: () => void;
   onSelectWorkspace: (id: string) => void;
 }) {
@@ -913,6 +917,7 @@ export function WorkspacePage({
         open={addProjectOpen}
         onOpenChange={setAddProjectOpen}
         githubConnected={github?.connected ?? false}
+        cloudConnected={cloud?.configured ?? false}
         onAdded={(id) => {
           reload();
           onSelectWorkspace(id);

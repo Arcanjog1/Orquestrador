@@ -9,6 +9,7 @@ import { api, messageOf } from "@/lib/api";
 import { applyTheme } from "@/lib/theme";
 import type {
   AccountView,
+  CloudStatusView,
   GitHubStatusView,
   AgentView,
   AppInfo,
@@ -39,6 +40,8 @@ interface AppState {
   agents: readonly AgentView[];
   workspaces: readonly WorkspaceView[];
   github: GitHubStatusView | null;
+  /** Whether this computer can reach a Run Coordinator, and whether it answers. */
+  cloud: CloudStatusView | null;
 }
 
 const EMPTY: AppState = {
@@ -48,6 +51,7 @@ const EMPTY: AppState = {
   agents: [],
   workspaces: [],
   github: null,
+  cloud: null,
 };
 
 function Shell() {
@@ -61,17 +65,23 @@ function Shell() {
   const reload = useCallback(() => {
     void (async () => {
       try {
-        const [appInfo, diagnostics, accounts, agents, workspaces, github, settings] = await Promise.all([
-          api.app.info(),
-          api.runtime.diagnose(),
-          api.accounts.list(),
-          api.agents.list(),
-          api.workspace.list(),
-          api.github.status(),
-          api.settings.all(),
-        ]);
+        const [appInfo, diagnostics, accounts, agents, workspaces, github, cloud, settings] =
+          await Promise.all([
+            api.app.info(),
+            api.runtime.diagnose(),
+            api.accounts.list(),
+            api.agents.list(),
+            api.workspace.list(),
+            api.github.status(),
+            api.cloud.status(),
+            api.settings.all(),
+          ]);
         applyTheme(settings["appearance.theme"]);
-        setState({ appInfo, diagnostics, accounts, agents, workspaces, github });
+        setState({ appInfo, diagnostics, accounts, agents, workspaces, github, cloud });
+        // Catch up with anything the cloud carried on with while this window
+        // was closed. Failing here is not an error worth showing: the run is
+        // still going, and the next poll will find it.
+        void api.cloud.sync().catch(() => undefined);
         setWorkspaceId((current) =>
           current && workspaces.some((w) => w.id === current) ? current : workspaces[0]?.id ?? null,
         );
@@ -136,6 +146,7 @@ function Shell() {
         <SettingsPage
           accounts={state.accounts}
           github={state.github}
+          cloud={state.cloud}
           workspace={workspace}
           diagnostics={state.diagnostics}
           appInfo={state.appInfo}
@@ -151,6 +162,7 @@ function Shell() {
           workspace={workspace}
           accounts={state.accounts}
           github={state.github}
+          cloud={state.cloud}
           reload={reload}
           onSelectWorkspace={setWorkspaceId}
         />

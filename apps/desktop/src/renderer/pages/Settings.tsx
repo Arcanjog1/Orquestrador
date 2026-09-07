@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { LoginDialog } from "@/components/orch/dialogs";
 import { GitHubCard } from "@/components/orch/GitHubCard";
+import { CloudCard } from "@/components/orch/CloudCard";
 import { ProviderIcon, SectionLabel } from "@/components/orch/primitives";
 import { cn } from "@/lib/utils";
 import { api, messageOf } from "@/lib/api";
@@ -28,6 +29,7 @@ import { applyTheme, THEMES } from "@/lib/theme";
 import { Link, useRouter, useSearch } from "@/router";
 import type {
   AccountView,
+  CloudStatusView,
   GitHubStatusView,
   AppInfo,
   DiagnosticView,
@@ -80,6 +82,7 @@ const LOOP_DEFAULTS = { maxIterations: 8, agentTimeoutMinutes: 15, verificationT
 export function SettingsPage({
   accounts,
   github,
+  cloud,
   workspace,
   diagnostics,
   appInfo,
@@ -87,6 +90,7 @@ export function SettingsPage({
 }: {
   accounts: readonly AccountView[];
   github: GitHubStatusView | null;
+  cloud: CloudStatusView | null;
   workspace: WorkspaceView | null;
   diagnostics: DiagnosticView | null;
   appInfo: AppInfo | null;
@@ -208,8 +212,9 @@ export function SettingsPage({
 
               <section className="border-t border-border pt-6">
                 <SectionLabel>Development</SectionLabel>
-                <div className="mt-3">
+                <div className="mt-3 space-y-3">
                   <GitHubCard status={github} onChanged={reload} />
+                  <CloudCard status={cloud} onChanged={reload} />
                 </div>
               </section>
 

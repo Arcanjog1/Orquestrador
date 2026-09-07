@@ -2,9 +2,11 @@ import { useState } from "react";
 import {
   Check,
   ChevronDown,
+  Cloud,
   ExternalLink,
   FolderOpen,
   GitBranch,
+  HardDrive,
   Loader2,
   Pencil,
   Plus,
@@ -35,12 +37,14 @@ import {
 function Chip({
   children,
   className,
+  ...rest
 }: {
   children: React.ReactNode;
   className?: string;
-}) {
+} & React.HTMLAttributes<HTMLSpanElement>) {
   return (
     <span
+      {...rest}
       className={cn(
         "inline-flex h-7 max-w-[240px] items-center gap-1.5 rounded-md border border-border bg-surface-raised px-2 text-xs text-foreground/90 transition-colors hover:border-border-strong hover:bg-accent",
         className,
@@ -125,14 +129,23 @@ export function TopContextBar({
   const [branchesOpen, setBranchesOpen] = useState(false);
   const [query, setQuery] = useState("");
 
+  const isCloud = workspace?.environment === "cloud";
   const branch = workspace?.branch ?? workspace?.defaultBranch ?? "—";
-  const repository = repoOf(workspace?.repositoryUrl ?? null);
+  // A cloud project's repository is the one it was created for, named as
+  // GitHub names it; a local project's is inferred from its remote.
+  const repository = isCloud ? workspace?.repository ?? null : repoOf(workspace?.repositoryUrl ?? null);
   const filtered = workspaces.filter((w) =>
     w.name.toLowerCase().includes(query.toLowerCase()),
   );
 
   return (
     <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border bg-chrome px-4">
+      {/* Where this project's work runs. Not decorative: a person about to send
+          a task needs to know whether it will touch their own disk. */}
+      <Chip data-testid="environment-chip">
+        {isCloud ? <Cloud className="size-3" /> : <HardDrive className="size-3" />}
+        {isCloud ? "Nuvem" : "Local"}
+      </Chip>
       {/* GitHub chip: who is signed in, this project's remote, and the git actions */}
       <Popover onOpenChange={(open) => open && onRefreshPullRequest()}>
         <PopoverTrigger asChild>
@@ -218,6 +231,13 @@ export function TopContextBar({
             </div>
           )}
           <div className="flex flex-wrap gap-2 border-t border-border pt-3">
+            {isCloud ? (
+              <p className="text-xs text-muted-foreground" data-testid="cloud-git-note">
+                Este projeto roda na nuvem: fetch, commit e push acontecem dentro do ambiente
+                remoto, não neste computador.
+              </p>
+            ) : (
+              <>
             <Button size="sm" variant="secondary" onClick={onFetch} disabled={!workspace} data-testid="git-fetch">
               Fetch
             </Button>
@@ -230,6 +250,8 @@ export function TopContextBar({
             <Button size="sm" onClick={onPush} disabled={!workspace} data-testid="git-push">
               Push
             </Button>
+              </>
+            )}
             <Button
               size="sm"
               variant="secondary"
@@ -311,13 +333,15 @@ export function TopContextBar({
               >
                 <Pencil className="size-3.5 text-muted-foreground" /> Renomear projeto
               </button>
-              <button
-                onClick={onOpenFolder}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent"
-                data-testid="open-workspace-folder"
-              >
-                <FolderOpen className="size-3.5 text-muted-foreground" /> Abrir pasta
-              </button>
+              {!isCloud && (
+                <button
+                  onClick={onOpenFolder}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-accent"
+                  data-testid="open-workspace-folder"
+                >
+                  <FolderOpen className="size-3.5 text-muted-foreground" /> Abrir pasta
+                </button>
+              )}
               <button
                 onClick={onRemoveWorkspace}
                 className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-danger transition-colors hover:bg-accent"
