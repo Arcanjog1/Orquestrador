@@ -291,6 +291,35 @@ const PHASE_LABEL: Record<string, string> = {
   error: "Erro",
   cancelled: "Cancelada",
   blocked: "Revisão humana",
+  workspace: "Pasta do projeto",
+  delegation: "Delegação",
+  budget: "Limite de gasto",
+};
+
+/**
+ * The diagnostic keys worth showing, in the words a person reads.
+ *
+ * The raw keys are English and terse because they are written for the record;
+ * a person opening "Detalhes" after a run stopped needs them in Portuguese and
+ * in an order that answers "what was refused, and where".
+ */
+const DETAIL_LABEL: Record<string, string> = {
+  failure: "Falha",
+  deniedTools: "Ferramentas recusadas",
+  workingDirectory: "Pasta de trabalho",
+  executable: "Executável",
+  exitCode: "Código de saída",
+  outcome: "Resultado",
+  attempt: "Tentativa",
+  workerId: "Worker",
+  continuedSession: "Continuou a sessão",
+  stderrExcerpt: "Saída de erro",
+  stdoutExcerpt: "Saída",
+  parseError: "Problema de formato",
+  durationMs: "Duração (ms)",
+  mechanical: "Falha mecânica",
+  modelUnavailable: "Modelo indisponível",
+  error: "Erro",
 };
 
 function parseDetail(step: RunStepView): Record<string, unknown> | null {
@@ -368,7 +397,14 @@ export function RunDetailDialog({
   onOpenChange: (v: boolean) => void;
 }) {
   const { detail, error } = useRunDetail(runId);
-  const failing = detail?.steps.filter((s) => s.detail && s.status !== "ok") ?? [];
+  // A step is worth showing when it carries diagnostics and did not simply
+  // succeed. `changed` is the evidence step's success, and `degraded` is a
+  // baseline that could not use git - which is exactly the case a person
+  // needs to see, so it is included rather than filtered out as noise.
+  const failing =
+    detail?.steps.filter(
+      (s) => s.detail && s.status !== "ok" && s.status !== "changed" && s.status !== "passed",
+    ) ?? [];
   return (
     <Dialog open={runId !== null} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
@@ -408,9 +444,15 @@ export function RunDetailDialog({
                       <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[auto_1fr]">
                         {Object.entries(data).map(([key, value]) => (
                           <div key={key} className="contents">
-                            <dt className="text-muted-foreground">{key}</dt>
+                            <dt className="text-muted-foreground">{DETAIL_LABEL[key] ?? key}</dt>
                             <dd className="overflow-x-auto font-mono whitespace-pre-wrap">
-                              {typeof value === "string" ? value : JSON.stringify(value)}
+                              {key === "failure" && typeof value === "string"
+                                ? failureLabel(value)
+                                : Array.isArray(value)
+                                  ? value.join(", ")
+                                  : typeof value === "string"
+                                    ? value
+                                    : JSON.stringify(value)}
                             </dd>
                           </div>
                         ))}

@@ -17,7 +17,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ScriptedAgent,
@@ -653,7 +654,7 @@ test('E2E: a coding run finishes only on a real file, real evidence and a re-run
   repo.write(
     'check.mjs',
     [
-      "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
+      "import { readFileSync } from 'node:fs';",
       "let actual = null;",
       "try { actual = readFileSync('hello.txt', 'utf8').trim(); } catch { actual = null; }",
       "if (actual !== 'pronto') { console.error('hello.txt is ' + JSON.stringify(actual)); process.exit(1); }",
@@ -1135,5 +1136,187 @@ test('a session the tool no longer has is forgotten and the delegation runs once
     assert.equal(run.status, 'DONE');
   } finally {
     await fixture.cleanup();
+  }
+});
+
+/* ================================================================== *
+ * The run that failed for real: hello.txt
+ * ================================================================== */
+
+/**
+ * The exact task from the first real attempt, end to end, in a plain folder.
+ *
+ * A folder with no git repository is the case that was silently blind before:
+ * the worker created the file and the application reported "0 arquivo(s)"
+ * forever. This proves the whole chain now works without git.
+ */
+test('E2E: hello.txt is created in a plain folder, seen, verified, and accepted', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lao-hello-plain-'));
+  try {
+    // A verification the person registered: node reads the file and checks the
+    // exact six bytes, so DONE rests on the content, not on the file existing.
+    writeFileSync(
+      join(dir, 'check.mjs'),
+      [
+        "import { readFileSync } from 'node:fs';",
+        "const bytes = readFileSync('hello.txt');",
+        "const expected = Buffer.from('pronto', 'utf8');",
+        'if (!bytes.equals(expected)) {',
+        "  console.error('hello.txt is ' + JSON.stringify(bytes.toString('utf8')));",
+        '  process.exit(1);',
+        '}',
+        "console.log('ok');",
+      ].join('\n'),
+    );
+
+    const orchestrator = new ScriptedAgent('mock-codex', 'Codex', [
+      JSON.stringify({
+        action: 'delegate',
+        workerId: 'worker-1',
+        requiresTools: true,
+        task: 'Crie hello.txt com exatamente o texto pronto.',
+        acceptanceCriteria: ['hello.txt contém exatamente os 6 bytes de pronto'],
+        verificationCommands: ['hello-bytes'],
+      }),
+      JSON.stringify({
+        action: 'done',
+        acceptanceCriteria: ['hello.txt contém exatamente os 6 bytes de pronto'],
+        verificationCommands: ['hello-bytes'],
+        summary: 'hello.txt criado e verificado.',
+      }),
+    ]);
+
+    // A worker with a real executor, which really writes - no BOM, no newline.
+    const worker = new ScriptedAgent('mock-claude', 'Claude Code', [
+      (input: AgentInput) => {
+        writeFileSync(join(input.workingDirectory, 'hello.txt'), Buffer.from('pronto', 'utf8'));
+        return 'Criei hello.txt.';
+      },
+    ]);
+
+    const fixture = createDesktopFixture({
+      createRunners: async () => ({ orchestrator, worker, workerAccountId: null }),
+      maxIterations: 3,
+    });
+    try {
+      const workspace = value<{ id: string }>(
+        await fixture.router.handle('workspace.create', { name: 'Pasta simples', localPath: dir }),
+      );
+      fixture.services.database.verifications.upsert({
+        workspaceId: workspace.id,
+        id: 'hello-bytes',
+        label: 'hello.txt tem exatamente os 6 bytes',
+        command: 'node check.mjs',
+      });
+      await bindTeam(fixture, workspace.id, ['Claude Code']);
+      const session = value<{ id: string }>(
+        await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'x' }),
+      );
+      const sent = value<{ run: { id: string } }>(
+        await fixture.router.handle('chat.sendMessage', {
+          sessionId: session.id,
+          text: 'Crie hello.txt com o texto pronto',
+        }),
+      );
+      const run = await fixture.services.orchestration.waitFor(sent.run.id);
+
+      assert.equal(
+        run.status,
+        'DONE',
+        steps(fixture, sent.run.id)
+          .map((s) => `${s.phase}/${s.status}: ${s.summary}`)
+          .join('\n'),
+      );
+
+      // The file really is six bytes of UTF-8, with no BOM and no newline.
+      const bytes = readFileSync(join(dir, 'hello.txt'));
+      assert.deepEqual([...bytes], [0x70, 0x72, 0x6f, 0x6e, 0x74, 0x6f]);
+      assert.equal(bytes.length, 6);
+
+      // And the application saw it without git, which is the whole point.
+      const evidence = steps(fixture, sent.run.id).find((s) => s.phase === 'evidence');
+      assert.equal(evidence?.status, 'changed', 'a plain folder must not be blind');
+      assert.equal(steps(fixture, sent.run.id).find((s) => s.phase === 'done-gate')?.status, 'passed');
+    } finally {
+      await fixture.cleanup();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('E2E: a worker refused the write stops with the refusal, not with "no progress"', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lao-hello-denied-'));
+  try {
+    const orchestrator = new ScriptedAgent('mock-codex', 'Codex', [
+      JSON.stringify({
+        action: 'delegate',
+        workerId: 'worker-1',
+        requiresTools: true,
+        task: 'Crie hello.txt com exatamente o texto pronto.',
+        acceptanceCriteria: ['hello.txt existe'],
+        verificationCommands: [],
+      }),
+      JSON.stringify({
+        action: 'blocked',
+        reason: 'sem permissão',
+        acceptanceCriteria: [],
+        verificationCommands: [],
+      }),
+    ]);
+
+    // Exactly what the adapter now produces from an exit-0 envelope that
+    // reported a refusal: a failure, named, with the tool that was refused.
+    const worker = new (class extends ScriptedAgent {
+      override async run(input: AgentInput) {
+        const result = await super.run(input);
+        return {
+          ...result,
+          exitCode: 1,
+          stdout: 'Não consegui criar o arquivo.',
+          stderr: 'Ferramentas recusadas nesta execução: Write.',
+          failure: 'tool-permission-denied' as const,
+          permissionDenials: ['Write'],
+        };
+      }
+    })('mock-claude', 'Claude Code', ['']);
+
+    const fixture = createDesktopFixture({
+      createRunners: async () => ({ orchestrator, worker, workerAccountId: null }),
+      maxIterations: 6,
+    });
+    try {
+      const workspace = value<{ id: string }>(
+        await fixture.router.handle('workspace.create', { name: 'Pasta', localPath: dir }),
+      );
+      await bindTeam(fixture, workspace.id, ['Claude Code']);
+      const session = value<{ id: string }>(
+        await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'x' }),
+      );
+      const sent = value<{ run: { id: string } }>(
+        await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'crie' }),
+      );
+      const run = await fixture.services.orchestration.waitFor(sent.run.id);
+
+      // It stops on the refusal instead of re-delegating up the tiers.
+      assert.equal(run.status, 'NEEDS_HUMAN');
+      assert.equal(worker.calls.length, 1, 'a refused permission is not retried');
+      assert.equal(orchestrator.calls.length, 1, 'and it is not re-delegated either');
+
+      // The person is told what was refused, in words, without a terminal.
+      const said = messages(fixture, session.id).map((m) => m.body).join('\n');
+      assert.match(said, /impedido de usar uma ferramenta/);
+
+      // And the record carries the concrete cause for "Detalhes".
+      const detail = fixture.services.orchestration.detail(sent.run.id);
+      const invocation = detail.invocations.find((i) => i.role === 'CODING_WORKER');
+      assert.equal(invocation?.failureKind, 'tool-permission-denied');
+      const workerStep = steps(fixture, sent.run.id).find((s) => s.phase === 'worker');
+      assert.match(workerStep?.summary ?? '', /Crie hello\.txt/);
+    } finally {
+      await fixture.cleanup();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
