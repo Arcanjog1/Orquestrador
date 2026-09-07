@@ -96,10 +96,24 @@ test('a folder that does not exist still has a stable identity', () => {
   assert.ok(folderKey(missing).length > 0);
 });
 
-test('the suggested name is the folder, never a drive letter or a colon', () => {
+test('the suggested name is the folder, and a root is named by the root', () => {
+  // The ordinary case: the leaf, which is what a person calls the folder.
   assert.equal(suggestedProjectName(`${sep}home${sep}me${sep}Orquestrador`), 'Orquestrador');
   assert.equal(suggestedProjectName(`${sep}home${sep}me${sep}Orquestrador${sep}`), 'Orquestrador');
-  assert.ok(!suggestedProjectName(sep).includes(':'));
+
+  // A root has no leaf. On Windows it resolves to a drive root such as `D:\`,
+  // and naming the project after the drive is the honest answer - `D:` alone
+  // would be punctuation, and inventing "Projeto" would name it after nothing.
+  // What matters is that the name is readable and identifies the folder, so
+  // that is what this asserts rather than a rule about one character.
+  const root = suggestedProjectName(sep);
+  assert.ok(root.length > 0, 'a root must still get a name');
+  assert.notEqual(root, sep, 'a bare separator is not a name');
+  assert.ok(/[A-Za-z0-9]/.test(root), `a name must be readable, got ${JSON.stringify(root)}`);
+
+  // And a name is never derived from anything but the path itself.
+  assert.equal(suggestedProjectName(`${sep}a${sep}site`), 'site');
+  assert.equal(suggestedProjectName(`${sep}b${sep}site`), 'site');
 });
 
 /* ================================================================== *

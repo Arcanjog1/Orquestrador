@@ -113,10 +113,14 @@ export function suggestedProjectName(localPath: string): string {
   const cleaned = stripTrailingSeparator(safeResolve(localPath.trim()), currentPlatform());
   const segments = cleaned.split(/[\\/]/).filter((part) => part.length > 0);
   const last = segments.at(-1) ?? '';
-  // A drive root has no meaningful leaf ("C:"), so say so rather than
-  // naming a project after a colon.
-  if (last.length === 0 || /^[a-zA-Z]:$/.test(last)) return cleaned || 'Projeto';
-  return last;
+  // A root has no leaf. On Windows that is a drive root, and naming the
+  // project after the drive (`D:\`) is the honest answer - `D:` alone would
+  // be punctuation. On POSIX the root is `/`, which is nothing but a
+  // separator and no name at all, so it falls through to the last resort.
+  const name = last.length === 0 || /^[a-zA-Z]:$/.test(last) ? cleaned : last;
+  // Whatever route it came by, a name has to be readable. A string with no
+  // letter or digit in it is not a name a person can pick out of a sidebar.
+  return /[A-Za-z0-9]/.test(name) ? name : 'Projeto';
 }
 
 function safeResolve(path: string): string {
