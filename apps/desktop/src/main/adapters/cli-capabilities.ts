@@ -12,16 +12,145 @@
  * worse, silently means something else.
  */
 
-import type { ProcessManager } from '../core.js';
+import type { ProcessManager, ProcessResult } from '../core.js';
+
+/**
+ * Why a help page could not be read, or that it was.
+ *
+ * The distinction this product paid for: a probe that never ran is not the
+ * same fact as a CLI that has no headless mode. Conflating them told a person
+ * whose Codex is perfectly capable that "esta versão não oferece um modo não
+ * interativo" - and sent them looking for a different Codex instead of the
+ * environment variable that was killing the one they had.
+ */
+export type ProbeState =
+  | 'OK'
+  /** `spawn` failed: no such file, or the OS refused to create the process. */
+  | 'EXECUTABLE_NOT_FOUND'
+  /** The child was still running when the probe's deadline passed. */
+  | 'PROBE_TIMEOUT'
+  /** The probe was cancelled from outside. */
+  | 'PROCESS_ABORTED'
+  /** The child died before it could print a help page (signal, or a crash code). */
+  | 'EXECUTABLE_INCOMPATIBLE'
+  /** The child ran and failed: a non-zero exit with output we did not expect. */
+  | 'PROBE_FAILED'
+  /** The child exited cleanly and printed something no help parser recognises. */
+  | 'PARSER_FAILED';
+
+/** What one `--help` invocation actually did, for the record and the message. */
+export interface CliProbe {
+  readonly state: ProbeState;
+  /** The arguments the probe used, so a log names the exact invocation. */
+  readonly args: readonly string[];
+  readonly outcome: ProcessResult['outcome'];
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+  /** First non-empty stderr line: where a start-up abort announces itself. */
+  readonly stderrFirstLine: string | null;
+  /** A recognised failure signature, when the output carries one. */
+  readonly detail: string | null;
+}
 
 export interface CliCapabilities {
   /** Raw `--help` text, kept for the developer view. */
   readonly help: string;
   readonly flags: ReadonlySet<string>;
   readonly subcommands: ReadonlySet<string>;
+  /** How the reading went. `state === 'OK'` is the only case flags can be trusted. */
+  readonly probe: CliProbe;
 }
 
 const HELP_TIMEOUT_MS = 30_000;
+
+/**
+ * Windows exit codes that are a crash, not a program's own choice.
+ *
+ * 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN) is what `abort()` produces on
+ * Windows - the exact code the AWS-LC start-up abort inside Codex 0.105+
+ * reports when OPENSSL_ia32cap asks for a CPU bit the processor lacks.
+ */
+const WINDOWS_CRASH_EXIT_CODES = new Map<number, string>([
+  [0xc0000409, 'o processo foi encerrado pelo sistema (0xC0000409)'],
+  [0xc0000005, 'violação de acesso (0xC0000005)'],
+  [0xc000001d, 'instrução ilegal (0xC000001D)'],
+  [0xc0000135, 'uma biblioteca necessária não foi encontrada (0xC0000135)'],
+  [0xc0000142, 'a inicialização da aplicação falhou (0xC0000142)'],
+]);
+
+/** Failure signatures worth naming, because the remedy differs for each. */
+const SIGNATURES: readonly { readonly pattern: RegExp; readonly detail: string }[] = [
+  {
+    pattern: /HW capability found[\s\S]*?HW capability requested/i,
+    detail:
+      'a biblioteca criptográfica dentro do executável abortou por causa de OPENSSL_ia32cap no ambiente',
+  },
+  { pattern: /is not recognized as an internal or external command/i, detail: 'o executável não foi encontrado' },
+  { pattern: /Permission denied|EACCES/i, detail: 'o sistema recusou a execução do arquivo' },
+];
+
+function firstNonEmptyLine(text: string): string | null {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return null;
+}
+
+function signatureOf(output: string): string | null {
+  for (const { pattern, detail } of SIGNATURES) {
+    if (pattern.test(output)) return detail;
+  }
+  return null;
+}
+
+/**
+ * Classifies one probe run.
+ *
+ * `parsed` matters only for a clean exit: a CLI that ran, exited 0 and printed
+ * a page with neither a flag nor a subcommand on it did not tell us it has no
+ * headless mode - it told us this parser did not understand the page.
+ */
+export function classifyProbe(
+  args: readonly string[],
+  result: ProcessResult,
+  parsed: { flags: ReadonlySet<string>; subcommands: ReadonlySet<string> },
+): CliProbe {
+  const combined = `${result.stdout}\n${result.stderr}`;
+  const base = {
+    args: [...args],
+    outcome: result.outcome,
+    exitCode: result.exitCode,
+    signal: (result.signal as string | null) ?? null,
+    stderrFirstLine: firstNonEmptyLine(result.stderr),
+    detail: signatureOf(combined),
+  };
+
+  if (result.outcome === 'spawn-error') {
+    return { ...base, state: 'EXECUTABLE_NOT_FOUND', detail: base.detail ?? result.error ?? null };
+  }
+  if (result.outcome === 'timeout') return { ...base, state: 'PROBE_TIMEOUT' };
+  if (result.outcome === 'cancelled') return { ...base, state: 'PROCESS_ABORTED' };
+
+  if (result.signal) return { ...base, state: 'EXECUTABLE_INCOMPATIBLE' };
+  if (result.exitCode !== null && result.exitCode !== 0) {
+    const crash = WINDOWS_CRASH_EXIT_CODES.get(result.exitCode >>> 0);
+    if (crash) return { ...base, state: 'EXECUTABLE_INCOMPATIBLE', detail: base.detail ?? crash };
+    // 134 is SIGABRT seen through a shell wrapper; the same abort, one layer on.
+    if (result.exitCode === 134) {
+      return { ...base, state: 'EXECUTABLE_INCOMPATIBLE', detail: base.detail ?? 'o processo abortou (SIGABRT)' };
+    }
+    // A help page printed on a non-zero exit is still a help page: some CLIs
+    // exit 1 for `--help`. Only an unreadable one is a failure.
+    if (parsed.flags.size > 0 || parsed.subcommands.size > 0) return { ...base, state: 'OK' };
+    return { ...base, state: 'PROBE_FAILED' };
+  }
+
+  if (parsed.flags.size === 0 && parsed.subcommands.size === 0) {
+    return { ...base, state: 'PARSER_FAILED' };
+  }
+  return { ...base, state: 'OK' };
+}
 
 export async function readCapabilities(
   processManager: ProcessManager,
@@ -38,7 +167,19 @@ export async function readCapabilities(
     ...(env && Object.keys(env).length > 0 ? { env } : {}),
   });
   const help = `${result.stdout}\n${result.stderr}`;
-  return parseHelp(help);
+  const parsed = parseHelp(help);
+  return { ...parsed, probe: classifyProbe(args, result, parsed) };
+}
+
+/** A one-line, redaction-safe summary of a probe, for logs and error messages. */
+export function describeProbe(probe: CliProbe): string {
+  const parts = [`estado=${probe.state}`, `argumentos=${probe.args.join(' ') || '(nenhum)'}`];
+  parts.push(`saída=${probe.outcome}`);
+  if (probe.exitCode !== null) parts.push(`código=${probe.exitCode}`);
+  if (probe.signal) parts.push(`sinal=${probe.signal}`);
+  if (probe.detail) parts.push(`causa=${probe.detail}`);
+  if (probe.stderrFirstLine) parts.push(`stderr=${probe.stderrFirstLine.slice(0, 200)}`);
+  return parts.join('; ');
 }
 
 /**
@@ -48,7 +189,7 @@ export async function readCapabilities(
  * indented on its own and followed by a description, which is how both CLIs (and
  * essentially every clap/commander program) lay out their command lists.
  */
-export function parseHelp(help: string): CliCapabilities {
+export function parseHelp(help: string): Omit<CliCapabilities, 'probe'> {
   const flags = new Set<string>();
   for (const match of help.matchAll(/(--[a-z0-9][a-z0-9-]*)/gi)) {
     flags.add(match[1]!.toLowerCase());

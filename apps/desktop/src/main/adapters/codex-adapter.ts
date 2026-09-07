@@ -22,7 +22,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessManager } from './adapter-types.js';
 import { codexSupportedEfforts, makeAgentResult, resolveFixedEffort, versionNumberOf } from '../core.js';
-import { readCapabilities, type CliCapabilities } from './cli-capabilities.js';
+import {
+  describeProbe,
+  readCapabilities,
+  type CliCapabilities,
+  type CliProbe,
+  type ProbeState,
+} from './cli-capabilities.js';
 
 export interface CodexAdapterOptions {
   processManager: ProcessManager;
@@ -67,6 +73,21 @@ export class CodexAdapter implements AgentRunner {
 
   constructor(private readonly options: CodexAdapterOptions) {}
 
+  /**
+   * The environment **every** child of this adapter runs under.
+   *
+   * This is the whole of block A4: the capability probe, the version read and
+   * the health check used to inherit the machine's environment while only
+   * `codex exec` got the overlay. On the reported Windows machine that meant
+   * `codex --help` still ran with the `OPENSSL_ia32cap` that makes AWS-LC
+   * abort before `main`, so the help page came back empty, `exec` was not
+   * found on it, and a runnable Codex was declared to have no headless mode.
+   * One environment, built once per invocation, for all of them.
+   */
+  private environment(extra?: Record<string, string | undefined>): Record<string, string | undefined> {
+    return { ...(this.options.buildEnvironment?.() ?? {}), ...(extra ?? {}) };
+  }
+
   async run(input: AgentInput): Promise<AgentResult> {
     const startedAt = new Date().toISOString();
     const executable = await this.options.resolveExecutable();
@@ -82,8 +103,10 @@ export class CodexAdapter implements AgentRunner {
         model: this.options.model ?? null,
         reasoning: this.options.reasoningEffort ?? null,
       };
-      const plan = await this.buildArgs(executable, input.workingDirectory, scratch, routing);
-      const env = { ...(this.options.buildEnvironment?.() ?? {}), ...(input.env ?? {}) };
+      // Built before the plan, so the capability probe inside `buildArgs`
+      // runs under exactly the environment the real invocation will.
+      const env = this.environment(input.env);
+      const plan = await this.buildArgs(executable, input.workingDirectory, scratch, routing, env);
       const result = await this.options.processManager.run({
         command: executable,
         args: plan.args,
@@ -125,11 +148,13 @@ export class CodexAdapter implements AgentRunner {
   async healthCheck(): Promise<HealthStatusCore> {
     try {
       const executable = await this.options.resolveExecutable();
+      const env = this.environment();
       const result = await this.options.processManager.run({
         command: executable,
         args: ['--version'],
         cwd: process.cwd(),
         timeoutMs: 30_000,
+        ...(Object.keys(env).length > 0 ? { env } : {}),
       });
       if (result.exitCode !== 0) {
         return { healthy: false, executable, problem: 'O Codex não respondeu como esperado.' };
@@ -157,11 +182,13 @@ export class CodexAdapter implements AgentRunner {
   private async readVersion(executable: string, cwd: string): Promise<string | null> {
     if (this.version !== undefined) return this.version;
     try {
+      const env = this.environment();
       const result = await this.options.processManager.run({
         command: executable,
         args: ['--version'],
         cwd,
         timeoutMs: 30_000,
+        ...(Object.keys(env).length > 0 ? { env } : {}),
       });
       this.version = result.exitCode === 0 ? versionNumberOf(result.stdout.trim()) : null;
     } catch {
@@ -193,18 +220,59 @@ export class CodexAdapter implements AgentRunner {
     cwd: string,
     scratch: string,
     routing: { model: string | null; reasoning: string | null },
+    env: Record<string, string | undefined>,
   ): Promise<CodexPlan> {
-    this.capabilities ??= await readCapabilities(this.options.processManager, executable, cwd);
-    if (!this.capabilities.subcommands.has('exec')) {
-      throw new CodexCapabilityError(
-        'Esta versão do Codex não oferece um modo não interativo compatível.',
-      );
+    this.capabilities ??= await readCapabilities(
+      this.options.processManager,
+      executable,
+      cwd,
+      ['--help'],
+      env,
+    );
+    // A probe that did not run is not evidence about the CLI. Say which of
+    // the two happened, and never spend the second probe on a binary that
+    // could not answer the first.
+    //
+    // `PARSER_FAILED` is the exception, and deliberately so: the binary ran
+    // and exited cleanly, we simply could not read the page it printed. That
+    // is a question for the CLI (`codex exec --help`, below), not grounds to
+    // condemn it here.
+    if (this.capabilities.probe.state !== 'OK' && this.capabilities.probe.state !== 'PARSER_FAILED') {
+      // Not cached: the next run re-probes rather than repeating a verdict
+      // reached while, say, the machine was still holding the file open.
+      const probe = this.capabilities.probe;
+      this.capabilities = null;
+      throw CodexCapabilityError.fromProbe(executable, probe);
     }
 
-    this.execCapabilities ??= await readCapabilities(this.options.processManager, executable, cwd, [
-      'exec',
-      '--help',
-    ]);
+    this.execCapabilities ??= await readCapabilities(
+      this.options.processManager,
+      executable,
+      cwd,
+      ['exec', '--help'],
+      env,
+    );
+
+    // `exec` is confirmed by either page. The top-level list is one parser's
+    // reading of one layout; `codex exec --help` answering at all is the CLI
+    // itself saying the subcommand exists. Requiring both would make a help
+    // layout change look like a missing feature - which is the bug this
+    // block exists to stop repeating.
+    const execOnTopLevel = this.capabilities.subcommands.has('exec');
+    const execAnswers = this.execCapabilities.probe.state === 'OK';
+    if (!execOnTopLevel && !execAnswers) {
+      const probe = this.execCapabilities.probe;
+      this.execCapabilities = null;
+      if (probe.state === 'PROBE_FAILED' || probe.state === 'PARSER_FAILED') {
+        throw new CodexCapabilityError(
+          'CAPABILITY_UNSUPPORTED',
+          'Esta versão do Codex não oferece um modo não interativo compatível.',
+          `o executável respondeu, mas não oferece o subcomando "exec" (${describeProbe(probe)})`,
+          executable,
+        );
+      }
+      throw CodexCapabilityError.fromProbe(executable, probe);
+    }
 
     const args = ['exec'];
     // Keeps a scratch folder usable on builds that otherwise refuse to run
@@ -289,11 +357,60 @@ function readIfPresent(path: string): string | null {
   }
 }
 
+/**
+ * Why the orchestrator could not be launched.
+ *
+ * `CAPABILITY_UNSUPPORTED` is the only one of these that means what the old
+ * single message said. The others are failures *of the check*, and each has a
+ * different remedy - which is why the run now reports them apart.
+ */
+export type CodexCapabilityReason =
+  | 'CAPABILITY_UNSUPPORTED'
+  | 'PROBE_FAILED'
+  | 'PROBE_TIMEOUT'
+  | 'EXECUTABLE_INCOMPATIBLE'
+  | 'EXECUTABLE_NOT_FOUND'
+  | 'PROCESS_ABORTED'
+  | 'PARSER_FAILED';
+
+/** The sentence a person reads, per reason. */
+const REASON_MESSAGE: Record<CodexCapabilityReason, string> = {
+  CAPABILITY_UNSUPPORTED: 'Esta versão do Codex não oferece um modo não interativo compatível.',
+  PROBE_FAILED: 'O Codex não respondeu à verificação de recursos.',
+  PROBE_TIMEOUT: 'O Codex não respondeu à verificação de recursos dentro do tempo previsto.',
+  EXECUTABLE_INCOMPATIBLE: 'O Codex instalado não conseguiu iniciar neste computador.',
+  EXECUTABLE_NOT_FOUND: 'O executável do Codex não foi encontrado.',
+  PROCESS_ABORTED: 'A verificação do Codex foi interrompida antes de terminar.',
+  PARSER_FAILED: 'O Codex respondeu de uma forma que este aplicativo ainda não sabe ler.',
+};
+
+/** How a probe state maps onto the reason a run is refused. */
+const REASON_OF_PROBE: Record<Exclude<ProbeState, 'OK'>, CodexCapabilityReason> = {
+  EXECUTABLE_NOT_FOUND: 'EXECUTABLE_NOT_FOUND',
+  PROBE_TIMEOUT: 'PROBE_TIMEOUT',
+  PROCESS_ABORTED: 'PROCESS_ABORTED',
+  EXECUTABLE_INCOMPATIBLE: 'EXECUTABLE_INCOMPATIBLE',
+  PROBE_FAILED: 'PROBE_FAILED',
+  PARSER_FAILED: 'PARSER_FAILED',
+};
+
 export class CodexCapabilityError extends Error {
   readonly userMessage: string;
-  constructor(message: string) {
-    super(message);
+  constructor(
+    readonly reason: CodexCapabilityReason,
+    message: string,
+    /** The evidence: what ran, how it ended, what it printed. */
+    readonly diagnosis: string | null = null,
+    readonly executable: string | null = null,
+  ) {
+    super(diagnosis ? `${message} (${diagnosis})` : message);
     this.name = 'CodexCapabilityError';
-    this.userMessage = message;
+    this.userMessage = diagnosis ? `${message} Detalhe: ${diagnosis}.` : message;
+  }
+
+  /** Builds the error a failed probe deserves, never the capability verdict. */
+  static fromProbe(executable: string, probe: CliProbe): CodexCapabilityError {
+    const reason = probe.state === 'OK' ? 'CAPABILITY_UNSUPPORTED' : REASON_OF_PROBE[probe.state];
+    return new CodexCapabilityError(reason, REASON_MESSAGE[reason], describeProbe(probe), executable);
   }
 }

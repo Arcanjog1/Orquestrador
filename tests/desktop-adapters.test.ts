@@ -11,8 +11,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { parseHelp } from '../apps/desktop/src/main/adapters/cli-capabilities.js';
-import { CodexAdapter } from '../apps/desktop/src/main/adapters/codex-adapter.js';
-import { ClaudeCodeAdapter } from '../apps/desktop/src/main/adapters/claude-adapter.js';
+import { CodexAdapter, CodexCapabilityError } from '../apps/desktop/src/main/adapters/codex-adapter.js';
+import { ClaudeCodeAdapter, ClaudeCapabilityError } from '../apps/desktop/src/main/adapters/claude-adapter.js';
 import type { ProcessManager, RunProcessOptions, ProcessResult } from '../src/process/process-manager.js';
 
 /** Records every spawn the adapter asks for, and answers from a script. */
@@ -727,4 +727,271 @@ test('Codex: a saved "max" is sent only to a build that knows it; older builds g
     const supported = await adapter.supportedEfforts('/work');
     assert.equal(supported?.includes('max'), expected === 'max');
   }
+});
+
+/* ------------------------------------------------------------------------- *
+ * Block A4 - the CodexCapabilityError incident.
+ *
+ * Reported from an installed Windows build: a run ended FAILED at iteration 1
+ * with zero invocations and "Esta versão do Codex não oferece um modo não
+ * interativo compatível." The Codex on that machine was the managed 0.153.4,
+ * which does have `exec`.
+ *
+ * Two defects produced that sentence:
+ *
+ *  1. `codex exec` ran under the environment overlay (block A3: OPENSSL_ia32cap
+ *     removed so AWS-LC does not abort before `main`), but the capability
+ *     probe that decides whether to run it at all did not. So `codex --help`
+ *     aborted at start-up, the help page came back as the abort message, and
+ *     `exec` was not on it.
+ *  2. That absence was reported as a fact about the CLI. A probe that never
+ *     ran cannot say anything about a CLI's features.
+ *
+ * The tests below pin both, and pin that a genuinely incapable build is still
+ * refused.
+ * ------------------------------------------------------------------------- */
+
+/** A process manager that can fail the way a real one does. */
+function scriptedProcessManager(
+  script: Record<string, Partial<ProcessResult>>,
+): { manager: ProcessManager; calls: RunProcessOptions[] } {
+  const calls: RunProcessOptions[] = [];
+  const manager = {
+    async run(options: RunProcessOptions): Promise<ProcessResult> {
+      calls.push(options);
+      const key = (options.args ?? []).join(' ');
+      const scripted = script[key] ?? script[(options.args ?? [])[0] ?? ''] ?? {};
+      return {
+        outcome: 'completed',
+        exitCode: 0,
+        signal: null,
+        stdout: '',
+        stderr: '',
+        durationMs: 1,
+        truncated: false,
+        ...scripted,
+      } as ProcessResult;
+    },
+    async cancelAll(): Promise<void> {},
+    get liveCount(): number {
+      return 0;
+    },
+  } as unknown as ProcessManager;
+  return { manager, calls };
+}
+
+/** The abort AWS-LC prints before `main` when OPENSSL_ia32cap asks too much. */
+const AWS_LC_ABORT =
+  'Fatal Error: HW capability found: 0x178BFBFF 0x7EF8320B, but HW capability requested: 0x20000000 0x00.\n';
+
+async function failureOf(adapter: CodexAdapter): Promise<CodexCapabilityError> {
+  try {
+    await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 1 });
+  } catch (error) {
+    assert.ok(error instanceof CodexCapabilityError, `expected CodexCapabilityError, got ${String(error)}`);
+    return error;
+  }
+  throw new Error('the run was expected to be refused');
+}
+
+test('the capability probe runs under the same environment as the run itself', async () => {
+  // The regression, stated as the property it broke: every child this adapter
+  // starts - help pages, --version, `exec` - carries the account profile and
+  // the managed build's environment policy. Nothing inherits the machine's.
+  const { manager, calls } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': CODEX_EXEC_HELP_WITH_MODEL,
+    '--version': 'codex-cli 0.153.4',
+  });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+    buildEnvironment: () => ({ OPENSSL_ia32cap: undefined, CODEX_HOME: '/profiles/conta-a' }),
+    reasoningEffort: 'high',
+  });
+
+  await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 1 });
+
+  assert.ok(calls.length >= 3, 'help, exec help and the run itself');
+  for (const call of calls) {
+    assert.ok(call.env, `${(call.args ?? []).join(' ')} ran with no environment overlay`);
+    assert.equal(call.env!.CODEX_HOME, '/profiles/conta-a');
+    assert.ok(
+      'OPENSSL_ia32cap' in call.env!,
+      `${(call.args ?? []).join(' ')} did not carry the drop policy`,
+    );
+    assert.equal(call.env!.OPENSSL_ia32cap, undefined);
+  }
+});
+
+test('a Codex that aborts at start-up is reported as incompatible, not as lacking a headless mode', async () => {
+  // Exactly the reported machine, minus the fix: `--help` never reaches main.
+  const { manager, calls } = scriptedProcessManager({
+    '--help': { exitCode: 0xc0000409, stderr: AWS_LC_ABORT },
+  });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+  });
+
+  const error = await failureOf(adapter);
+  assert.equal(error.reason, 'EXECUTABLE_INCOMPATIBLE');
+  assert.doesNotMatch(error.userMessage, /modo não interativo/);
+  assert.match(error.userMessage, /não conseguiu iniciar neste computador/);
+  // The evidence a person can act on: the code, and the variable that caused it.
+  assert.match(error.userMessage, /0xC0000409|EXECUTABLE_INCOMPATIBLE/i);
+  assert.match(error.userMessage, /OPENSSL_ia32cap/);
+  // And the second probe is never spent on a binary that could not answer the first.
+  assert.equal(calls.filter((c) => (c.args ?? [])[0] === 'exec').length, 0);
+});
+
+test('a probe that timed out, was killed, or could not be spawned is never a capability verdict', async () => {
+  const cases: [Partial<ProcessResult>, string][] = [
+    [{ outcome: 'timeout', exitCode: null, signal: 'SIGKILL' }, 'PROBE_TIMEOUT'],
+    [{ outcome: 'cancelled', exitCode: null, signal: 'SIGTERM' }, 'PROCESS_ABORTED'],
+    [{ outcome: 'spawn-error', exitCode: null, error: 'spawn ENOENT' }, 'EXECUTABLE_NOT_FOUND'],
+    [{ outcome: 'completed', exitCode: null, signal: 'SIGABRT' }, 'EXECUTABLE_INCOMPATIBLE'],
+    [{ outcome: 'completed', exitCode: 1, stderr: 'error: something else went wrong' }, 'PROBE_FAILED'],
+  ];
+  for (const [result, reason] of cases) {
+    const { manager } = scriptedProcessManager({ '--help': result });
+    const adapter = new CodexAdapter({
+      processManager: manager,
+      resolveExecutable: async () => '/managed/codex.exe',
+    });
+    const error = await failureOf(adapter);
+    assert.equal(error.reason, reason, JSON.stringify(result));
+    assert.doesNotMatch(error.userMessage, /modo não interativo/, JSON.stringify(result));
+  }
+});
+
+test('a failed probe is not cached: the next run asks the binary again', async () => {
+  // The machine that was busy, or the antivirus that held the file for one
+  // scan, must not condemn the installation for the life of the process.
+  let attempt = 0;
+  const manager = {
+    async run(options: RunProcessOptions): Promise<ProcessResult> {
+      const key = (options.args ?? []).join(' ');
+      if (key === '--help') {
+        attempt += 1;
+        if (attempt === 1) {
+          return { outcome: 'timeout', exitCode: null, signal: 'SIGKILL', stdout: '', stderr: '', durationMs: 1, truncated: false } as ProcessResult;
+        }
+        return { outcome: 'completed', exitCode: 0, signal: null, stdout: CODEX_HELP, stderr: '', durationMs: 1, truncated: false } as ProcessResult;
+      }
+      const stdout = key === 'exec --help' ? CODEX_EXEC_HELP : '';
+      return { outcome: 'completed', exitCode: 0, signal: null, stdout, stderr: '', durationMs: 1, truncated: false } as ProcessResult;
+    },
+    async cancelAll(): Promise<void> {},
+    get liveCount(): number {
+      return 0;
+    },
+  } as unknown as ProcessManager;
+
+  const adapter = new CodexAdapter({ processManager: manager, resolveExecutable: async () => '/managed/codex.exe' });
+  const error = await failureOf(adapter);
+  assert.equal(error.reason, 'PROBE_TIMEOUT');
+  const result = await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 2 });
+  assert.equal(result.outcome, 'completed');
+  assert.equal(attempt, 2);
+});
+
+test('`exec` is confirmed by the subcommand answering, not only by the parent page listing it', async () => {
+  // A help layout this parser does not recognise is a parser problem, not a
+  // missing feature. Asking `codex exec --help` puts the question to the CLI.
+  const unfamiliarTopLevel = 'codex 0.153.4\nRun `codex <command>` for more.\n';
+  const { manager, calls } = fakeProcessManager({
+    '--help': unfamiliarTopLevel,
+    'exec --help': CODEX_EXEC_HELP,
+  });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+  });
+
+  const result = await adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 1 });
+  assert.equal(result.outcome, 'completed');
+  assert.deepEqual((calls.at(-1)!.args ?? []).slice(0, 2), ['exec', '--skip-git-repo-check']);
+});
+
+test('a Codex that really has no `exec` is still refused, and says so', async () => {
+  // The check must not have been loosened into "always run": a build whose
+  // parent page lists other commands and whose `exec` is rejected outright is
+  // the one case the original sentence was written for.
+  const withoutExec = `Usage: codex [OPTIONS] [PROMPT]
+
+Commands:
+  login    Manage login
+  help     Print this message
+
+Options:
+  -h, --help   Print help
+`;
+  const { manager } = scriptedProcessManager({
+    '--help': { stdout: withoutExec },
+    'exec --help': { exitCode: 2, stderr: "error: unrecognized subcommand 'exec'\n" },
+  });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+  });
+
+  const error = await failureOf(adapter);
+  assert.equal(error.reason, 'CAPABILITY_UNSUPPORTED');
+  assert.match(error.userMessage, /não oferece um modo não interativo/);
+});
+
+test('the version read and the health check run under the overlay too', async () => {
+  const { manager, calls } = fakeProcessManager({ '--version': 'codex-cli 0.153.4' });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+    buildEnvironment: () => ({ OPENSSL_ia32cap: undefined }),
+  });
+
+  await adapter.healthCheck();
+  await adapter.supportedEfforts('/work');
+  assert.ok(calls.length >= 2);
+  for (const call of calls) {
+    assert.ok(call.env && 'OPENSSL_ia32cap' in call.env, `${(call.args ?? []).join(' ')} lost the drop policy`);
+  }
+});
+
+test('a Claude Code probe that failed is not reported as lacking a headless mode either', async () => {
+  const { manager } = scriptedProcessManager({
+    '--help': { outcome: 'spawn-error', exitCode: null, error: 'spawn ENOENT' },
+  });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+  await assert.rejects(
+    adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 1 }),
+    (error: unknown) => {
+      assert.ok(error instanceof ClaudeCapabilityError);
+      assert.equal(error.reason, 'EXECUTABLE_NOT_FOUND');
+      assert.doesNotMatch(error.userMessage, /modo não interativo/);
+      return true;
+    },
+  );
+});
+
+test('a Claude Code build with no --print is still refused', async () => {
+  const { manager } = scriptedProcessManager({
+    '--help': { stdout: 'Usage: claude [options]\n\nOptions:\n      --version   Output the version number\n' },
+  });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+  await assert.rejects(
+    adapter.run({ prompt: 'p', workingDirectory: '/work', timeoutMs: 1000, runId: 'r', iteration: 1 }),
+    (error: unknown) => {
+      assert.ok(error instanceof ClaudeCapabilityError);
+      assert.equal(error.reason, 'CAPABILITY_UNSUPPORTED');
+      return true;
+    },
+  );
 });

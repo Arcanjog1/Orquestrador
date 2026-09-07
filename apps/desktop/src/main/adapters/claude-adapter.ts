@@ -19,7 +19,15 @@
 import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessManager } from './adapter-types.js';
 import { makeAgentResult, resolveFixedEffort } from '../core.js';
 import type { WorkerRuntimeCapabilities } from '../core.js';
-import { modelAliases, optionValues, readCapabilities, type CliCapabilities } from './cli-capabilities.js';
+import {
+  describeProbe,
+  modelAliases,
+  optionValues,
+  readCapabilities,
+  type CliCapabilities,
+  type CliProbe,
+  type ProbeState,
+} from './cli-capabilities.js';
 
 export interface ClaudeAdapterOptions {
   processManager: ProcessManager;
@@ -123,15 +131,28 @@ export class ClaudeCodeAdapter implements AgentRunner {
     };
   }
 
+  /**
+   * The help page, read once per adapter - and only kept when it was read.
+   *
+   * A probe that crashed, timed out or could not be spawned says nothing about
+   * this build's flags, so it is neither cached nor allowed to become the
+   * "no headless mode" verdict. That conflation is what block A4 fixed on the
+   * Codex side; the same trap is here, so the same rule applies.
+   */
   private async readHelp(executable: string, cwd: string): Promise<CliCapabilities> {
-    this.capabilities ??= await readCapabilities(
+    if (this.capabilities) return this.capabilities;
+    const capabilities = await readCapabilities(
       this.options.processManager,
       executable,
       cwd,
       ['--help'],
       this.options.buildEnvironment(),
     );
-    return this.capabilities;
+    if (capabilities.probe.state !== 'OK') {
+      throw ClaudeCapabilityError.fromProbe(executable, capabilities.probe);
+    }
+    this.capabilities = capabilities;
+    return capabilities;
   }
 
   /**
@@ -151,7 +172,10 @@ export class ClaudeCodeAdapter implements AgentRunner {
     const capabilities = await this.readHelp(executable, cwd);
     if (!capabilities.flags.has('--print')) {
       throw new ClaudeCapabilityError(
+        'CAPABILITY_UNSUPPORTED',
         'Esta versão do Claude Code não oferece um modo não interativo compatível.',
+        `o executável respondeu, mas sua ajuda não declara --print (${describeProbe(capabilities.probe)})`,
+        executable,
       );
     }
     const args = ['--print'];
@@ -202,11 +226,50 @@ interface ClaudePlan {
   readonly applied: { model: string | null; reasoning: string | null; fallbackUsed: boolean; note: string | null };
 }
 
+/** Same vocabulary as the Codex side: a failed check is not a verdict. */
+export type ClaudeCapabilityReason =
+  | 'CAPABILITY_UNSUPPORTED'
+  | 'PROBE_FAILED'
+  | 'PROBE_TIMEOUT'
+  | 'EXECUTABLE_INCOMPATIBLE'
+  | 'EXECUTABLE_NOT_FOUND'
+  | 'PROCESS_ABORTED'
+  | 'PARSER_FAILED';
+
+const REASON_MESSAGE: Record<ClaudeCapabilityReason, string> = {
+  CAPABILITY_UNSUPPORTED: 'Esta versão do Claude Code não oferece um modo não interativo compatível.',
+  PROBE_FAILED: 'O Claude Code não respondeu à verificação de recursos.',
+  PROBE_TIMEOUT: 'O Claude Code não respondeu à verificação de recursos dentro do tempo previsto.',
+  EXECUTABLE_INCOMPATIBLE: 'O Claude Code instalado não conseguiu iniciar neste computador.',
+  EXECUTABLE_NOT_FOUND: 'O executável do Claude Code não foi encontrado.',
+  PROCESS_ABORTED: 'A verificação do Claude Code foi interrompida antes de terminar.',
+  PARSER_FAILED: 'O Claude Code respondeu de uma forma que este aplicativo ainda não sabe ler.',
+};
+
+const REASON_OF_PROBE: Record<Exclude<ProbeState, 'OK'>, ClaudeCapabilityReason> = {
+  EXECUTABLE_NOT_FOUND: 'EXECUTABLE_NOT_FOUND',
+  PROBE_TIMEOUT: 'PROBE_TIMEOUT',
+  PROCESS_ABORTED: 'PROCESS_ABORTED',
+  EXECUTABLE_INCOMPATIBLE: 'EXECUTABLE_INCOMPATIBLE',
+  PROBE_FAILED: 'PROBE_FAILED',
+  PARSER_FAILED: 'PARSER_FAILED',
+};
+
 export class ClaudeCapabilityError extends Error {
   readonly userMessage: string;
-  constructor(message: string) {
-    super(message);
+  constructor(
+    readonly reason: ClaudeCapabilityReason,
+    message: string,
+    readonly diagnosis: string | null = null,
+    readonly executable: string | null = null,
+  ) {
+    super(diagnosis ? `${message} (${diagnosis})` : message);
     this.name = 'ClaudeCapabilityError';
-    this.userMessage = message;
+    this.userMessage = diagnosis ? `${message} Detalhe: ${diagnosis}.` : message;
+  }
+
+  static fromProbe(executable: string, probe: CliProbe): ClaudeCapabilityError {
+    const reason = probe.state === 'OK' ? 'CAPABILITY_UNSUPPORTED' : REASON_OF_PROBE[probe.state];
+    return new ClaudeCapabilityError(reason, REASON_MESSAGE[reason], describeProbe(probe), executable);
   }
 }
