@@ -393,6 +393,7 @@ export const REQUEST_VALIDATORS: {
   'workspace.push': obj({ workspaceId: id }),
 
   'agents.list': noArgs,
+  'agents.status': noArgs,
 
   'workspace.list': noArgs,
   'workspace.selectFolder': noArgs,

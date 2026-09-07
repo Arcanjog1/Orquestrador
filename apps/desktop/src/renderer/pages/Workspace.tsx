@@ -7,6 +7,7 @@ import { TopContextBar } from "@/components/orch/TopContextBar";
 import { TimelineView } from "@/components/orch/Timeline";
 import {
   ActivityPanel,
+  type AgentStatus,
   type ExchangeCounts,
   type Liveness,
   type Step,
@@ -98,6 +99,7 @@ export function WorkspacePage({
    */
   const [liveness, setLiveness] = useState<Liveness | null>(null);
   const [exchange, setExchange] = useState<ExchangeCounts>({ inFlight: 0, dead: 0 });
+  const [agentStatus, setAgentStatus] = useState<readonly AgentStatus[]>([]);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const [branches, setBranches] = useState<WorkspaceBranchesView | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
@@ -491,6 +493,19 @@ export function WorkspacePage({
     [sessionId],
   );
 
+  // The team, and what each member is doing.
+  //
+  // Polled rather than pushed: an agent's status is a fact about the whole
+  // application, not about this conversation, and the panel only has to be
+  // right within a couple of seconds. While nothing is running it is read
+  // once - a roster that is not changing does not need a timer.
+  const refreshAgents = useCallback(() => {
+    void api.agents
+      .status()
+      .then((rows) => setAgentStatus(rows as readonly AgentStatus[]))
+      .catch(() => {});
+  }, []);
+
   // -- Derived -------------------------------------------------------------
 
   const runState = runStateOf(run, stage);
@@ -508,6 +523,13 @@ export function WorkspacePage({
       setExchange({ inFlight: 0, dead: 0 });
     }
   }, [running]);
+
+  useEffect(() => {
+    refreshAgents();
+    if (!running) return;
+    const timer = setInterval(refreshAgents, 3_000);
+    return () => clearInterval(timer);
+  }, [running, refreshAgents]);
 
   // Agent, account, model and reasoning are four different things, and the
   // header, the timeline and the team dialog all read them from the same
@@ -828,6 +850,7 @@ export function WorkspacePage({
                 onOpenStep={() => (run ? setDetailRunId(run.id) : setEvidenceOpen(true))}
                 liveness={liveness}
                 exchange={exchange}
+                agents={agentStatus}
                 onCancel={() => setCancelOpen(true)}
               />
             </div>

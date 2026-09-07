@@ -32,6 +32,24 @@ export type Liveness = {
   idleTimeoutMs: number | null;
 };
 
+/**
+ * One team member, as the panel lists them.
+ *
+ * Mirrors `AgentStatusView` without importing the whole contract into a
+ * presentational component.
+ */
+export type AgentStatus = {
+  agentId: string;
+  name: string;
+  role: string;
+  connectionName: string | null;
+  connectionKind: string | null;
+  status: "idle" | "running" | "offline" | "blocked";
+  currentTask: string | null;
+  runningForMs: number | null;
+  awaitingReply: number;
+};
+
 /** The delivery state of the exchange, as counts. */
 export type ExchangeCounts = {
   /** Delegations handed over and not yet answered. */
@@ -77,6 +95,7 @@ export function ActivityPanel({
   onOpenStep,
   liveness,
   exchange,
+  agents,
   onCancel,
 }: {
   state: RunState;
@@ -94,6 +113,8 @@ export function ActivityPanel({
   liveness: Liveness | null;
   /** How the exchange between the agents is going. */
   exchange: ExchangeCounts | null;
+  /** The team, and what each member is doing. Empty until one is configured. */
+  agents: readonly AgentStatus[];
   /** Stops the run. Always offered while one is going. */
   onCancel: () => void;
 }) {
@@ -209,6 +230,55 @@ export function ActivityPanel({
             >
               Cancelar execução
             </button>
+          </div>
+        )}
+
+        {agents.length > 0 && (
+          <div className="border-t border-border pt-4">
+            <SectionLabel>Equipe</SectionLabel>
+            <div className="mt-2 space-y-2">
+              {agents.map((agent) => (
+                <div key={agent.agentId} className="flex items-start gap-2">
+                  <span
+                    className={cn(
+                      "mt-1.5 size-2 shrink-0 rounded-full",
+                      agent.status === "running" && "bg-running pulse-dot",
+                      agent.status === "idle" && "bg-neutral",
+                      agent.status === "offline" && "bg-muted-foreground",
+                      agent.status === "blocked" && "bg-attention",
+                    )}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm">{agent.name}</p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {agent.role === "ORCHESTRATOR" ? "Orquestrador" : "Worker"}
+                      {agent.connectionName ? ` · ${agent.connectionName}` : ""}
+                      {/* Which side of the bill this member is on. A person
+                          who set the product up to use their subscription
+                          should be able to see that it is. */}
+                      {agent.connectionKind === "api" ? " · API" : ""}
+                    </p>
+                    {agent.status === "running" && agent.currentTask && (
+                      <p className="mt-0.5 truncate text-xs text-foreground/70">
+                        {agent.currentTask}
+                        {agent.runningForMs !== null ? ` · ${duration(agent.runningForMs)}` : ""}
+                      </p>
+                    )}
+                    {agent.status === "offline" && (
+                      // Not "idle": this one needs a person to sign in, and
+                      // saying so is the difference between a fixable problem
+                      // and an unexplained silence.
+                      <p className="mt-0.5 text-xs text-attention">Conexão não autenticada</p>
+                    )}
+                    {agent.awaitingReply > 0 && agent.status !== "running" && (
+                      <p className="mt-0.5 text-xs text-danger">
+                        {agent.awaitingReply} delegação(ões) sem resposta
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

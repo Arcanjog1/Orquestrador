@@ -332,3 +332,136 @@ test('the orchestrator is "Padrão do CLI" unless pinned; a pinned model is kept
     repo.cleanup();
   }
 });
+
+/* ------------------------------------------------------------------ *
+ * The agent panel's data
+ * ------------------------------------------------------------------ */
+
+test('every agent reports what it is, which connection it works through, and what it is doing', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    // Two Claude connections. This is the case the whole identity model exists
+    // for: two team members, two accounts, one adapter - not two keys, not two
+    // adapters, and never one session shared between them.
+    value(await fixture.router.handle('accounts.create', { name: 'Claude Trabalho 1', provider: 'anthropic' }));
+    value(await fixture.router.handle('accounts.create', { name: 'Claude Trabalho 2', provider: 'anthropic' }));
+
+    const agents = value<
+      Array<{
+        agentId: string;
+        name: string;
+        role: string;
+        runtimeId: string;
+        connectionId: string | null;
+        connectionName: string | null;
+        provider: string | null;
+        connectionKind: string | null;
+        status: string;
+        currentTask: string | null;
+        runningForMs: number | null;
+        awaitingReply: number;
+      }>
+    >(await fixture.router.handle('agents.status', null));
+
+    const workers = agents.filter((agent) => agent.role === 'CODING_WORKER');
+    assert.equal(workers.length, 2);
+    assert.deepEqual(
+      workers.map((agent) => agent.name).sort(),
+      ['Claude Trabalho 1', 'Claude Trabalho 2'],
+    );
+    // Two identities, two connections. One would mean they could hand each
+    // other a session, which is exactly what must not happen.
+    assert.equal(new Set(workers.map((agent) => agent.connectionId)).size, 2);
+    for (const worker of workers) {
+      assert.equal(worker.provider, 'anthropic');
+      assert.equal(worker.runtimeId, 'claude-code');
+      assert.equal(worker.connectionName, worker.name);
+      // Signed out, not idle. One is a problem to fix and the other is a team
+      // member waiting for work; sending a person to the wrong screen because
+      // the panel conflated them is the failure this distinction prevents.
+      assert.equal(worker.status, 'offline');
+      assert.equal(worker.currentTask, null);
+      assert.equal(worker.runningForMs, null);
+      assert.equal(worker.awaitingReply, 0);
+    }
+
+    // The orchestrator that exists before anyone signs in has no connection,
+    // and is therefore not "offline": there is nothing to sign in to.
+    const codex = agents.find((agent) => agent.role === 'ORCHESTRATOR' && agent.connectionId === null);
+    assert.ok(codex);
+    assert.equal(codex.status, 'idle');
+    assert.equal(codex.runtimeId, 'codex');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('an agent connected but not working is idle, and never shows a stale task', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    const account = value<{ id: string }>(
+      await fixture.router.handle('accounts.create', { name: 'Claude Trabalho 1', provider: 'anthropic' }),
+    );
+    fixture.services.database.accounts.updateAuth(account.id, 'connected', 'cli');
+
+    const agents = value<Array<{ role: string; status: string; currentTask: string | null }>>(
+      await fixture.router.handle('agents.status', null),
+    );
+    const worker = agents.find((agent) => agent.role === 'CODING_WORKER');
+    assert.ok(worker);
+    assert.equal(worker.status, 'idle');
+    assert.equal(worker.currentTask, null);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('the panel counts a delegation nobody answered, so it cannot be missed', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    const account = value<{ id: string }>(
+      await fixture.router.handle('accounts.create', { name: 'Claude Trabalho 1', provider: 'anthropic' }),
+    );
+    const agents = value<Array<{ agentId: string; role: string }>>(
+      await fixture.router.handle('agents.status', null),
+    );
+    const worker = agents.find((agent) => agent.role === 'CODING_WORKER')!;
+
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.createConversation', { name: 'Projeto' }),
+    );
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'c' }),
+    );
+    const run = fixture.services.database.runs.create({
+      id: 'run-panel-1',
+      sessionId: session.id,
+      workspaceId: workspace.id,
+      objective: 'algo',
+      orchestratorAgentId: null,
+      maxIterations: 4,
+    });
+    // A delegation handed over and never answered - the shape a crash leaves.
+    fixture.services.orchestration.bus.publish({
+      runId: run.id,
+      conversationId: session.id,
+      iteration: 1,
+      messageType: 'DELEGATION',
+      payload: { task: 'crie hello.txt' },
+      senderAgentId: 'orchestrator',
+      recipientAgentId: worker.agentId,
+    });
+
+    const after = value<Array<{ agentId: string; awaitingReply: number }>>(
+      await fixture.router.handle('agents.status', null),
+    );
+    assert.equal(
+      after.find((agent) => agent.agentId === worker.agentId)?.awaitingReply,
+      1,
+      'a delegation with no answer must be visible as one',
+    );
+    assert.ok(account.id);
+  } finally {
+    await fixture.cleanup();
+  }
+});

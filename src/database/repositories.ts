@@ -1257,6 +1257,21 @@ export class RunRepository extends Repository {
     );
   }
 
+  /**
+   * The last time each agent finished an invocation.
+   *
+   * One query for the whole panel rather than one per agent: the list is short
+   * today and would still be short with ten agents, but a per-row query is the
+   * shape that quietly becomes slow.
+   */
+  lastActivityByAgent(): Map<string, string> {
+    const rows = this.db.all<{ agent_id: string; last_at: string }>(
+      'SELECT agent_id, MAX(started_at) AS last_at FROM agent_invocations ' +
+        'WHERE agent_id IS NOT NULL GROUP BY agent_id',
+    );
+    return new Map(rows.map((row) => [row.agent_id, row.last_at]));
+  }
+
   recordVerification(input: {
     runId: string;
     iteration: number;
@@ -1824,6 +1839,22 @@ export class AgentMessageRepository extends Repository {
         'ORDER BY created_at ASC LIMIT ?',
       [limit],
     );
+  }
+
+  /**
+   * Delegations handed to an agent and not yet answered, across every run.
+   *
+   * What the agent panel shows as "aguardando resposta". Counted from the
+   * table rather than from memory, so it survives a restart and so a
+   * delegation left outstanding by a crash is still visible as outstanding.
+   */
+  awaitingReply(recipientAgentId: string): number {
+    const row = this.db.get<{ total: number }>(
+      "SELECT COUNT(*) AS total FROM agent_messages WHERE recipient_agent_id = ? " +
+        "AND status IN ('pending','leased','started')",
+      [recipientAgentId],
+    );
+    return row?.total ?? 0;
   }
 
   /** How many messages of a run sit in each status. What the panel counts. */

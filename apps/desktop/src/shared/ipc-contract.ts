@@ -51,6 +51,7 @@ export const REQUEST_CHANNELS = [
   'workspace.push',
 
   'agents.list',
+  'agents.status',
 
   'workspace.list',
   'workspace.selectFolder',
@@ -233,6 +234,49 @@ export interface AgentView {
   readonly role: string;
   readonly runtimeId: RuntimeId;
   readonly accountId: string | null;
+}
+
+/**
+ * What each agent is, and what it is doing.
+ *
+ * An agent's *identity* in this application is not a credential. It is a team
+ * member with a name, a role, a runtime and a connection - and two workers can
+ * sit on two different connections of the same vendor without being two
+ * adapters, two keys, or two of anything else. That separation is why "Claude
+ * Trabalho 1" and "Claude Trabalho 2" can exist at all.
+ *
+ * The live half - status, current task, how long, when it last did anything -
+ * is what turns a list of names into a panel worth looking at while a run is
+ * going.
+ */
+export interface AgentStatusView {
+  readonly agentId: string;
+  readonly name: string;
+  readonly role: string;
+  readonly runtimeId: RuntimeId;
+  /** The connection this agent works through. Null means "none bound yet". */
+  readonly connectionId: string | null;
+  readonly connectionName: string | null;
+  readonly provider: ProviderName | null;
+  /** `cli` (the vendor's own tool, on the person's plan) or `api` (metered). */
+  readonly connectionKind: string | null;
+  /**
+   * Whether this agent can be used right now.
+   *
+   * `offline` means the connection is not signed in. It is deliberately not
+   * the same as `idle`: one is a problem to fix, the other is a team member
+   * waiting for work, and telling a person the wrong one wastes their time.
+   */
+  readonly status: 'idle' | 'running' | 'offline' | 'blocked';
+  /** What it is doing, when it is doing something. */
+  readonly currentTask: string | null;
+  readonly currentRunId: string | null;
+  /** Milliseconds since the current invocation began. */
+  readonly runningForMs: number | null;
+  /** When this agent last finished anything, ever. */
+  readonly lastActiveAt: string | null;
+  /** Delegations handed to it and not yet answered, across every run. */
+  readonly awaitingReply: number;
 }
 
 /**
@@ -797,6 +841,7 @@ export interface IpcMap {
   'workspace.push': { request: { workspaceId: string }; response: GitOperationResult };
 
   'agents.list': { request: void; response: readonly AgentView[] };
+  'agents.status': { request: void; response: readonly AgentStatusView[] };
 
   'workspace.list': { request: void; response: readonly WorkspaceView[] };
   'workspace.selectFolder': { request: void; response: { path: string | null } };
