@@ -1,119 +1,145 @@
-# Handoff — reorientação para central de agentes
+# Handoff — central de agentes
 
-Estado ao fim desta sessão, e o que a próxima precisa saber.
+Estado ao fim da segunda sessão da reorientação.
 
 ## Baseline
 
 | | |
 |---|---|
 | Repositório | `Arcanjog1/Orquestrador` (público) |
-| Branch desta sessão | `claude/ai-orchestrator-reorientacao-ytlkw0` |
-| HEAD de partida | `b53120c` |
+| Branch | `claude/ai-orchestrator-reorientacao-ytlkw0` |
+| HEAD do início desta sessão | `b69a880` |
 | `main` | **não existe** neste repositório |
 
-A branch designada estava em `5ca6062`, um ancestral estrito e sem commits
-próprios. `claude/ai-orchestrator-implementation-y7xw98` @ `b53120c` era o
-superconjunto de tudo (119 commits; `lovable-on-latest-core` e
-`continuation-grblen` já estavam contidos nela), então a branch foi avançada
-por fast-forward para lá. Nada foi resetado, nada foi apagado, nada foi
-forçado, `main` não foi tocada e nenhum merge foi feito.
+Sem reset, sem merge, sem force-push, sem apagar branch.
 
-## O que foi feito
+## O que existe hoje
 
-1. **Pesquisa de autenticação** → `docs/PROVIDER_AUTHENTICATION.md`
-2. **Fronteira de providers** → `AgentProvider extends AgentRunner`
-3. **Adapter OpenAI** (Responses API) e **Anthropic** (Messages API)
-4. **Conexões e credenciais** → `ConnectionService`, migração 9
-5. **Modo conversa** → projeto sem pasta, gate próprio
-6. **Equipes com N workers** → `slot` + `label`, delegação por `workerId`
-7. **Recusa por capacidade** → `toolExecution: false` bloqueia edição
-8. **Controles de custo** → `BudgetLedger`, `NEEDS_HUMAN`, falhas terminais
-9. **Testes** → 40 novos casos, 495 no total, todos verdes
+### Backend
 
-## O que **não** foi feito, e por quê
+- `AgentProvider extends AgentRunner` — a fronteira. Um loop, um DoneGate.
+- Adapters: Codex CLI, Claude Code CLI, OpenAI Responses API, Anthropic
+  Messages API.
+- `ProviderCapabilities.toolExecution` — a regra que impede "a API disse que
+  editou" virar "arquivo alterado". Uma delegação com `requiresTools` para um
+  worker que declara `false` é recusada **antes** da invocação.
+- `ConnectionService` — conexões CLI e API, credencial criptografada em tabela
+  própria, `api_enabled` começando em 0.
+- Equipes com N workers (`slot`, `label`), delegação por `workerId` validado
+  contra a equipe real.
+- Projetos de conversa (`environment = 'conversation'`): sem pasta, sem git,
+  sem processo. `evaluateConversationDone` é um gate próprio, não o de código
+  afrouxado.
+- `BudgetLedger` — verificação **antes** da chamada, `NEEDS_HUMAN` ao atingir
+  o limite, falhas terminais (saldo, credencial) param em vez de repetir.
+- Sessões: `claude -p --resume <id>`, com o id lido do envelope
+  `--output-format json`. Chaveado por (conversa × conexão).
 
-### Telas de UI (React)
+### Interface
 
-O `ConnectionService` está completo e exposto por IPC
-(`connections.list/addApi/replaceKey/rename/setEnabled/setPreferences/disconnect/test/models`),
-com validação e contrato tipado. **As telas do renderer ainda não foram
-escritas.** Faltam:
+- **Conexões** (Configurações → Contas): lista CLI e API juntas, assinatura
+  primeiro; adicionar, testar, renomear, substituir chave, desconectar,
+  escolher modelo do catálogo real; diálogo de confirmação antes de habilitar
+  cobrança.
+- **Equipe**: N workers, adicionar/remover, recusa duas na mesma conexão.
+- **Novo projeto**: Conversa · Código · Nuvem, com Conversa primeiro.
+- **Limites de gasto** por projeto (Configurações → Execution).
+- **Detalhes da execução**: por invocation — provider, tipo de conexão, worker,
+  modelo, raciocínio, tokens, custo, falha classificada.
 
-- uma tela de conexões que liste CLI e API juntas, com o aviso de cobrança
-  separada e o switch de habilitar;
-- a tela de equipe com N workers (hoje o `TeamForm` é orquestrador + 1 worker);
-- o botão "novo projeto de conversa" na tela inicial;
-- os campos de orçamento por projeto;
-- a timeline nomeando o worker por `workerLabel` (o evento já carrega).
+### Testes
 
-A camada de baixo está pronta e testada; é trabalho de renderer.
+| Suíte | Resultado |
+|---|---|
+| Root (`npm test`) | **497 passando**, 1 pulado |
+| Electron (`npm run desktop:test`) | **27 passando** |
+| Packaged smoke | **7 passando** (schema 10) |
+| Typecheck (4 projetos) | limpo |
 
-### `run.usage` na timeline
+## O loop automático — o que já é verdade
 
-`RunProgressEvent` já tem `usage?: RunUsageView`, e o evento de parada por
-orçamento o emite. Os eventos de progresso comuns ainda não — o consumo aparece
-como mensagem de sistema no fim do run.
+O fluxo que o usuário pediu **já é o loop existente**, não algo a construir:
 
-### Streaming real
+```
+objetivo → Codex decide → delega ao worker nomeado → worker executa
+        → evidência (se houver workspace) → verificação → Codex revisa
+        → nova delegação → … → DoneGate
+```
 
-`ProviderCapabilities.streaming` é `false` nos dois adapters de API, e isso é
-honesto: eles não fazem streaming ainda. A timeline é baseada nas invocations
-reais, sem evento falso. Ambas as APIs suportam SSE; é o próximo incremento
-natural.
+Ninguém copia prompt nem relatório. O que esta sessão acrescentou foi
+continuidade: o worker retoma a própria sessão entre delegações.
 
-### Probes reais e release
+Provado por dois testes E2E determinísticos em `tests/orchestration-modes.test.ts`
+— o de conversa (Claude 1 → revisão → Claude 2 → revisão → DONE, sem pasta) e o
+de código (arquivo real, evidência do git, verificação re-executada).
 
-Ver abaixo.
+**Um teste determinístico não é um teste real.** Ver o roteiro abaixo.
 
 ## Human gates
 
-### 1. Chamada real de API (bloqueia `API_E2E_VERIFIED`)
+### 1. `LOCAL_REAL_AUTH_TEST_PENDING`
 
-Não havia credencial de teste legítima disponível nesta sessão, e ativar
-billing gastaria dinheiro do usuário sem autorização. Nada foi inventado, nada
-foi ativado.
+Não existem contas Codex/Claude legítimas no CI, e este ambiente não tem
+Windows. O teste com as suas contas é o que falta, e é simples:
 
-Como o usuário verifica, com risco baixo:
+1. instalar o novo `AI-Orchestrator-Setup.exe` por cima da versão anterior;
+2. abrir o aplicativo — a base é migrada no lugar, nada é reautenticado;
+3. Configurações → Contas: confirmar Codex e Claude conectados (se já estavam,
+   continuam);
+4. adicionar uma segunda conta Claude, se quiser dois workers;
+5. Equipe: orquestrador = Codex, Worker 1 = Claude Trabalho 1
+   (+ "Adicionar worker" para o segundo);
+6. escolher um projeto **de código** com pasta local;
+7. enviar um objetivo pequeno e verificável — por exemplo *"crie hello.txt com
+   o texto pronto e registre uma verificação que confira isso"*;
+8. acompanhar a timeline: Codex analisando → delegou → Claude executando →
+   evidência → verificação → Codex revisando → nova delegação → DONE;
+9. abrir **Detalhes** e conferir invocations, modelo, duração e consumo.
 
-1. Contas → adicionar conexão OpenAI, colar chave, **testar conexão**;
-2. adicionar as duas conexões Anthropic do mesmo jeito;
-3. habilitar as três;
-4. definir `maxCostUsd` = 1 no projeto;
-5. criar um projeto de conversa e mandar um objetivo.
+Sem PowerShell. Sem instalar Node. Sem copiar credencial. Sem servidor. Sem
+API paga.
 
-O teste de conexão faz um `GET /v1/models` — barato, e já prova credencial,
-host e cabeçalho.
+### 2. `API_E2E_VERIFIED` — não declarado
 
-### 2. Release
+Nenhuma chamada real a `api.openai.com` ou `api.anthropic.com` foi feita:
+não havia credencial legítima e ativar billing gastaria dinheiro seu sem
+autorização. Nada foi inventado, nenhum dólar foi gasto.
 
-Nenhuma pre-release foi publicada. O CI do Windows e o instalador NSIS não
-foram executados nesta sessão (não há runner Windows aqui). O último instalador
-publicado continua sendo `desktop-dev-f169c80`, e ele **não** contém este
-trabalho.
+Para verificar barato: criar conexão → colar chave → **Testar** (faz só um
+`GET /v1/models`) → habilitar → definir `maxCostUsd = 1` → projeto de conversa.
 
-## Onde continuar
+## Limitações que ficam, ditas na cara
 
-**O próximo passo menor e concreto:** escrever a tela de conexões no renderer
-(`apps/desktop/src/renderer/pages/Settings.tsx`, ao lado do `GitHubCard`),
-consumindo `connections.list` e `connections.addApi`, mostrando `keyHint` e
-nunca a chave, com o aviso de cobrança separada ao lado do switch de habilitar.
+**Streaming.** `ProviderCapabilities.streaming` é `false` nos dois adapters de
+API, e isso é honesto: eles não fazem streaming. A timeline é construída sobre
+invocations reais, sem evento falso. Ambas as APIs suportam SSE; é o próximo
+incremento natural, e foi deixado de fora deliberadamente para não atrasar o
+instalador.
 
-Tudo de que ela precisa já existe e está testado.
+**Listar sessões existentes.** Nenhum dos CLIs oferece listagem não
+interativa, e a doc do Claude Code diz que o formato do transcrito é interno e
+pode quebrar a cada release. O app oferece as sessões que ele mesmo iniciou.
+Ver `docs/PROVIDER_AUTHENTICATION.md` §6.
 
-## Regressões conhecidas
+**Conversas do Claude Desktop.** Histórico separado, retomadas no próprio app.
+Não há caminho oficial pelo CLI e o produto não inventa um.
 
-Nenhuma. 495 testes, 494 passando, 1 pulado (o mesmo de antes); 23 testes
-Electron passando; typecheck limpo nos quatro projetos.
+**Sessão do orquestrador.** `codex exec resume` existe e não é usado de
+propósito: o orquestrador recebe um prompt auto-contido a cada volta, e é isso
+que o mantém no objetivo.
 
-Dois testes existentes foram **atualizados**, não removidos:
-`desktop-orchestration.test.ts` esperava os rótulos "Codex preparando a
-tarefa..." e "Claude executando...". Os rótulos agora nomeiam papéis, porque o
-orquestrador pode ser um CLI ou uma API e o worker é o membro da equipe que foi
-nomeado.
+**Custo do worker CLI.** Só aparece quando o build instalado suporta
+`--output-format json`; sem isso a coluna fica nula e a interface mostra "não
+informado", nunca zero.
 
 ## Segurança do repositório
 
-O repositório é público. Nenhuma credencial, exemplo de chave ou dado pessoal
-foi adicionado neste trabalho. A pendência histórica descrita em
-`docs/SECURITY_HISTORY_CLEANUP.md` não foi tocada: reescrever histórico exige
-autorização explícita e um force-push, e nenhum dos dois foi feito.
+Público. Nada de credencial, chave de exemplo ou dado pessoal foi adicionado.
+A pendência de `docs/SECURITY_HISTORY_CLEANUP.md` **não foi tocada**:
+reescrever histórico exige autorização explícita e um force-push, e nenhum dos
+dois foi feito.
+
+## Próximo passo menor e concreto
+
+Rodar o roteiro do item 1 acima com o novo instalador e uma tarefa pequena de
+código, e relatar em que passo parou — se parar.
