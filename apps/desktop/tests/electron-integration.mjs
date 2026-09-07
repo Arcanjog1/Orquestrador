@@ -1249,7 +1249,10 @@ test('the team dialog adds a second worker, and refuses two workers on one conne
     assert.notEqual(saved.team.workers[0].accountId, saved.team.workers[1].accountId);
   } finally {
     await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
-    rmSync(dir, { recursive: true, force: true });
+    // Windows can still hold a handle on a folder the app just had open, and
+    // a temp folder that will not go is not a failed assertion. `removeTree`
+    // is what the rest of this suite already uses for exactly that.
+    removeTree(dir);
   }
 });
 
@@ -1291,7 +1294,10 @@ test('budget limits are saved for the project, and the screen says what they can
     assert.equal(saved.budget.maxTokens, null, 'an empty field stays no limit');
   } finally {
     await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
-    rmSync(dir, { recursive: true, force: true });
+    // Windows can still hold a handle on a folder the app just had open, and
+    // a temp folder that will not go is not a failed assertion. `removeTree`
+    // is what the rest of this suite already uses for exactly that.
+    removeTree(dir);
   }
 });
 
