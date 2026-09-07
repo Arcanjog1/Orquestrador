@@ -53,7 +53,7 @@ Sem reset, sem merge, sem force-push, sem apagar branch.
 
 | Suíte | Resultado |
 |---|---|
-| Root (`npm test`) | **497 passando**, 1 pulado |
+| Root (`npm test`) | **502 passando**, 1 pulado |
 | Electron (`npm run desktop:test`) | **27 passando** |
 | Packaged smoke | **7 passando** (schema 10) |
 | Typecheck (4 projetos) | limpo |
