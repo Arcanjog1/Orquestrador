@@ -163,3 +163,59 @@ O que só a máquina do usuário pode provar (precisa das contas conectadas):
    (`EXECUTABLE_INCOMPATIBLE`, `PROBE_TIMEOUT`, `PROBE_FAILED`…), o código de
    saída e a primeira linha do stderr. Copiar essa frase inteira é o suficiente
    para o próximo diagnóstico — não é mais preciso adivinhar.
+
+## Prova contra o binário real
+
+Além dos testes unitários (que usam um `ProcessManager` roteirizado), o fix foi
+verificado contra o **executável oficial do Codex 0.153.4**, com o
+`ProcessManager` e o `CodexAdapter` de verdade:
+
+```
+npm run build:tests
+node scripts/probe-codex-capability.mjs <caminho>/codex
+```
+
+O script define `OPENSSL_ia32cap=0x400` no ambiente **do pai** (bit 10 de
+CPUID.1:EDX, reservado em toda CPU, então o abort reproduz em qualquer
+máquina) e roda o adapter duas vezes.
+
+Resultado obtido aqui, em `codex-cli 0.153.4` (linux-x64 musl, npm
+`@openai/codex@0.153.4-linux-x64`):
+
+```
+A. sem overlay de ambiente — o estado anterior ao fix
+  name          CodexCapabilityError
+  reason        EXECUTABLE_INCOMPATIBLE
+  userMessage   O Codex instalado não conseguiu iniciar neste computador.
+                Detalhe: estado=EXECUTABLE_INCOMPATIBLE; argumentos=--help;
+                saída=completed; sinal=SIGABRT;
+                causa=a biblioteca criptográfica dentro do executável abortou
+                      por causa de OPENSSL_ia32cap no ambiente;
+                stderr=Fatal Error: HW capability found: 0x5F8BFBFF …
+  OK  não afirma que este Codex não tem modo não interativo
+  OK  nomeia OPENSSL_ia32cap como causa
+
+B. com a política de ambiente do build gerenciado — o fix
+  OK  `codex --help` sondado, sem OPENSSL_ia32cap
+  OK  `codex exec --help` sondado, sem OPENSSL_ia32cap
+  OK  o portão de capacidade abriu
+  OK  `codex exec` foi realmente lançado
+  argv  exec --skip-git-repo-check --sandbox read-only
+        --output-last-message /tmp/codex-run-…/last-message.txt
+  OK  o prompt nunca chegou ao argv
+  OK  o prompt foi por stdin
+  outcome  timeout   (esperado: sem conta conectada, o processo fica esperando)
+  stderr   Reading prompt from stdin...
+
+PASS
+```
+
+O `timeout` no fim de B é o comportamento correto de um Codex sem login neste
+ambiente — e é exatamente o ponto: **o processo chegou a existir**. O incidente
+original terminava com *zero* invocações.
+
+Isto verifica o contrato oficial usado pelo adapter contra a build real:
+`codex exec`, `--skip-git-repo-check`, `--sandbox <read-only>`,
+`--output-last-message <FILE>`, `--output-schema <FILE>`, `-m/--model`,
+`-c key=value` — todas lidas de `codex exec --help` do próprio binário, nenhuma
+inventada.
