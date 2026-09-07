@@ -474,3 +474,105 @@ test('conversations from before projects existed read as "Sem projeto", and noth
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a database written before connections and run kinds upgrades, keeping every row', () => {
+  // Migration 9 is the one that touches accounts, runs and agent_invocations -
+  // the three tables carrying the things a person would be most upset to lose:
+  // their logins, their history and the record of what ran. So: build the
+  // database exactly as the previous release left it, fill it with all three,
+  // open it with the current Database, and check that nothing moved.
+  const dir = mkdtempSync(join(tmpdir(), 'lao-db-connections-'));
+  try {
+    const file = join(dir, 'data', 'old.db');
+    const older = new NodeSqliteDriver(file);
+    older.exec(
+      'CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)',
+    );
+    for (const migration of MIGRATIONS.filter((m) => m.id < 9)) {
+      older.exec(migration.sql);
+      older.run('INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)', [
+        migration.id,
+        migration.name,
+        '2026-01-01T00:00:00.000Z',
+      ]);
+    }
+    const t = '2026-01-01T00:00:00.000Z';
+    older.run("INSERT INTO providers (id, display_name, created_at) VALUES ('anthropic','Anthropic',?)", [t]);
+    older.run(
+      "INSERT INTO accounts (id, provider_id, display_name, profile_directory, auth_state, auth_method, created_at) " +
+        "VALUES ('acc-1','anthropic','Claude Trabalho','/profiles/acc-1','connected','oauth',?)",
+      [t],
+    );
+    older.run(
+      "INSERT INTO agents (id, display_name, provider_id, account_id, adapter_id, role, created_at) " +
+        "VALUES ('agent-worker-acc-1','Claude Trabalho','anthropic','acc-1','claude-code-cli','CODING_WORKER',?)",
+      [t],
+    );
+    older.run(
+      "INSERT INTO workspaces (id, display_name, local_path, created_at, updated_at) VALUES ('ws-1','Projeto','/w',?,?)",
+      [t, t],
+    );
+    older.run(
+      "INSERT INTO workspace_agents (workspace_id, agent_id, role) VALUES ('ws-1','agent-worker-acc-1','CODING_WORKER')",
+    );
+    older.run(
+      "INSERT INTO runs (id, session_id, workspace_id, objective, status, iteration, max_iterations, started_at) " +
+        "VALUES ('run-1',NULL,'ws-1','Corrigir o bug','DONE',2,8,?)",
+      [t],
+    );
+    older.run(
+      "INSERT INTO agent_invocations (id, run_id, iteration, agent_id, account_id, role, outcome, started_at) " +
+        "VALUES ('inv-1','run-1',1,'agent-worker-acc-1','acc-1','CODING_WORKER','completed',?)",
+      [t],
+    );
+    older.close();
+
+    const upgraded = new Database({ filePath: file });
+    try {
+      assert.equal(upgraded.schemaVersion, SCHEMA_VERSION);
+
+      // The account is untouched, and it is a CLI connection - so the person's
+      // existing login keeps working with nothing to re-authenticate.
+      const account = upgraded.accounts.require('acc-1');
+      assert.equal(account.display_name, 'Claude Trabalho');
+      assert.equal(account.profile_directory, '/profiles/acc-1');
+      assert.equal(account.auth_state, 'connected');
+      assert.equal(account.auth_method, 'oauth');
+      assert.equal(account.connection_kind, 'cli', 'an existing account is the official tool');
+      assert.equal(account.api_enabled, 0, 'and nothing metered is switched on for it');
+      assert.equal(account.secret_ref, null);
+      assert.equal(account.key_hint, null);
+
+      // The run kept its history and reads as a coding run, which is the gate
+      // it actually had to pass.
+      const run = upgraded.runs.require('run-1');
+      assert.equal(run.objective, 'Corrigir o bug');
+      assert.equal(run.status, 'DONE');
+      assert.equal(run.iteration, 2);
+      assert.equal(run.kind, 'coding');
+      // Nothing reported consumption back then, and nothing is invented now.
+      assert.equal(run.total_tokens, null);
+      assert.equal(run.total_cost_usd, null);
+      assert.equal(run.invocation_count, 0);
+
+      assert.equal(upgraded.runs.invocations('run-1').length, 1, 'the invocation survived');
+
+      // The team binding survived and reads as slot 0.
+      assert.equal(upgraded.workspaces.require('ws-1').worker_agent_id, 'agent-worker-acc-1');
+      const team = upgraded.workspaces.team('ws-1');
+      assert.equal(team.length, 1);
+      assert.equal(team[0]!.slot, 0);
+      assert.equal(team[0]!.label, null);
+
+      // And the new columns are writable on the old rows.
+      upgraded.accounts.setPreferences('acc-1', 'claude-sonnet-5', 'high');
+      assert.equal(upgraded.accounts.require('acc-1').default_model, 'claude-sonnet-5');
+      upgraded.providerSecrets.put('acc-1', 'enc:whatever');
+      assert.equal(upgraded.providerSecrets.get('acc-1'), 'enc:whatever');
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
