@@ -12,6 +12,7 @@ import { NodeSqliteDriver } from './node-sqlite-driver.js';
 import { DatabaseUnavailableError, type SqlDriver, type SqlRow, type SqlValue } from './driver.js';
 import {
   AccountRepository,
+  AgentMessageRepository,
   AgentRepository,
   AgentSessionRepository,
   ChatRepository,
@@ -94,6 +95,8 @@ export class Database {
   readonly providerSecrets = new ProviderSecretRepository(() => this.driver);
   /** Provider session ids, per conversation and connection. Never shared. */
   readonly agentSessions = new AgentSessionRepository(() => this.driver);
+  /** The durable record of what the agents said to each other. */
+  readonly agentMessages = new AgentMessageRepository(() => this.driver);
   readonly accounts = new AccountRepository(() => this.driver);
   readonly agents = new AgentRepository(() => this.driver);
   readonly workspaces = new WorkspaceRepository(() => this.driver);

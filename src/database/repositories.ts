@@ -1585,3 +1585,252 @@ export class CloudWorkspaceRepository extends Repository {
     );
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * Agent messages
+ * ------------------------------------------------------------------ */
+
+export interface AgentMessageRow extends SqlRow {
+  message_id: string;
+  run_id: string;
+  conversation_id: string;
+  iteration: number;
+  step_id: string | null;
+  invocation_id: string | null;
+  sender_agent_id: string | null;
+  recipient_agent_id: string | null;
+  message_type: string;
+  payload: string;
+  status: string;
+  correlation_id: string;
+  causation_id: string | null;
+  dedupe_key: string;
+  attempts: number;
+  lease_expires_at: string | null;
+  available_at: string;
+  failure_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Storage for the agent message bus.
+ *
+ * Every method here is a single statement or a single transaction, because the
+ * bus's guarantees are the database's: a claim that both reads and writes must
+ * not be able to hand the same row to two callers, and an insert that must not
+ * be able to create a second copy of a message that already exists.
+ *
+ * SQL stops here, as everywhere else in this folder. `AgentMessageBus` sees
+ * rows and nothing else.
+ */
+export class AgentMessageRepository extends Repository {
+  /**
+   * Inserts a message, or returns the one already stored under this key.
+   *
+   * This is the idempotency guarantee, and it is the database's rather than
+   * the caller's: `dedupe_key` is UNIQUE, so a concurrent second publish loses
+   * the race and reads the winner's row instead of creating a twin.
+   */
+  publish(input: {
+    messageId: string;
+    runId: string;
+    conversationId: string;
+    iteration: number;
+    stepId: string | null;
+    invocationId: string | null;
+    senderAgentId: string | null;
+    recipientAgentId: string | null;
+    messageType: string;
+    payload: string;
+    correlationId: string;
+    causationId: string | null;
+    dedupeKey: string;
+    availableAt: string;
+  }): { row: AgentMessageRow; created: boolean } {
+    const timestamp = now();
+    const result = this.db.run(
+      'INSERT INTO agent_messages (message_id, run_id, conversation_id, iteration, step_id, invocation_id, ' +
+        'sender_agent_id, recipient_agent_id, message_type, payload, status, correlation_id, causation_id, ' +
+        'dedupe_key, attempts, lease_expires_at, available_at, failure_reason, created_at, updated_at) ' +
+        "VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,0,NULL,?,NULL,?,?) " +
+        'ON CONFLICT(dedupe_key) DO NOTHING',
+      [
+        input.messageId,
+        input.runId,
+        input.conversationId,
+        input.iteration,
+        input.stepId,
+        input.invocationId,
+        input.senderAgentId,
+        input.recipientAgentId,
+        input.messageType,
+        input.payload,
+        input.correlationId,
+        input.causationId,
+        input.dedupeKey,
+        input.availableAt,
+        timestamp,
+        timestamp,
+      ],
+    );
+    const row = this.db.get<AgentMessageRow>('SELECT * FROM agent_messages WHERE dedupe_key = ?', [
+      input.dedupeKey,
+    ])!;
+    return { row, created: result.changes > 0 };
+  }
+
+  find(messageId: string): AgentMessageRow | undefined {
+    return this.db.get<AgentMessageRow>('SELECT * FROM agent_messages WHERE message_id = ?', [
+      messageId,
+    ]);
+  }
+
+  /**
+   * Takes the oldest ready message for a recipient and leases it.
+   *
+   * One transaction, and the UPDATE is guarded on `status = 'pending'`, so two
+   * callers racing for the same row cannot both come away holding it: the
+   * loser's update changes nothing and it looks again.
+   *
+   * `busyScopes` carries the "one in flight per (run, recipient)" invariant.
+   * Passing the runs that already have a leased message keeps a requeue from
+   * putting a second copy of the same work in front of a busy worker.
+   */
+  claimNext(input: {
+    recipientAgentId: string | null;
+    now: string;
+    leaseExpiresAt: string;
+    busyRunIds: readonly string[];
+  }): AgentMessageRow | undefined {
+    return this.db.transaction(() => {
+      const recipientClause =
+        input.recipientAgentId === null
+          ? 'recipient_agent_id IS NULL'
+          : 'recipient_agent_id = ?';
+      const params: SqlValue[] =
+        input.recipientAgentId === null ? [input.now] : [input.recipientAgentId, input.now];
+      let busyClause = '';
+      if (input.busyRunIds.length > 0) {
+        busyClause = ` AND run_id NOT IN (${input.busyRunIds.map(() => '?').join(',')})`;
+        params.push(...input.busyRunIds);
+      }
+      const candidate = this.db.get<AgentMessageRow>(
+        `SELECT * FROM agent_messages WHERE ${recipientClause} AND status = 'pending' ` +
+          `AND available_at <= ?${busyClause} ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+        params,
+      );
+      if (!candidate) return undefined;
+
+      const claimed = this.db.run(
+        "UPDATE agent_messages SET status = 'leased', attempts = attempts + 1, " +
+          'lease_expires_at = ?, updated_at = ? WHERE message_id = ? AND status = \'pending\'',
+        [input.leaseExpiresAt, now(), candidate.message_id],
+      );
+      if (claimed.changes === 0) return undefined;
+      return this.find(candidate.message_id);
+    });
+  }
+
+  /** Moves a leased message to a new status, guarded on the status it is in. */
+  transition(input: {
+    messageId: string;
+    from: readonly string[];
+    to: string;
+    failureReason?: string | null;
+    clearLease?: boolean;
+  }): boolean {
+    const placeholders = input.from.map(() => '?').join(',');
+    const result = this.db.run(
+      `UPDATE agent_messages SET status = ?, updated_at = ?` +
+        (input.clearLease ? ', lease_expires_at = NULL' : '') +
+        (input.failureReason === undefined ? '' : ', failure_reason = ?') +
+        ` WHERE message_id = ? AND status IN (${placeholders})`,
+      [
+        input.to,
+        now(),
+        ...(input.failureReason === undefined ? [] : [input.failureReason]),
+        input.messageId,
+        ...input.from,
+      ],
+    );
+    return result.changes > 0;
+  }
+
+  /** Returns a message to the queue with a backoff, keeping its attempt count. */
+  requeue(input: { messageId: string; availableAt: string; failureReason: string | null }): boolean {
+    return (
+      this.db.run(
+        "UPDATE agent_messages SET status = 'pending', lease_expires_at = NULL, available_at = ?, " +
+          "failure_reason = ?, updated_at = ? WHERE message_id = ? AND status IN ('leased','started','failed')",
+        [input.availableAt, input.failureReason, now(), input.messageId],
+      ).changes > 0
+    );
+  }
+
+  /**
+   * Leases that passed their deadline.
+   *
+   * This is how a worker that died without a word stops being invisible: its
+   * message is still `leased`, its deadline is in the past, and the sweep can
+   * say so rather than leaving the run to wait forever.
+   */
+  expiredLeases(now: string, limit = 100): AgentMessageRow[] {
+    return this.db.all<AgentMessageRow>(
+      "SELECT * FROM agent_messages WHERE status IN ('leased','started') AND lease_expires_at IS NOT NULL " +
+        'AND lease_expires_at <= ? ORDER BY lease_expires_at ASC LIMIT ?',
+      [now, limit],
+    );
+  }
+
+  /** Every message of a run, oldest first. What the timeline reads. */
+  listForRun(runId: string): AgentMessageRow[] {
+    return this.db.all<AgentMessageRow>(
+      'SELECT * FROM agent_messages WHERE run_id = ? ORDER BY created_at ASC, rowid ASC',
+      [runId],
+    );
+  }
+
+  /** Every message of one exchange: the request and whatever answered it. */
+  listForCorrelation(correlationId: string): AgentMessageRow[] {
+    return this.db.all<AgentMessageRow>(
+      'SELECT * FROM agent_messages WHERE correlation_id = ? ORDER BY created_at ASC, rowid ASC',
+      [correlationId],
+    );
+  }
+
+  /**
+   * Marks every unfinished message of a run cancelled.
+   *
+   * Terminal rows are left exactly as they are: a result that already arrived
+   * is not unmade by the run being cancelled afterwards, and rewriting it
+   * would lose the only record that the work happened.
+   */
+  cancelRun(runId: string, reason: string): number {
+    return this.db.run(
+      "UPDATE agent_messages SET status = 'cancelled', lease_expires_at = NULL, failure_reason = ?, " +
+        "updated_at = ? WHERE run_id = ? AND status NOT IN ('completed','dead','cancelled')",
+      [reason, now(), runId],
+    ).changes;
+  }
+
+  /** Messages still in flight, across every run. Used by crash recovery. */
+  unfinished(limit = 500): AgentMessageRow[] {
+    return this.db.all<AgentMessageRow>(
+      "SELECT * FROM agent_messages WHERE status IN ('pending','leased','started','failed') " +
+        'ORDER BY created_at ASC LIMIT ?',
+      [limit],
+    );
+  }
+
+  /** How many messages of a run sit in each status. What the panel counts. */
+  countByStatus(runId: string): Record<string, number> {
+    const rows = this.db.all<{ status: string; total: number }>(
+      'SELECT status, COUNT(*) AS total FROM agent_messages WHERE run_id = ? GROUP BY status',
+      [runId],
+    );
+    const counts: Record<string, number> = {};
+    for (const row of rows) counts[row.status] = row.total;
+    return counts;
+  }
+}

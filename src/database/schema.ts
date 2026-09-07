@@ -605,6 +605,72 @@ CREATE TABLE agent_sessions (
 CREATE INDEX idx_agent_sessions_connection ON agent_sessions(connection_id, updated_at DESC);
 `,
   },
+  {
+    id: 11,
+    name: 'agent-messages',
+    sql: `
+-- The durable record of what the agents said to each other.
+--
+-- This table is a *communication* log, not a second copy of the run state.
+-- The run's status lives in \`runs\`; what lives here is the exchange that
+-- produced it, so that "the orchestrator delegated and then nothing happened"
+-- is a question with an answer instead of a blank window.
+--
+-- Persisted BEFORE delivery, always. A message that was accepted but never
+-- handed to anyone is a row in 'pending'; a message handed over and never
+-- answered is a row in 'leased' with an expired lease. Both are visible.
+-- Neither can be mistaken for success, and neither disappears.
+--
+-- Nothing is deleted on failure. A message that exhausted its retries becomes
+-- 'dead' and keeps its reason, because a result that is silently dropped is
+-- the failure mode this whole table exists to make impossible.
+CREATE TABLE agent_messages (
+  message_id         TEXT PRIMARY KEY,
+  run_id             TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  conversation_id    TEXT NOT NULL,
+  iteration          INTEGER NOT NULL DEFAULT 0,
+  step_id            TEXT,
+  invocation_id      TEXT,
+  -- NULL sender or recipient means the application itself, which is a real
+  -- participant: it is what publishes USER_OBJECTIVE and what collects
+  -- evidence. Modelling it as an agent would make it look like something a
+  -- model could impersonate.
+  sender_agent_id    TEXT,
+  recipient_agent_id TEXT,
+  message_type       TEXT NOT NULL,
+  -- JSON chosen by the sender. Never interpreted as a command, a path or an
+  -- argument: agent output is untrusted input (spec 24).
+  payload            TEXT NOT NULL,
+  status             TEXT NOT NULL,
+  correlation_id     TEXT NOT NULL,
+  causation_id       TEXT,
+  -- The idempotency key. UNIQUE is the whole mechanism: publishing the same
+  -- logical message twice returns the first row rather than asking a worker
+  -- to do the same work again.
+  dedupe_key         TEXT NOT NULL UNIQUE,
+  attempts           INTEGER NOT NULL DEFAULT 0,
+  -- Set while leased. A lease that passes its deadline is how the application
+  -- finds out that a worker died without saying so.
+  lease_expires_at   TEXT,
+  -- Backoff lives here: a message is not offered for delivery before this.
+  available_at       TEXT NOT NULL,
+  failure_reason     TEXT,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL
+);
+-- The claim query: oldest ready message for a recipient in a run.
+CREATE INDEX idx_agent_messages_claim
+  ON agent_messages(recipient_agent_id, status, available_at);
+-- The timeline query, and the cancel-a-run sweep.
+CREATE INDEX idx_agent_messages_run ON agent_messages(run_id, created_at);
+CREATE INDEX idx_agent_messages_conversation
+  ON agent_messages(conversation_id, created_at);
+-- Finding the answer to a request.
+CREATE INDEX idx_agent_messages_correlation ON agent_messages(correlation_id);
+-- The expiry sweep, which is what turns a dead worker into a visible fact.
+CREATE INDEX idx_agent_messages_lease ON agent_messages(status, lease_expires_at);
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;
