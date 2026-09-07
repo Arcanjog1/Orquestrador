@@ -55,6 +55,7 @@ export const REQUEST_CHANNELS = [
 
   'workspace.list',
   'workspace.selectFolder',
+  'workspace.openProject',
   'workspace.create',
   'workspace.createCloud',
   'workspace.createConversation',
@@ -225,6 +226,18 @@ export interface AccountProgressEvent {
   readonly code?: string;
   /** On `failed`: what the provider answered (status, content type, error code), scrubbed. */
   readonly detail?: string | null;
+}
+
+/**
+ * The result of opening a folder.
+ *
+ * `created` is false when the folder was already a project — which is the
+ * ordinary case, and the one that used to be an error message.
+ */
+export interface OpenFolderView {
+  readonly workspace: WorkspaceView;
+  readonly projectId: string;
+  readonly created: boolean;
 }
 
 export interface AgentView {
@@ -845,6 +858,17 @@ export interface IpcMap {
 
   'workspace.list': { request: void; response: readonly WorkspaceView[] };
   'workspace.selectFolder': { request: void; response: { path: string | null } };
+  /**
+   * Opens the project for a folder, creating it only if there is none.
+   *
+   * One call, because "find or create" is one decision and splitting it
+   * across two round trips is how the interface ended up creating a second
+   * project for a folder it already had.
+   */
+  'workspace.openProject': {
+    request: { localPath: string };
+    response: OpenFolderView;
+  };
   'workspace.create': {
     request: { name: string; localPath: string; repositoryUrl?: string; defaultBranch?: string };
     response: WorkspaceView;

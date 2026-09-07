@@ -671,6 +671,34 @@ CREATE INDEX idx_agent_messages_correlation ON agent_messages(correlation_id);
 CREATE INDEX idx_agent_messages_lease ON agent_messages(status, lease_expires_at);
 `,
   },
+  {
+    id: 12,
+    name: 'workspace-folder-identity',
+    sql: `
+-- The stable identity of the folder a project works in.
+--
+-- Selecting a folder used to compare \`local_path\` as plain text, so
+-- "C:\\Users\\Me\\Proj" and "c:/users/me/proj/" were two different projects for
+-- the same folder on disk. This column holds the canonicalised form (see
+-- src/workspace/folder-identity.ts): lower-cased and back-slashed on Windows,
+-- trailing separator removed, and resolved through the filesystem when the
+-- folder exists, so a junction and its target are one project.
+--
+-- Empty for a conversation or cloud project. Those own no folder, and an
+-- empty key deliberately matches nothing - not even another empty key, or
+-- every conversation project would collapse into one.
+--
+-- NOT unique, on purpose. An installation upgrading to this version may
+-- already contain two workspaces for the same folder, and a unique index
+-- would make the migration fail on exactly the people who need it most.
+-- Uniqueness is enforced where it belongs - when a folder is opened - and
+-- duplicates that already exist are shown to the person to resolve, never
+-- merged automatically. Merging would mean deciding which conversations to
+-- keep, and that is not a decision to make behind somebody's back.
+ALTER TABLE workspaces ADD COLUMN path_key TEXT NOT NULL DEFAULT '';
+CREATE INDEX idx_workspaces_path_key ON workspaces(path_key);
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

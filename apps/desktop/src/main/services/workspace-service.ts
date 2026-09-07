@@ -31,6 +31,8 @@ import type { RuntimeService } from './runtime-service.js';
 import { AgentService, orchestratorAgentIdFor, workerAgentIdFor } from './agent-service.js';
 import type { GitHubService } from './github-service.js';
 import { parseGitHubRemote, redact } from '../core.js';
+import { folderKey, suggestedProjectName } from '../../../../../src/workspace/folder-identity.js';
+import type { ProjectService } from './project-service.js';
 
 /** Which provider each role runs on. Fixed: Codex supervises, Claude Code executes. */
 const PROVIDER_OF_ROLE: Record<TeamRole, ProviderName> = {
@@ -237,17 +239,139 @@ export class WorkspaceService {
     const localPath = resolve(input.localPath);
     assertUsableDirectory(localPath);
 
-    const existing = this.database.workspaces.findByPath(localPath);
+    // Matched by folder identity, not by the spelling of the path. Two
+    // spellings of one folder are one project; that is the whole point of
+    // `folderKey`.
+    const key = folderKey(localPath);
+    const existing = this.database.workspaces.findByPathKey(key);
     if (existing) throw new WorkspaceError('Esta pasta já está adicionada como projeto.');
 
     const record = this.database.workspaces.create({
       id: newId('ws'),
       name: input.name,
       localPath,
+      pathKey: key,
       repositoryUrl: input.repositoryUrl ?? null,
       defaultBranch: input.defaultBranch ?? null,
     });
     return this.toView(record);
+  }
+
+  /**
+   * Opens the project for a folder, creating it only if there is none.
+   *
+   * The operation the interface was missing. Before this, selecting a folder
+   * called `create`, which *refused* when the folder was already known - so
+   * the answer to "open my project again" was an error message. And because
+   * the match was on the spelling of the path, the same folder spelled another
+   * way was not "already known" at all, and a second project appeared.
+   *
+   * Now: one folder, one workspace, one project, whichever way the path is
+   * spelled and however many times it is selected. The project is created
+   * alongside the workspace in the same transaction, because a folder with a
+   * workspace and no project is exactly the split the person described - a
+   * folder in one list and a project in another, with nothing joining them.
+   *
+   * Never destructive: an existing project is returned as it is, with its
+   * name, its conversations and its team untouched.
+   */
+  openFolder(
+    localPath: string,
+    projects: ProjectService,
+  ): { workspace: WorkspaceView; projectId: string; created: boolean } {
+    const resolved = resolve(localPath);
+    assertUsableDirectory(resolved);
+    const key = folderKey(resolved);
+
+    const existing = this.database.workspaces.findByPathKey(key);
+    if (existing) {
+      // The folder is known. Make sure it has a project - an installation
+      // from before this existed has workspaces with none - and open it.
+      const project = this.projectForWorkspace(existing.id, existing.display_name, projects);
+      this.database.workspaces.touch(existing.id);
+      return { workspace: this.toView(existing), projectId: project, created: false };
+    }
+
+    const record = this.database.workspaces.create({
+      id: newId('ws'),
+      name: suggestedProjectName(resolved),
+      localPath: resolved,
+      pathKey: key,
+    });
+    const project = projects.create({ name: record.display_name, workspaceId: record.id });
+    return { workspace: this.toView(record), projectId: project.id, created: true };
+  }
+
+  /**
+   * Brings an existing installation up to the folder-identity model.
+   *
+   * Runs once per start, and is additive in the strictest sense: it writes a
+   * `path_key` where there was none, and creates a project for a local folder
+   * that has none. It **never** deletes, merges, renames or moves anything.
+   *
+   * The reconciliation the person asked for stops exactly there. Where two
+   * workspaces turn out to name the same folder, both are kept and both are
+   * reported: each carries its own conversations, runs and evidence, and
+   * deciding which history survives is not a decision a migration gets to
+   * make silently. The interface shows them so a person can choose.
+   *
+   * Returns what it did, so the result can be said out loud rather than
+   * happening invisibly at start-up.
+   */
+  reconcileFolders(projects: ProjectService): {
+    keysBackfilled: number;
+    projectsCreated: number;
+    duplicateFolders: Array<{ pathKey: string; workspaceIds: string[] }>;
+  } {
+    let keysBackfilled = 0;
+    let projectsCreated = 0;
+
+    for (const workspace of this.database.workspaces.list()) {
+      // Only a folder on this computer has a folder identity. A conversation
+      // project owns none and a cloud project's path exists somewhere else;
+      // giving either a key would let them be matched against a real folder.
+      const isLocalFolder =
+        (workspace.environment ?? 'local') === 'local' && workspace.local_path.trim().length > 0;
+
+      if (isLocalFolder) {
+        const key = folderKey(workspace.local_path);
+        if (key.length > 0 && workspace.path_key !== key) {
+          this.database.workspaces.setPathKey(workspace.id, key);
+          keysBackfilled += 1;
+        }
+      }
+
+      // A folder with no project is the split the person described: it shows
+      // up under "Pastas" and nowhere under "Projetos", so its conversations
+      // look homeless. One project, named after the workspace, fixes it
+      // without touching a single conversation.
+      if (isLocalFolder && !this.database.projects.findByWorkspace(workspace.id)) {
+        projects.create({ name: workspace.display_name, workspaceId: workspace.id });
+        projectsCreated += 1;
+      }
+    }
+
+    return {
+      keysBackfilled,
+      projectsCreated,
+      duplicateFolders: this.database.workspaces.duplicateFolders(),
+    };
+  }
+
+  /**
+   * The project bound to this workspace, creating one if it has none.
+   *
+   * Reuses an existing binding rather than adding a second: a workspace that
+   * already appears under a project keeps that project, whatever it is named.
+   */
+  private projectForWorkspace(
+    workspaceId: string,
+    fallbackName: string,
+    projects: ProjectService,
+  ): string {
+    const bound = this.database.projects.findByWorkspace(workspaceId);
+    if (bound) return bound.id;
+    return projects.create({ name: fallbackName, workspaceId }).id;
   }
 
   /**

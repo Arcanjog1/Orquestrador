@@ -455,6 +455,8 @@ export class WorkspaceRepository extends Repository {
     name: string;
     /** Empty for a cloud workspace: there is no folder on this computer. */
     localPath: string;
+    /** Canonical folder identity; empty when the project owns no folder. */
+    pathKey?: string;
     repositoryUrl?: string | null;
     defaultBranch?: string | null;
     /** `local` (default) or `cloud`. */
@@ -468,8 +470,8 @@ export class WorkspaceRepository extends Repository {
     this.db.run(
       `INSERT INTO workspaces
          (id, display_name, local_path, repository_url, default_branch, created_at, updated_at,
-          environment, repository_full_name, repository_private, branch, cloud_endpoint)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+          environment, repository_full_name, repository_private, branch, cloud_endpoint, path_key)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         input.id,
         input.name,
@@ -487,6 +489,7 @@ export class WorkspaceRepository extends Repository {
             : 0,
         input.branch ?? null,
         input.cloudEndpoint ?? null,
+        input.pathKey ?? '',
       ],
     );
     return this.require(input.id);
@@ -522,6 +525,69 @@ export class WorkspaceRepository extends Repository {
       localPath,
     ]);
     return row ? this.withAgents(row) : undefined;
+  }
+
+  /**
+   * The workspace for a folder, found by its canonical identity.
+   *
+   * This is what makes "open the same folder twice" open the same project.
+   * The plain-text `findByPath` above cannot: on Windows the same folder
+   * arrives spelled several ways, and comparing the spellings produced a
+   * second project every time one of them differed.
+   *
+   * An empty key matches nothing, deliberately: a conversation project owns
+   * no folder, and matching empty against empty would fold every one of them
+   * into a single project.
+   *
+   * The oldest match wins when more than one exists, so an installation that
+   * already had duplicates keeps opening the one its history belongs to.
+   */
+  findByPathKey(pathKey: string): WorkspaceWithAgents | undefined {
+    if (pathKey.length === 0) return undefined;
+    const row = this.db.get<WorkspaceRecord>(
+      'SELECT * FROM workspaces WHERE path_key = ? ORDER BY created_at ASC, rowid ASC LIMIT 1',
+      [pathKey],
+    );
+    return row ? this.withAgents(row) : undefined;
+  }
+
+  /** Every workspace sharing a folder identity. Empty keys are never grouped. */
+  listByPathKey(pathKey: string): WorkspaceWithAgents[] {
+    if (pathKey.length === 0) return [];
+    return this.db
+      .all<WorkspaceRecord>(
+        'SELECT * FROM workspaces WHERE path_key = ? ORDER BY created_at ASC, rowid ASC',
+        [pathKey],
+      )
+      .map((row) => this.withAgents(row));
+  }
+
+  /** Records a folder's canonical identity. Used by create and by the backfill. */
+  setPathKey(workspaceId: string, pathKey: string): void {
+    this.db.run('UPDATE workspaces SET path_key = ? WHERE id = ?', [pathKey, workspaceId]);
+  }
+
+  /**
+   * Folders that more than one workspace claims.
+   *
+   * Only ever *reported*. Nothing here merges or deletes: two workspaces on
+   * one folder each carry their own conversations and runs, and choosing which
+   * to keep is the person's call, not a migration's.
+   */
+  duplicateFolders(): Array<{ pathKey: string; workspaceIds: string[] }> {
+    const rows = this.db.all<{ path_key: string; total: number }>(
+      "SELECT path_key, COUNT(*) AS total FROM workspaces WHERE path_key <> '' " +
+        'GROUP BY path_key HAVING COUNT(*) > 1',
+    );
+    return rows.map((row) => ({
+      pathKey: row.path_key,
+      workspaceIds: this.db
+        .all<{ id: string }>(
+          'SELECT id FROM workspaces WHERE path_key = ? ORDER BY created_at ASC, rowid ASC',
+          [row.path_key],
+        )
+        .map((entry) => entry.id),
+    }));
   }
 
   /**
@@ -747,6 +813,20 @@ export class ProjectRepository extends Repository {
   setWorkspace(id: string, workspaceId: string | null): ProjectRecord {
     this.db.run('UPDATE projects SET workspace_id = ?, updated_at = ? WHERE id = ?', [workspaceId, now(), id]);
     return this.require(id);
+  }
+
+  /**
+   * The project bound to a workspace, if one is.
+   *
+   * The oldest wins: an installation may have more than one project pointing
+   * at the same folder, and the first one made is the one whose conversations
+   * the person has been using.
+   */
+  findByWorkspace(workspaceId: string): ProjectRecord | undefined {
+    return this.db.get<ProjectRecord>(
+      'SELECT * FROM projects WHERE workspace_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1',
+      [workspaceId],
+    );
   }
 
   touch(id: string): void {

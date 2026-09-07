@@ -278,8 +278,21 @@ test('a project pointed at a removed workspace loses only the link; projects, as
     const reopened = new AppServices({ paths: p.fixture.paths, openUrl: () => {} });
     try {
       const projects = reopened.projects.list();
-      assert.equal(projects.length, 1);
-      assert.equal(projects[0]!.name, 'Revit');
+      // "Revit" survives the restart with its name, and without the link to
+      // the folder that was removed.
+      const revit = projects.find((project) => project.name === 'Revit');
+      assert.ok(revit, 'the project must survive a restart');
+      assert.equal(revit.workspaceId, null);
+
+      // Start-up also gives every folder that has no project one, so the
+      // "Orquestrador" folder now appears under a project of its own. That is
+      // the point of the folder-is-the-project change: a folder in one list
+      // with nothing in the other is the confusion it removes.
+      const forFolder = projects.find((project) => project.name === 'Orquestrador');
+      assert.ok(forFolder, 'a folder with no project gains one at start-up');
+      assert.equal(forFolder.workspaceId, p.orquestrador.id);
+      assert.equal(projects.length, 2, 'and nothing else was invented');
+
       const sessions = reopened.chat.listAllSessions();
       assert.equal(sessions.find((s) => s.id === session.id)?.projectId, project.id);
       assert.equal(sessions.find((s) => s.id === session.id)?.projectName, 'Revit');

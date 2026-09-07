@@ -689,12 +689,15 @@ export function AddProjectDialog({
     try {
       const { path } = await api.workspace.selectFolder();
       if (!path) return;
-      const created = await api.workspace.create({
-        name: path.split(/[\\/]/).filter(Boolean).pop() ?? path,
-        localPath: path,
-      });
+      // Open the folder's project, creating one only if it has none.
+      //
+      // This used to call `workspace.create`, which *refused* a folder it
+      // already knew - so selecting a project again answered with an error,
+      // and a folder spelled a different way became a second project. The
+      // folder is the project; selecting it opens it.
+      const opened = await api.workspace.openProject({ localPath: path });
       onOpenChange(false);
-      onAdded(created.id);
+      onAdded(opened.workspace.id);
     } catch (e) {
       fail(e);
     } finally {

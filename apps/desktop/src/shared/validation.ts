@@ -397,6 +397,7 @@ export const REQUEST_VALIDATORS: {
 
   'workspace.list': noArgs,
   'workspace.selectFolder': noArgs,
+  'workspace.openProject': obj({ localPath: absolutePath() }),
   'workspace.create': obj(
     {
       name: str({ min: 1, max: 120 }),

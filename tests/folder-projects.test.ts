@@ -1,0 +1,454 @@
+/**
+ * The folder is the project (spec 1, 2, 3, 13).
+ *
+ * The complaint: selecting a folder produced a confusing structure with the
+ * project and the folder separate, and selecting the same folder again made a
+ * duplicate instead of opening what was there.
+ *
+ * Two causes, both pinned here. Selecting a folder created a *workspace* and
+ * no *project*, so the folder appeared in one list and nothing appeared in the
+ * other. And the "do I already have this folder?" check compared the spelling
+ * of the path, which on Windows the same folder has several of.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, sep } from 'node:path';
+import { folderKey, sameFolder, suggestedProjectName } from '../src/workspace/folder-identity.js';
+import { createDesktopFixture, type DesktopFixture } from './helpers/desktop-fixture.js';
+import type { IpcResult } from '../apps/desktop/src/shared/ipc-contract.js';
+
+function value<T>(result: IpcResult<unknown>): T {
+  assert.equal(result.ok, true, result.ok === false ? result.error.message : '');
+  return (result as { ok: true; value: T }).value;
+}
+
+/* ================================================================== *
+ * Folder identity
+ * ================================================================== */
+
+/** No filesystem: these are about the spelling rules, not about real folders. */
+const lexical = { realpath: () => null };
+
+test('on Windows, the same folder spelled differently is one folder', () => {
+  const win = { platform: 'win32' as const, ...lexical };
+  const canonical = folderKey('C:\\Users\\Me\\Proj', win);
+
+  // Case: NTFS is case-insensitive, and the shell hands back either.
+  assert.equal(folderKey('c:\\users\\me\\proj', win), canonical);
+  // Separator: both are accepted, and a pasted path may use either.
+  assert.equal(folderKey('C:/Users/Me/Proj', win), canonical);
+  // Trailing separator: not a different folder.
+  assert.equal(folderKey('C:\\Users\\Me\\Proj\\', win), canonical);
+  // All three at once, which is what actually happens.
+  assert.equal(folderKey('c:/USERS/me/proj/', win), canonical);
+});
+
+test('on POSIX, case is not folded, because there they really are two folders', () => {
+  const posix = { platform: 'posix' as const, ...lexical };
+  assert.notEqual(folderKey('/home/me/Proj', posix), folderKey('/home/me/proj', posix));
+  // Separators and trailing slashes still normalise.
+  assert.equal(folderKey('/home/me/Proj/', posix), folderKey('/home/me/Proj', posix));
+});
+
+test('two folders that merely share a name are never the same project', () => {
+  const win = { platform: 'win32' as const, ...lexical };
+  // The trap the rule exists to avoid: folding these would pour one client's
+  // conversations into another's.
+  assert.equal(sameFolder('D:\\clientes\\acme\\site', 'D:\\clientes\\beta\\site', win), false);
+  assert.equal(sameFolder('/a/site', '/b/site', { platform: 'posix', ...lexical }), false);
+});
+
+test('a project with no folder matches nothing, not even another with no folder', () => {
+  // Conversation and cloud projects own no folder. If empty matched empty,
+  // every one of them would collapse into a single project.
+  assert.equal(folderKey(''), '');
+  assert.equal(folderKey('   '), '');
+  assert.equal(sameFolder('', ''), false);
+  assert.equal(sameFolder('', 'C:\\Proj'), false);
+});
+
+test('a junction or symlink and its target are one folder', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lao-link-'));
+  try {
+    const real = join(root, 'real');
+    mkdirSync(real);
+    const link = join(root, 'link');
+    try {
+      symlinkSync(real, link, 'junction');
+    } catch {
+      return; // No permission to create links here; the rule is still tested above.
+    }
+    // The filesystem is asked, so the two paths answer with one identity.
+    assert.equal(sameFolder(link, real), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a folder that does not exist still has a stable identity', () => {
+  // Nothing to ask the filesystem about, so the lexical form is used - and it
+  // is consistent, which is what matters for "have I seen this before?".
+  const missing = join(tmpdir(), 'lao-does-not-exist-abc123');
+  assert.equal(folderKey(missing), folderKey(missing));
+  assert.ok(folderKey(missing).length > 0);
+});
+
+test('the suggested name is the folder, never a drive letter or a colon', () => {
+  assert.equal(suggestedProjectName(`${sep}home${sep}me${sep}Orquestrador`), 'Orquestrador');
+  assert.equal(suggestedProjectName(`${sep}home${sep}me${sep}Orquestrador${sep}`), 'Orquestrador');
+  assert.ok(!suggestedProjectName(sep).includes(':'));
+});
+
+/* ================================================================== *
+ * Folder → project → sessions
+ * ================================================================== */
+
+function folder(prefix = 'lao-proj-'): { dir: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+async function open(fixture: DesktopFixture, localPath: string) {
+  return value<{ workspace: { id: string; name: string; localPath: string }; projectId: string; created: boolean }>(
+    await fixture.router.handle('workspace.openProject', { localPath }),
+  );
+}
+
+test('selecting a folder gives it a project, in one step', async () => {
+  const fixture = createDesktopFixture();
+  const f = folder();
+  try {
+    const opened = await open(fixture, f.dir);
+
+    assert.equal(opened.created, true);
+    assert.equal(opened.workspace.localPath, f.dir);
+    // The thing that was missing: a project exists for the folder, so the
+    // folder is not in one list with nothing in the other.
+    const projects = value<Array<{ id: string; name: string; workspaceId: string | null }>>(
+      await fixture.router.handle('project.list', null),
+    );
+    const project = projects.find((p) => p.id === opened.projectId);
+    assert.ok(project, 'the folder must have a project');
+    assert.equal(project.workspaceId, opened.workspace.id, 'and it must point at the folder');
+  } finally {
+    await fixture.cleanup();
+    f.cleanup();
+  }
+});
+
+test('selecting the same folder again opens it, and never duplicates it', async () => {
+  const fixture = createDesktopFixture();
+  const f = folder();
+  try {
+    const first = await open(fixture, f.dir);
+    const second = await open(fixture, f.dir);
+
+    assert.equal(second.created, false, 'the second time is an open, not a create');
+    assert.equal(second.workspace.id, first.workspace.id);
+    assert.equal(second.projectId, first.projectId);
+
+    const workspaces = value<Array<{ id: string }>>(await fixture.router.handle('workspace.list', null));
+    assert.equal(workspaces.length, 1, 'one folder, one workspace');
+    const projects = value<Array<{ id: string }>>(await fixture.router.handle('project.list', null));
+    assert.equal(projects.length, 1, 'one folder, one project');
+  } finally {
+    await fixture.cleanup();
+    f.cleanup();
+  }
+});
+
+test('the same folder spelled differently is still the same project', async () => {
+  const fixture = createDesktopFixture();
+  const f = folder();
+  try {
+    const first = await open(fixture, f.dir);
+    // A trailing separator, and a detour through `.` - both are things a real
+    // path picker and a pasted path produce.
+    const second = await open(fixture, `${f.dir}${sep}`);
+    const third = await open(fixture, join(f.dir, '.'));
+
+    assert.equal(second.workspace.id, first.workspace.id);
+    assert.equal(third.workspace.id, first.workspace.id);
+    assert.equal(
+      value<unknown[]>(await fixture.router.handle('workspace.list', null)).length,
+      1,
+    );
+  } finally {
+    await fixture.cleanup();
+    f.cleanup();
+  }
+});
+
+test('two different folders are two projects, even with the same folder name', async () => {
+  const fixture = createDesktopFixture();
+  const a = folder('lao-a-');
+  const b = folder('lao-b-');
+  try {
+    // Same leaf name under two different parents: the case that must not fold.
+    const leafA = join(a.dir, 'site');
+    const leafB = join(b.dir, 'site');
+    mkdirSync(leafA);
+    mkdirSync(leafB);
+
+    const first = await open(fixture, leafA);
+    const second = await open(fixture, leafB);
+
+    assert.notEqual(first.workspace.id, second.workspace.id);
+    assert.notEqual(first.projectId, second.projectId);
+    assert.equal(value<unknown[]>(await fixture.router.handle('project.list', null)).length, 2);
+  } finally {
+    await fixture.cleanup();
+    a.cleanup();
+    b.cleanup();
+  }
+});
+
+test('several sessions live in one project, and each keeps its own history', async () => {
+  const fixture = createDesktopFixture();
+  const f = folder();
+  try {
+    const opened = await open(fixture, f.dir);
+
+    const first = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', {
+        workspaceId: opened.workspace.id,
+        title: 'Corrigir atualização',
+        projectId: opened.projectId,
+      }),
+    );
+    const second = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', {
+        workspaceId: opened.workspace.id,
+        title: 'Melhorar interface',
+        projectId: opened.projectId,
+      }),
+    );
+
+    // Two conversations, one project, and still exactly one project.
+    assert.notEqual(first.id, second.id);
+    assert.equal(value<unknown[]>(await fixture.router.handle('project.list', null)).length, 1);
+
+    const sessions = value<Array<{ id: string; projectId: string | null }>>(
+      await fixture.router.handle('chat.listAllSessions', {}),
+    );
+    const mine = sessions.filter((s) => s.projectId === opened.projectId);
+    assert.equal(mine.length, 2);
+
+    // Their histories are separate: a message in one is not in the other.
+    fixture.services.database.chat.addMessage({
+      sessionId: first.id,
+      runId: null,
+      author: 'user',
+      body: 'só nesta',
+    });
+    const firstMessages = value<unknown[]>(
+      await fixture.router.handle('chat.listMessages', { sessionId: first.id }),
+    );
+    const secondMessages = value<unknown[]>(
+      await fixture.router.handle('chat.listMessages', { sessionId: second.id }),
+    );
+    assert.equal(firstMessages.length, 1);
+    assert.equal(secondMessages.length, 0, 'a project is shared; a history is not');
+  } finally {
+    await fixture.cleanup();
+    f.cleanup();
+  }
+});
+
+test('renaming the project does not rename the folder', async () => {
+  const fixture = createDesktopFixture();
+  const f = folder();
+  try {
+    const opened = await open(fixture, f.dir);
+    value(await fixture.router.handle('project.rename', { projectId: opened.projectId, name: 'Orquestrador' }));
+
+    const projects = value<Array<{ id: string; name: string }>>(
+      await fixture.router.handle('project.list', null),
+    );
+    assert.equal(projects.find((p) => p.id === opened.projectId)?.name, 'Orquestrador');
+    // The folder on disk is exactly where it was, under its own name.
+    const workspaces = value<Array<{ id: string; localPath: string }>>(
+      await fixture.router.handle('workspace.list', null),
+    );
+    assert.equal(workspaces.find((w) => w.id === opened.workspace.id)?.localPath, f.dir);
+    // And opening the folder again still finds the renamed project.
+    const again = await open(fixture, f.dir);
+    assert.equal(again.projectId, opened.projectId);
+    assert.equal(again.created, false);
+  } finally {
+    await fixture.cleanup();
+    f.cleanup();
+  }
+});
+
+test('a path that is not a usable folder is refused with a reason', async () => {
+  const fixture = createDesktopFixture();
+  try {
+    const missing = join(tmpdir(), 'lao-nope-98765', 'sub');
+    const result = await fixture.router.handle('workspace.openProject', { localPath: missing });
+    assert.equal(result.ok, false);
+    if (result.ok === false) {
+      // A sentence about the folder, not a stack trace.
+      assert.match(result.error.message, /pasta|não existe|não encontr/i);
+    }
+    // And nothing was half-created on the way to failing.
+    assert.equal(value<unknown[]>(await fixture.router.handle('workspace.list', null)).length, 0);
+    assert.equal(value<unknown[]>(await fixture.router.handle('project.list', null)).length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+/* ================================================================== *
+ * Migration
+ * ================================================================== */
+
+test('an installation from before this keeps its sessions and gains a project', async () => {
+  const first = createDesktopFixture();
+  const f = folder();
+  let workspaceId = '';
+  let sessionId = '';
+  let runId = '';
+  try {
+    // The old shape, written the way an upgraded database really holds it:
+    // a workspace row with no project and no `path_key`. Going through the
+    // service would use today's code, which fills both in - and would test
+    // the new path rather than the migration.
+    workspaceId = 'ws-legacy-1';
+    first.services.database.workspaces.create({
+      id: workspaceId,
+      name: 'Antigo',
+      localPath: f.dir,
+    });
+    const session = value<{ id: string }>(
+      await first.router.handle('chat.createSession', { workspaceId, title: 'Conversa antiga' }),
+    );
+    sessionId = session.id;
+    first.services.database.chat.addMessage({
+      sessionId,
+      runId: null,
+      author: 'user',
+      body: 'histórico que não pode sumir',
+    });
+    const run = first.services.database.runs.create({
+      id: 'run-legacy-1',
+      sessionId,
+      workspaceId,
+      objective: 'algo antigo',
+      orchestratorAgentId: null,
+      maxIterations: 4,
+    });
+    runId = run.id;
+
+    // The reconciliation the next start-up performs.
+    const report = first.services.workspaces.reconcileFolders(first.services.projects);
+    assert.equal(report.projectsCreated, 1, 'the folder gains a project');
+    assert.ok(report.keysBackfilled >= 1, 'and a folder identity');
+    assert.deepEqual(report.duplicateFolders, []);
+
+    // Nothing was lost.
+    assert.equal(
+      value<unknown[]>(await first.router.handle('chat.listMessages', { sessionId })).length,
+      1,
+      'messages survive',
+    );
+    assert.ok(first.services.database.runs.find(runId), 'runs survive');
+    const sessions = value<Array<{ id: string }>>(
+      await first.router.handle('chat.listAllSessions', {}),
+    );
+    assert.ok(sessions.some((s) => s.id === sessionId), 'sessions survive');
+
+    // And the folder now opens the project it was given, rather than making one.
+    const opened = await open(first, f.dir);
+    assert.equal(opened.created, false);
+    assert.equal(opened.workspace.id, workspaceId);
+  } finally {
+    await first.cleanup();
+    f.cleanup();
+  }
+});
+
+test('the reconciliation is idempotent: running it twice changes nothing the second time', async () => {
+  const fixture = createDesktopFixture();
+  const f = folder();
+  try {
+    fixture.services.database.workspaces.create({
+      id: 'ws-legacy-2',
+      name: 'Antigo',
+      localPath: f.dir,
+    });
+
+    const first = fixture.services.workspaces.reconcileFolders(fixture.services.projects);
+    const second = fixture.services.workspaces.reconcileFolders(fixture.services.projects);
+
+    assert.equal(first.projectsCreated, 1);
+    assert.equal(second.projectsCreated, 0, 'a second start-up must not add a second project');
+    assert.equal(second.keysBackfilled, 0);
+    assert.equal(value<unknown[]>(await fixture.router.handle('project.list', null)).length, 1);
+  } finally {
+    await fixture.cleanup();
+    f.cleanup();
+  }
+});
+
+test('two workspaces on one folder are reported, never merged', async () => {
+  const fixture = createDesktopFixture();
+  const f = folder();
+  try {
+    // The shape an older installation can already be in: two rows, two sets
+    // of conversations, one folder. Written straight to the database, because
+    // the service now refuses to create the second one.
+    const database = fixture.services.database;
+    for (const [id, name] of [
+      ['ws-dup-1', 'Primeiro'],
+      ['ws-dup-2', 'Segundo'],
+    ] as const) {
+      database.workspaces.create({ id, name, localPath: f.dir });
+      database.chat.createSession({ id: `chat-${id}`, workspaceId: id, title: `Conversa de ${name}` });
+    }
+
+    const report = fixture.services.workspaces.reconcileFolders(fixture.services.projects);
+
+    assert.equal(report.duplicateFolders.length, 1, 'the clash is reported');
+    assert.deepEqual(report.duplicateFolders[0]!.workspaceIds, ['ws-dup-1', 'ws-dup-2']);
+    // Both are still there, with their conversations. Choosing which history
+    // survives is not a migration's decision.
+    assert.equal(value<unknown[]>(await fixture.router.handle('workspace.list', null)).length, 2);
+    const sessions = value<Array<{ id: string }>>(
+      await fixture.router.handle('chat.listAllSessions', {}),
+    );
+    assert.equal(sessions.length, 2, 'no conversation was deleted');
+
+    // Opening the folder picks the older one - the one the history belongs to.
+    const opened = await open(fixture, f.dir);
+    assert.equal(opened.workspace.id, 'ws-dup-1');
+    assert.equal(opened.created, false);
+  } finally {
+    await fixture.cleanup();
+    f.cleanup();
+  }
+});
+
+test('a conversation project is never matched against a folder', async () => {
+  const fixture = createDesktopFixture();
+  const f = folder();
+  try {
+    value(await fixture.router.handle('workspace.createConversation', { name: 'Só conversa' }));
+    const report = fixture.services.workspaces.reconcileFolders(fixture.services.projects);
+
+    // It owns no folder, so it gets no identity and no folder project.
+    assert.equal(report.projectsCreated, 0);
+    assert.deepEqual(report.duplicateFolders, []);
+
+    // And opening a real folder does not attach itself to it.
+    const opened = await open(fixture, f.dir);
+    assert.equal(opened.created, true);
+    assert.equal(value<unknown[]>(await fixture.router.handle('workspace.list', null)).length, 2);
+  } finally {
+    await fixture.cleanup();
+    f.cleanup();
+  }
+});

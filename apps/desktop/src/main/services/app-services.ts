@@ -210,6 +210,11 @@ export class AppServices {
 
     this.database.providers.ensureSeeded();
     this.agents.sync();
+    // Folders that had no identity and folders that had no project: both are
+    // filled in here, additively. Nothing is merged, renamed or deleted; two
+    // workspaces on one folder are reported, not resolved. See
+    // `reconcileFolders`.
+    this.folderReconciliation = this.workspaces.reconcileFolders(this.projects);
     // A run the previous process left as RUNNING is not running now.
     this.orchestration.reconcileInterrupted();
   }
@@ -582,6 +587,18 @@ export class AppServices {
   }
 
   /** Stops everything still running. Called on quit and on test teardown. */
+  /**
+   * What the folder reconciliation did at start-up.
+   *
+   * Kept so the interface can say it rather than have it happen invisibly -
+   * particularly the duplicates, which are the case a person has to resolve.
+   */
+  folderReconciliation: {
+    keysBackfilled: number;
+    projectsCreated: number;
+    duplicateFolders: Array<{ pathKey: string; workspaceIds: string[] }>;
+  } = { keysBackfilled: 0, projectsCreated: 0, duplicateFolders: [] };
+
   async shutdown(): Promise<void> {
     this.cloud.stopPolling();
     // Before the database closes: the sweep reads it, and a tick that fires

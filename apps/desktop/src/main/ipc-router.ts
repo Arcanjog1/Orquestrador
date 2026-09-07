@@ -160,6 +160,9 @@ export class IpcRouter {
     });
     this.handlers.set('workspace.push', (p) => s.workspaces.push((p as { workspaceId: string }).workspaceId));
 
+    this.handlers.set('workspace.openProject', (payload) =>
+      s.workspaces.openFolder((payload as { localPath: string }).localPath, s.projects),
+    );
     this.handlers.set('agents.list', () => s.agents.list());
     this.handlers.set('agents.status', () => s.agents.status());
 
