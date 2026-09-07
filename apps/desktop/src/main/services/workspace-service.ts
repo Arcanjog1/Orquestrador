@@ -199,7 +199,9 @@ export class WorkspaceService {
         branch:
           record.environment === 'cloud'
             ? record.branch
-            : await this.currentBranch(record.local_path),
+            : record.environment === 'conversation'
+              ? null
+              : await this.currentBranch(record.local_path),
       })),
     );
   }
@@ -244,6 +246,32 @@ export class WorkspaceService {
       localPath,
       repositoryUrl: input.repositoryUrl ?? null,
       defaultBranch: input.defaultBranch ?? null,
+    });
+    return this.toView(record);
+  }
+
+  /**
+   * A project that is only a conversation.
+   *
+   * No folder, no repository, no server. This is the shape the main experience
+   * starts in: a person opens the application, names a team, writes an
+   * objective and sends it. Asking them to choose a folder or clone a
+   * repository first, for a run that will read no file and write none, is the
+   * obstacle this project kind exists to remove.
+   *
+   * It is a real project like any other: it has a team, conversations, run
+   * history and a budget. What it does not have is a working copy, which is
+   * why nothing here resolves or checks a path.
+   */
+  createConversation(input: { name: string }): WorkspaceView {
+    const name = input.name.trim();
+    if (!name) throw new WorkspaceError('Escolha um nome para o projeto.');
+    const record = this.database.workspaces.create({
+      id: newId('ws'),
+      name,
+      // Deliberately empty, and never resolved: there is no folder.
+      localPath: '',
+      environment: 'conversation',
     });
     return this.toView(record);
   }
@@ -681,7 +709,12 @@ export class WorkspaceService {
     return {
       id: record.id,
       name: record.display_name,
-      environment: record.environment === 'cloud' ? 'cloud' : 'local',
+      environment:
+        record.environment === 'cloud'
+          ? 'cloud'
+          : record.environment === 'conversation'
+            ? 'conversation'
+            : 'local',
       localPath: record.local_path,
       repository: record.repository_full_name,
       repositoryPrivate: record.repository_private === 1,

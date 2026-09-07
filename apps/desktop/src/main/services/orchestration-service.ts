@@ -298,6 +298,10 @@ export class OrchestrationService {
       objective: input.objective,
       orchestratorAgentId: workspace.orchestrator_agent_id,
       maxIterations: this.options.maxIterations ?? DEFAULTS.maxIterations,
+      // Recorded when the run is created, not derived when it is read: the
+      // project could be changed afterwards, and the history must say which
+      // gate this particular run actually had to pass.
+      kind: isConversation(workspace) ? 'conversation' : 'coding',
     });
 
     const controller = new AbortController();
@@ -657,7 +661,12 @@ export class OrchestrationService {
           if (gate.passed) {
             const answer = (decision.summary ?? lastWorkerAnswer).trim();
             this.database.runs.setStatus(runId, 'DONE', 'Resposta final validada pelo orquestrador.');
-            if (answer) this.say(sessionId, runId, 'orchestrator', answer);
+            // The summary of a `done` decision *is* the answer, and it was
+            // already said above as this iteration's summary. Saying it again
+            // here would show the person the same paragraph twice.
+            if (answer && answer !== decision.summary?.trim()) {
+              this.say(sessionId, runId, 'orchestrator', answer);
+            }
             this.sayCost(sessionId, runId, budget);
             this.progress(runId, sessionId, 'done', 'Concluído.', 'DONE');
             return;

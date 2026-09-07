@@ -22,6 +22,15 @@ import type { SecretStore } from '../../apps/desktop/src/main/services/github-se
 import type { EventMap } from '../../apps/desktop/src/shared/ipc-contract.js';
 import type { AgentInput, AgentResult, HealthStatus } from '../../src/core/types.js';
 import { makeAgentResult, type AgentRunner } from '../../src/agents/agent-runner.js';
+import type { HttpTransport } from '../../src/providers/provider-http.js';
+import type {
+  AgentProvider,
+  AuthenticationStatus,
+  InvocationUsage,
+  ModelDescriptor,
+  ProviderCapabilities,
+} from '../../src/providers/provider-types.js';
+import { addUsage, emptyUsage } from '../../src/providers/provider-types.js';
 
 export interface DesktopFixture {
   services: AppServices;
@@ -46,6 +55,8 @@ export interface DesktopFixtureOptions {
   github?: GitHubClientOptions;
   /** Off by default; a test that needs the login sets it on. */
   secrets?: SecretStore;
+  /** HTTP for the provider APIs; a test points it at a scripted transport. */
+  providerTransport?: HttpTransport;
 }
 
 /**
@@ -92,6 +103,7 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
     },
     ...(options.github ? { github: options.github } : {}),
     ...(options.secrets ? { secrets: options.secrets } : {}),
+    ...(options.providerTransport ? { providerTransport: options.providerTransport } : {}),
   });
 
   const events: DesktopFixture['events'] = [];
@@ -209,4 +221,93 @@ export class HangingAgent implements AgentRunner {
   async healthCheck(): Promise<HealthStatus> {
     return { healthy: true };
   }
+}
+
+/**
+ * A scripted agent that also *declares what it is*.
+ *
+ * The point of this one is the declaration: a conversation worker says
+ * `toolExecution: false`, and the loop must then refuse to send it work that
+ * needs files changed. Without a runner that declares, that rule could only be
+ * asserted against the real API adapters and a network.
+ */
+export class ScriptedProvider extends ScriptedAgent implements AgentProvider {
+  readonly providerId: 'anthropic' | 'openai';
+  readonly connectionId: string | null;
+  private total: InvocationUsage;
+
+  constructor(
+    kind: AgentRunner['kind'],
+    label: string,
+    script: ReadonlyArray<string | ((input: AgentInput) => string | Promise<string>)>,
+    private readonly declared: ProviderCapabilities,
+    connectionId: string | null = null,
+    /** Charged on every call, so a test can drive a budget to its limit. */
+    private readonly perCall: InvocationUsage | null = null,
+  ) {
+    super(kind, label, script);
+    this.providerId = declared.providerId as 'anthropic' | 'openai';
+    this.connectionId = connectionId;
+    this.total = emptyUsage(declared.billing);
+  }
+
+  override async run(input: AgentInput): Promise<AgentResult> {
+    const result = await super.run(input);
+    if (!this.perCall) return result;
+    this.total = addUsage(this.total, this.perCall);
+    return { ...result, usage: this.perCall };
+  }
+
+  getCapabilities(): ProviderCapabilities {
+    return this.declared;
+  }
+
+  async getAvailableModels(): Promise<ModelDescriptor[]> {
+    return [{ id: 'scripted-model', displayName: 'Scripted' }];
+  }
+
+  async getAuthenticationStatus(): Promise<AuthenticationStatus> {
+    return {
+      connectionId: this.connectionId,
+      providerId: this.providerId,
+      connectionKind: this.declared.connectionKind,
+      authenticated: true,
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  getUsage(): InvocationUsage {
+    return this.total;
+  }
+}
+
+/** A connection that answers and analyses but cannot touch a file. */
+export function conversationCapabilities(
+  providerId: 'anthropic' | 'openai',
+): ProviderCapabilities {
+  return {
+    providerId,
+    connectionKind: 'api',
+    conversation: true,
+    toolExecution: false,
+    workspaceRequired: false,
+    streaming: false,
+    structuredOutput: providerId === 'openai',
+    usageReporting: true,
+    modelSelection: true,
+    reasoningSelection: true,
+    billing: 'api-metered',
+  };
+}
+
+/** A connection with a real executor behind it: the vendor's official CLI. */
+export function codingCapabilities(providerId: 'anthropic' | 'openai'): ProviderCapabilities {
+  return {
+    ...conversationCapabilities(providerId),
+    connectionKind: 'cli',
+    toolExecution: true,
+    workspaceRequired: true,
+    usageReporting: false,
+    billing: 'subscription',
+  };
 }

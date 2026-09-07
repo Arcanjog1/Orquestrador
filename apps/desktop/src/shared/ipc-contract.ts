@@ -56,7 +56,17 @@ export const REQUEST_CHANNELS = [
   'workspace.selectFolder',
   'workspace.create',
   'workspace.createCloud',
+  'workspace.createConversation',
   'workspace.setPublish',
+  'connections.list',
+  'connections.addApi',
+  'connections.replaceKey',
+  'connections.rename',
+  'connections.setEnabled',
+  'connections.setPreferences',
+  'connections.disconnect',
+  'connections.test',
+  'connections.models',
   'workspace.clone',
   'workspace.setAgents',
   'workspace.setTeam',
@@ -304,9 +314,13 @@ export interface WorkspaceView {
    * `local` is a folder on this computer. `cloud` is an isolated workspace
    * provisioned elsewhere, and then there is **no folder on this computer at
    * all** - `localPath` is empty, and the interface must not offer to open it.
+   * `conversation` is a project with no working copy anywhere: its runs
+   * analyse, plan and review, and never touch a file. It needs no folder, no
+   * repository and no server, which is what lets a person start by writing an
+   * objective instead of by choosing a directory.
    */
-  readonly environment: 'local' | 'cloud';
-  /** Empty for a cloud project. Read `environment` before this. */
+  readonly environment: 'local' | 'cloud' | 'conversation';
+  /** Empty for a cloud or conversation project. Read `environment` first. */
   readonly localPath: string;
   /** `owner/name` for a cloud project; null for a local one. */
   readonly repository: string | null;
@@ -644,6 +658,30 @@ export interface RunUsageView {
   readonly unpriced: number;
 }
 
+/**
+ * One connection, as the interface renders it.
+ *
+ * Everything here is safe to show and safe to log. There is no field that
+ * could be sent to a provider as a credential, by design.
+ */
+export interface ConnectionView {
+  readonly id: string;
+  readonly displayName: string;
+  readonly providerId: string;
+  /** `cli` runs on the person's subscription; `api` is billed separately. */
+  readonly connectionKind: 'cli' | 'api';
+  readonly billing: 'subscription' | 'api-metered';
+  readonly hasCredential: boolean;
+  /** The last four characters of a key. Never the key. */
+  readonly keyHint: string | null;
+  readonly apiEnabled: boolean;
+  readonly authState: string;
+  readonly defaultModel: string | null;
+  readonly defaultReasoning: string | null;
+  readonly baseUrl: string | null;
+  readonly createdAt: string;
+}
+
 /** The shape of one evidence collection, as the timeline shows it. */
 export interface RunEvidenceView {
   readonly changed: boolean;
@@ -733,9 +771,67 @@ export interface IpcMap {
     };
     response: WorkspaceView;
   };
+  /** A project with no folder, no repository and no server. */
+  'workspace.createConversation': {
+    request: { name: string };
+    response: WorkspaceView;
+  };
   'workspace.setPublish': {
     request: { workspaceId: string; enabled: boolean; pullRequest: boolean };
     response: WorkspaceView;
+  };
+
+  /**
+   * Connections.
+   *
+   * No channel here ever carries a credential *out*. `addApi` and
+   * `replaceKey` take one in, once; everything that comes back is metadata
+   * plus a four-character hint. There is deliberately no "read the key"
+   * channel, so the renderer cannot hold one even if it wanted to.
+   */
+  'connections.list': { request: void; response: ConnectionView[] };
+  'connections.addApi': {
+    request: {
+      providerId: 'anthropic' | 'openai';
+      displayName: string;
+      apiKey: string;
+      baseUrl?: string | null;
+    };
+    response: ConnectionView;
+  };
+  'connections.replaceKey': {
+    request: { connectionId: string; apiKey: string };
+    response: ConnectionView;
+  };
+  'connections.rename': {
+    request: { connectionId: string; displayName: string };
+    response: ConnectionView;
+  };
+  /** Turns a metered connection on. Nothing is ever sent by a disabled one. */
+  'connections.setEnabled': {
+    request: { connectionId: string; enabled: boolean };
+    response: ConnectionView;
+  };
+  'connections.setPreferences': {
+    request: { connectionId: string; model: string | null; reasoning: string | null };
+    response: ConnectionView;
+  };
+  /** Forgets the credential on this computer. The connection itself stays. */
+  'connections.disconnect': { request: { connectionId: string }; response: ConnectionView };
+  'connections.test': {
+    request: { connectionId: string };
+    response: {
+      authenticated: boolean;
+      method?: string;
+      problem?: string;
+      remedy?: string;
+      checkedAt: string;
+    };
+  };
+  /** The models this connection's account really has, asked of the provider. */
+  'connections.models': {
+    request: { connectionId: string };
+    response: Array<{ id: string; displayName: string; createdAt?: string | null }>;
   };
   'workspace.clone': {
     request: { repositoryUrl: string; parentPath: string; name: string };

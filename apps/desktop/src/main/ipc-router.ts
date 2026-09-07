@@ -172,6 +172,60 @@ export class IpcRouter {
     this.handlers.set('workspace.createCloud', (p) =>
       s.workspaces.createCloud(p as IpcMap['workspace.createCloud']['request']),
     );
+    this.handlers.set('workspace.createConversation', (p) =>
+      s.workspaces.createConversation(p as IpcMap['workspace.createConversation']['request']),
+    );
+
+    // Connections. Note what is absent: there is no channel that returns a
+    // credential. Keys go in and never come back out.
+    this.handlers.set('connections.list', () => s.connections.list());
+    this.handlers.set('connections.addApi', (p) =>
+      s.connections.addApiConnection(p as IpcMap['connections.addApi']['request']),
+    );
+    this.handlers.set('connections.replaceKey', (p) => {
+      const input = p as IpcMap['connections.replaceKey']['request'];
+      return s.connections.replaceKey(input.connectionId, input.apiKey);
+    });
+    this.handlers.set('connections.rename', (p) => {
+      const input = p as IpcMap['connections.rename']['request'];
+      return s.connections.rename(input.connectionId, input.displayName);
+    });
+    this.handlers.set('connections.setEnabled', (p) => {
+      const input = p as IpcMap['connections.setEnabled']['request'];
+      return s.connections.setApiEnabled(input.connectionId, input.enabled);
+    });
+    this.handlers.set('connections.setPreferences', (p) => {
+      const input = p as IpcMap['connections.setPreferences']['request'];
+      return s.connections.setPreferences(input.connectionId, input.model, input.reasoning);
+    });
+    this.handlers.set('connections.disconnect', (p) =>
+      s.connections.disconnect((p as IpcMap['connections.disconnect']['request']).connectionId),
+    );
+    this.handlers.set('connections.test', async (p) => {
+      const status = await s.connections.test(
+        (p as IpcMap['connections.test']['request']).connectionId,
+      );
+      // Only what the interface needs. The connection id and provider are
+      // already known to the caller, and nothing else here is worth widening.
+      return {
+        authenticated: status.authenticated,
+        ...(status.method ? { method: status.method } : {}),
+        ...(status.problem ? { problem: status.problem } : {}),
+        ...(status.remedy ? { remedy: status.remedy } : {}),
+        checkedAt: status.checkedAt,
+      };
+    });
+    this.handlers.set('connections.models', async (p) => {
+      const models = await s.connections.models(
+        (p as IpcMap['connections.models']['request']).connectionId,
+      );
+      return models.map((model) => ({
+        id: model.id,
+        displayName: model.displayName,
+        createdAt: model.createdAt ?? null,
+      }));
+    });
+
     this.handlers.set('workspace.setPublish', (p) => {
       const input = p as IpcMap['workspace.setPublish']['request'];
       return s.workspaces.setPublish(input.workspaceId, {

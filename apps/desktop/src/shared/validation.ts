@@ -360,7 +360,36 @@ export const REQUEST_VALIDATORS: {
     },
     { optional: ['name', 'repositoryPrivate', 'endpoint'] },
   ),
+  'workspace.createConversation': obj({ name: str({ min: 1, max: 120 }) }),
   'workspace.setPublish': obj({ workspaceId: id, enabled: bool, pullRequest: bool }),
+
+  // Connections. The key is bounded but deliberately not pattern-matched: a
+  // vendor is free to change its key format, and refusing a valid key because
+  // this file has an old regexp would be a worse failure than letting the
+  // provider reject it with its own message.
+  'connections.list': noArgs,
+  'connections.addApi': obj(
+    {
+      providerId: oneOf(['anthropic', 'openai'] as const),
+      displayName: str({ min: 1, max: 120 }),
+      apiKey: str({ min: 8, max: 500 }),
+      // A compatible gateway, when someone runs one. Same rule as the cloud
+      // endpoint: an https URL, never a path or an argument in disguise.
+      baseUrl: nullable(externalUrl),
+    },
+    { optional: ['baseUrl'] },
+  ),
+  'connections.replaceKey': obj({ connectionId: id, apiKey: str({ min: 8, max: 500 }) }),
+  'connections.rename': obj({ connectionId: id, displayName: str({ min: 1, max: 120 }) }),
+  'connections.setEnabled': obj({ connectionId: id, enabled: bool }),
+  'connections.setPreferences': obj({
+    connectionId: id,
+    model: nullable(modelName),
+    reasoning: nullable(str({ min: 1, max: 40 })),
+  }),
+  'connections.disconnect': obj({ connectionId: id }),
+  'connections.test': obj({ connectionId: id }),
+  'connections.models': obj({ connectionId: id }),
   'cloud.status': noArgs,
   'cloud.connect': obj({
     endpoint: cloudEndpoint,
