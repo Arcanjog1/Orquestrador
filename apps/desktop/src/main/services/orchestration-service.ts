@@ -382,6 +382,11 @@ export class OrchestrationService {
       timeoutMs: this.options.verificationTimeoutMs ?? DEFAULTS.verificationTimeoutMs,
       processManager: environment.processes,
       signal,
+      // A remote environment resolves its own commands: walking this
+      // computer's PATH would answer about the wrong filesystem, and on
+      // Windows it would spawn `where.exe` here - a child process outside the
+      // boundary the environment exists to draw.
+      ...(environment.kind === 'remote' ? { resolveCommand: async (command: string) => command } : {}),
     });
 
     const baseline = await collector.captureBaseline();

@@ -27,6 +27,22 @@ export interface VerifierOptions {
   onCommandStart?: (command: string) => void;
   /** Called after each command with its result. */
   onCommandFinish?: (result: CommandResult) => void;
+  /**
+   * Turns a command name into something the runner can launch.
+   *
+   * This has to be the *environment's* answer, not this machine's. The local
+   * default walks PATH and PATHEXT so `npm` finds `npm.cmd` on Windows and
+   * checks the file really exists - all of which are facts about the computer
+   * the resolver runs on. Asking them about a command that will execute inside
+   * a container answers about the wrong filesystem, and on Windows it also
+   * runs `where.exe` in this process's own directory, which is a child process
+   * escaping the execution boundary entirely.
+   *
+   * A remote environment therefore passes a resolver that hands the name
+   * straight through: its own spawn resolves PATH inside the workspace, which
+   * is the only place that can answer correctly.
+   */
+  resolveCommand?: (command: string) => Promise<string | null>;
 }
 
 export class Verifier {
@@ -64,9 +80,10 @@ export class Verifier {
     const tokens = parseCommandLine(commandLine);
     const [executable, ...args] = tokens as [string, ...string[]];
 
-    // Resolve through PATH/PATHEXT so `npm` finds `npm.cmd` on Windows, and so
-    // the ProcessManager gets a concrete path it knows how to launch.
-    const resolved = (await resolveExecutable(executable, this.options.processManager)) ?? executable;
+    // Resolved by the environment, not by this machine: see `resolveCommand`.
+    const resolve = this.options.resolveCommand
+      ?? ((command: string) => resolveExecutable(command, this.options.processManager));
+    const resolved = (await resolve(executable)) ?? executable;
 
     const result = await this.options.processManager.run({
       command: resolved,

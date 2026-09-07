@@ -194,7 +194,17 @@ test('a run in a non-local environment never touches the local path or the local
 
     // The evidence and the verification are real, collected through the boundary.
     assert.ok(calls.some((c) => c.args?.[0] === 'rev-parse'), 'no baseline was taken');
-    assert.ok(calls.some((c) => (c.args ?? []).includes('check.mjs')), 'the verification did not run');
+    const verification = calls.find((c) => (c.args ?? []).includes('check.mjs'));
+    assert.ok(verification, 'the verification did not run');
+    // And it reached the environment as the name a person registered, not as a
+    // path resolved on this computer. Resolving it here answers about the
+    // wrong filesystem - and on Windows it spawns `where.exe` in this
+    // process's own directory, a child escaping the boundary entirely.
+    assert.equal(
+      verification.command,
+      'node',
+      'the verification command was resolved against this machine before being sent',
+    );
     const verifications = fixture.services.database.runs.verifications(sent.run.id);
     assert.ok(verifications.length >= 1);
 
