@@ -162,6 +162,31 @@ for (const runtimeId of runtimes) {
     if (process.env.AI_ORCHESTRATOR_PROBE_DUMP_HELP === '1') console.log(describeProbe(probe));
     if (probe.state !== 'OK') throw new Error(`execution probe: ${probe.state}`);
 
+    // The Windows incident, reproduced on the real binary: AWS-LC inside
+    // Codex 0.105+ aborts at start-up when OPENSSL_ia32cap asks for a CPU bit
+    // the processor lacks. Bit 10 of CPUID.1:EDX is reserved on every CPU,
+    // so 0x400 aborts everywhere; the probe must name the state, prove the
+    // child-local fix (the variable left out of the child's environment) and
+    // hand back the policy the managed build then runs under.
+    if (runtimeId === 'codex') {
+      const previous = process.env.OPENSSL_ia32cap;
+      process.env.OPENSSL_ia32cap = '0x400';
+      try {
+        const reproduced = await runtime.probe(install.executablePath, 120_000, { thorough: true, hash: false });
+        say('ia32cap abort: state', reproduced.state);
+        say('ia32cap abort: stderr', reproduced.runs[0]?.stderrFirstLine ?? '(none)');
+        say('ia32cap abort: exit', `${reproduced.runs[0]?.exitCode ?? reproduced.runs[0]?.signal}`);
+        say('ia32cap abort: recovered', String(reproduced.recovered));
+        say('ia32cap abort: policy', reproduced.environmentPolicy ? reproduced.environmentPolicy.drop.join(',') : '(none)');
+        if (reproduced.state !== 'CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE' || !reproduced.recovered) {
+          throw new Error(`the capability abort was not recognised and recovered: ${reproduced.state}`);
+        }
+      } finally {
+        if (previous === undefined) delete process.env.OPENSSL_ia32cap;
+        else process.env.OPENSSL_ia32cap = previous;
+      }
+    }
+
     // Do the other sources ship the same executable? Then a second download
     // after a local execution failure could never have helped.
     if (compareSources) {

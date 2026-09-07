@@ -260,10 +260,15 @@ export class AppServices {
       // The decision shape is the orchestrator's contract, not the adapter's,
       // so it is handed in rather than baked in.
       outputSchema: DECISION_JSON_SCHEMA,
-      buildEnvironment: () =>
-        orchestratorAccountId
+      // The account's profile, plus whatever the managed build's manifest
+      // says its processes must not inherit (an OPENSSL_ia32cap that makes
+      // AWS-LC abort). Child-local: the machine's variables stay as they are.
+      buildEnvironment: () => ({
+        ...this.runtimeManager.childEnvironmentOverlay('codex'),
+        ...(orchestratorAccountId
           ? this.codexAccountManager.buildEnvironment(orchestratorAccountId)
-          : {},
+          : {}),
+      }),
       // The person's pinned choice, only under manual selection; "Padrão do
       // CLI" leaves both alone, whatever an older row still carries.
       model: orchestratorSelectionOf(workspace) === 'manual' ? workspace.orchestrator_model : null,
@@ -280,8 +285,10 @@ export class AppServices {
     const worker = new ClaudeCodeAdapter({
       processManager: this.processManager,
       resolveExecutable: () => this.runtimeManager.getExecutablePath('claude-code'),
-      buildEnvironment: () =>
-        accountId ? this.accountManager.buildEnvironment(accountId) : {},
+      buildEnvironment: () => ({
+        ...this.runtimeManager.childEnvironmentOverlay('claude-code'),
+        ...(accountId ? this.accountManager.buildEnvironment(accountId) : {}),
+      }),
       model: selection === 'manual' ? workspace.worker_model : null,
       effort: selection === 'manual' ? workspace.worker_reasoning : null,
     });

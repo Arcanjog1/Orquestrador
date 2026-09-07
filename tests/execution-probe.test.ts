@@ -225,7 +225,7 @@ test('a working executable: OK, the version line, PID, exit 0, argv exactly --ve
     assert.match(text, /^O executável respondeu \(codex-cli 0\.153\.4\)\./m);
     assert.match(text, /estado: OK/);
     assert.match(text, /argv \["--version"\]/);
-    assert.match(text, /ambiente: CODEX_HOME=/);
+    assert.match(text, /ambiente: OPENSSL_ia32cap=.* · CODEX_HOME=/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -374,11 +374,12 @@ test('a synthetic refusal on any platform: the sentence names the system and the
   const probe = {
     executable: 'C:\\x\\codex.exe',
     static: { path: 'C:\\x\\codex.exe', exists: true, bytes: 295_408_944, stableSize: true, sha256: '444a3f0008050605cae73cd9b7a2dcac61294062dfaab56dd20430fd6498518b', format: 'pe' as const, pe: { machine: 'x64', is64: true, subsystem: 'console' as const, signed: true }, openForWrite: true, openError: null, zoneIdentifier: null, problem: null },
-    runs: [{ label: 'ProcessManager, primeira execução', via: 'process-manager' as const, argv: ['--version'], cwd: 'C:\\x', env: {}, state: 'ACCESS_DENIED' as const, startedAt: '', durationMs: 12, pid: null, exitCode: null, signal: null, stdoutBytes: 0, stderrBytes: 0, stdoutFirstLine: null, stderrFirstLine: null, versionLine: null, firstOutputAfterMs: null, error: 'spawn EACCES', errorCode: 'EACCES', termination: null, notes: [] }],
+    runs: [{ label: 'ProcessManager, primeira execução', via: 'process-manager' as const, argv: ['--version'], cwd: 'C:\\x', env: {}, state: 'ACCESS_DENIED' as const, startedAt: '', durationMs: 12, pid: null, exitCode: null, signal: null, stdoutBytes: 0, stderrBytes: 0, stdoutFirstLine: null, stderrFirstLine: null, versionLine: null, firstOutputAfterMs: null, error: 'spawn EACCES', errorCode: 'EACCES', termination: null, notes: [], capability: null }],
     state: 'ACCESS_DENIED' as const,
     recovered: false,
     versionLine: null,
     antivirusDelaySuspected: false,
+    environmentPolicy: null,
     conclusions: [],
   };
   const text = describeProbe(probe, 'win32');
@@ -388,4 +389,89 @@ test('a synthetic refusal on any platform: the sentence names the system and the
 
   const crashed = { ...probe, state: 'PROCESS_CRASHED' as const, runs: [{ ...probe.runs[0]!, state: 'PROCESS_CRASHED' as const, pid: 77, exitCode: 3221225477, error: null, errorCode: null }] };
   assert.match(describeProbe(crashed, 'win32'), /iniciou e morreu com código 0xC0000005 \(STATUS_ACCESS_VIOLATION\)/);
+});
+
+/* ------------------------------------------------- the AWS-LC capability abort */
+
+import { cpuOverridesIn, dropEnvKeys, parseCapabilityAbort, probeFailedLocally } from '../src/runtime/execution-probe.js';
+
+const USER_STDERR =
+  'Fatal Error: HW capability found: 0x178BFBFF 0x7EF8320B, but HW capability requested: 0x20000000 0x00.\n';
+
+test('the exact AWS-LC signature is parsed, and beats the exit code in classification', () => {
+  assert.deepEqual(parseCapabilityAbort(USER_STDERR), {
+    found: ['0x178BFBFF', '0x7EF8320B'],
+    requested: ['0x20000000', '0x00'],
+  });
+  assert.equal(parseCapabilityAbort('HW capability: nothing like it'), null);
+  assert.equal(parseCapabilityAbort(''), null);
+
+  // Windows: abort() reports 0xC0000409. Linux: SIGABRT. Same state.
+  const windows = fakeResult({ exitCode: 3221226505, stderr: USER_STDERR }, { stderrBytes: USER_STDERR.length });
+  assert.equal(classifyRun(windows, null), 'CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE');
+  const linux = fakeResult({ exitCode: null, signal: 'SIGABRT', stderr: USER_STDERR }, { stderrBytes: USER_STDERR.length });
+  assert.equal(classifyRun(linux, null), 'CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE');
+  // Without the signature, the same exit code is an ordinary crash.
+  assert.equal(classifyRun(fakeResult({ exitCode: 3221226505 }), null), 'PROCESS_CRASHED');
+  assert.equal(isLocalExecutionFailure('CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE'), true, 'no second download for it');
+});
+
+test('the override variables are found whatever their casing, and dropped by their real keys', () => {
+  const env = { OPENSSL_IA32CAP: '0x20000000', Path: 'x', CODEX_HOME: 'y' } as NodeJS.ProcessEnv;
+  assert.deepEqual(cpuOverridesIn(env), [{ key: 'OPENSSL_IA32CAP', value: '0x20000000' }]);
+  assert.deepEqual(dropEnvKeys(env, ['OPENSSL_ia32cap', 'OPENSSL_armcap']), { OPENSSL_IA32CAP: undefined });
+  assert.deepEqual(dropEnvKeys({ Path: 'x' } as NodeJS.ProcessEnv, ['OPENSSL_ia32cap']), {});
+  const summary = summariseEnv(env);
+  assert.equal(summary.OPENSSL_ia32cap, '0x20000000', 'the record shows the value under the canonical name');
+});
+
+test('the capability abort: named, proved to be the variable by a run without it, and turned into a policy', async () => {
+  const dir = temp('ia32cap');
+  const previous = process.env.OPENSSL_ia32cap;
+  process.env.OPENSSL_ia32cap = '0x20000000';
+  try {
+    // What codex.exe 0.153.4 does on the person's machine: AWS-LC's static
+    // initializer reads OPENSSL_ia32cap, finds a bit the CPU lacks, aborts.
+    const exe = fakeExe(dir, 'codex', {
+      sh: `if [ -n "$OPENSSL_ia32cap" ]; then echo "Fatal Error: HW capability found: 0x178BFBFF 0x7EF8320B, but HW capability requested: $OPENSSL_ia32cap 0x00." >&2; exit 134; fi; echo "codex-cli 0.153.4"`,
+      cmd: `if defined OPENSSL_ia32cap (echo Fatal Error: HW capability found: 0x178BFBFF 0x7EF8320B, but HW capability requested: %OPENSSL_ia32cap% 0x00. 1>&2 & exit /b -1073740791)\r\necho codex-cli 0.153.4`,
+    });
+    const steps: string[] = [];
+    const probe = await probeExecution({
+      executablePath: exe,
+      cwd: dir,
+      processManager: new ProcessManager(),
+      timeoutMs: 10_000,
+      followUpTimeoutMs: 10_000,
+      thorough: true,
+      scratchRoot: dir,
+      homeEnvVar: 'CODEX_HOME',
+      onStep: (m) => steps.push(m),
+    });
+    assert.equal(probe.state, 'CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE');
+    assert.equal(probe.recovered, true);
+    assert.equal(probe.versionLine, 'codex-cli 0.153.4');
+    assert.equal(probeFailedLocally(probe), false, 'recovered: the build is usable under the policy');
+    assert.deepEqual(probe.runs.map((r) => r.label), ['ProcessManager, primeira execução', 'ProcessManager, sem OPENSSL_ia32cap']);
+    const [first, without] = probe.runs as [typeof probe.runs[0], typeof probe.runs[0]];
+    assert.deepEqual(first.capability, { found: ['0x178BFBFF', '0x7EF8320B'], requested: ['0x20000000', '0x00'] });
+    assert.equal(first.env.OPENSSL_ia32cap, '0x20000000');
+    assert.equal(without.env.OPENSSL_ia32cap, '(não definido)', 'the comparison run really ran without it');
+    assert.equal(without.state, 'OK');
+    assert.ok(probe.environmentPolicy);
+    assert.deepEqual(probe.environmentPolicy.drop, ['OPENSSL_ia32cap', 'OPENSSL_armcap']);
+    assert.match(probe.environmentPolicy.reason, /OPENSSL_ia32cap=0x20000000 faz a AWS-LC abortar \(pede 0x20000000 0x00, a CPU tem 0x178BFBFF 0x7EF8320B\)/);
+    assert.ok(steps.some((s) => /Testando sem OPENSSL_ia32cap/.test(s)), steps.join(' | '));
+    assert.equal(process.env.OPENSSL_ia32cap, '0x20000000', 'the machine environment was not touched');
+
+    const text = describeProbe(probe, 'win32');
+    assert.match(text, /^Esta versão do Codex não consegue iniciar neste computador com a variável de ambiente OPENSSL_ia32cap: a biblioteca criptográfica \(AWS-LC\) aborta ao iniciar porque a variável pede a capacidade 0x20000000 0x00 e a CPU informa 0x178BFBFF 0x7EF8320B\. Não é o processador; é a variável\. Sem a variável, só no processo do Codex, o executável respondeu\./m);
+    assert.match(text, /estado: CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE \(recuperado na segunda execução\)/);
+    assert.match(text, /política: o Codex gerenciado roda sem OPENSSL_ia32cap, OPENSSL_armcap no seu ambiente/);
+    assert.doesNotMatch(text, /timeout|180 s/);
+  } finally {
+    if (previous === undefined) delete process.env.OPENSSL_ia32cap;
+    else process.env.OPENSSL_ia32cap = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

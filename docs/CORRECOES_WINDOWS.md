@@ -111,6 +111,89 @@ gerenciado só é promovido quando o caminho do produto executou o binário;
 `detect()` continua preferindo o gerenciado; o Codex do PATH continua
 intocado.
 
+## Bloco A3 — a causa real: `OPENSSL_ia32cap` no ambiente
+
+**Visto (build fad1fcb, Detalhes copiados do PC):** as seis execuções do
+`codex.exe` 0.153.4 (íntegro, PE x64, assinado, SHA-256 `444a3f00…518b`)
+terminaram em `PROCESS_CRASHED`, saída `0xC0000409`, stderr:
+
+```
+Fatal Error: HW capability found: 0x178BFBFF 0x7EF8320B, but HW capability requested: 0x20000000 0x00.
+```
+
+**Origem exata da frase.** AWS-LC, a biblioteca criptográfica compilada
+dentro do Codex desde a 0.105 (`aws-lc-sys` 0.37.0 = AWS-LC 1.67.0 na 0.105;
+0.39.0 = AWS-LC 1.71.0 na 0.153.4), em
+`crypto/fipsmodule/cpucap/cpu_intel.c`, função `handle_cpu_env`, chamada por
+`OPENSSL_cpuid_setup`. O código é literal:
+
+```c
+env1 = getenv("OPENSSL_ia32cap");
+if (env1 == NULL) { return; }          // sem a variável, nada acontece
+...
+if (!invert && (intelcap0 || intelcap1)) {
+  if ((~(1u << 30 | intelcap0) & reqcap0) || (~intelcap1 & reqcap1)) {
+    fprintf(stderr, "Fatal Error: HW capability found: 0x%02X 0x%02X, but HW capability requested: 0x%02X 0x%02X.\n", ...);
+    abort();                             // 0xC0000409 no Windows, SIGABRT no Linux
+  }
+}
+```
+
+Os dois valores "found" são CPUID folha 1 EDX e ECX como a biblioteca os
+leu (bit 30 do EDX é reescrito como "é Intel"; zero aqui = AMD). Os dois
+"requested" são o que a **variável de ambiente `OPENSSL_ia32cap`** pediu:
+`0x20000000` = bit 29 do EDX (TM, monitor térmico Intel; ausente em AMD).
+Não há exigência do binário: o Codex é compilado sem `target-cpu`/
+`target-feature` (workflow `rust-release.yml`), a AWS-LC decide em tempo de
+execução, e sem a variável a função retorna antes de qualquer checagem.
+
+No Windows a AWS-LC registra `do_library_init` em `.CRT$XCU`: roda **antes
+de `main`**, então `--version` nunca chega a executar. Por isso todas as seis
+variações (segunda execução, `child_process` direto, sem console,
+`CODEX_HOME` vazio, cópia em pasta controlada) morreram igual: todas herdavam
+o mesmo ambiente.
+
+**Reproduzido aqui, no binário oficial 0.153.4 (Linux, mesma AWS-LC):**
+
+| comando | resultado |
+|---|---|
+| `codex --version` | `codex-cli 0.153.4`, exit 0 |
+| `OPENSSL_ia32cap=0x20000000 codex --version` | a frase acima, `Aborted` (exit 134) |
+| `OPENSSL_ia32cap=0x400 codex --version` (bit reservado, ausente em toda CPU) | a frase, `Aborted` |
+| `OPENSSL_ia32cap=~0x20000000 codex --version` (forma invertida) | `codex-cli 0.153.4` |
+| `child_process` com a variável / sem a variável | SIGABRT / exit 0 |
+
+**Por que a 0.104 funciona.** O `codex-x86_64-pc-windows-msvc.exe` 0.104.0
+oficial (100.562.920 bytes) não contém a AWS-LC — só `ring` (34 strings
+`ring-0.17.14`, zero `HW capability`, zero `OPENSSL_ia32cap`). O 0.105.0
+(112.553.960 bytes) já traz `aws-lc-sys-0.37.0` e a frase. A 0.153.4 traz
+`aws-lc-sys-0.39.0`. O regresso é "a AWS-LC passou a fazer parte do binário
+Windows", não uma exigência nova de hardware.
+
+**Não é o processador.** A CPU do usuário (AMD, AVX/FMA/AES/F16C/RDRAND em
+ECX `0x7EF8320B`) roda o binário assim que a variável sai do ambiente do
+processo filho. Nenhuma release oficial posterior existe (última tag:
+`rust-v0.153.4`) e a checagem continua igual no `main` da AWS-LC hoje, então
+nenhuma versão mais nova evitaria o abort com a variável presente.
+
+**Correção (só no processo filho, reversível, documentada):** o health
+check do staging reconhece a assinatura exata (`CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE`),
+executa o mesmo arquivo sem `OPENSSL_ia32cap`/`OPENSSL_armcap` no ambiente
+do filho e, se ele responde, grava a política no manifesto do runtime
+(`environment.drop`, com o motivo e os valores vistos). Todo processo do Codex
+gerenciado — health check, `codex exec` do orquestrador — nasce sem essas
+variáveis. O sistema não é alterado: sem `setx`, sem registro, sem BIOS, sem
+mexer no antivírus, sem fingir instruções (a AWS-LC volta a usar o CPUID
+real, que é o comportamento padrão da biblioteca), sem tocar em self-tests.
+Se mesmo sem a variável o executável abortar, a instalação para na primeira
+fonte com "Esta versão do Codex não consegue iniciar neste computador." e o
+registro completo.
+
+**O que fica igual:** Codex 0.104 do PATH intocado; `CODEX_HOME`, `auth.json`
+e perfis de conta intocados; 180 s continua o teto; catálogo com `max` e
+esquema estrito conferidos na sonda real; segunda fonte não é baixada quando
+a falha é local.
+
 ## Bloco B — GitHub Device Flow
 
 **Visto:** "O GitHub não iniciou o login: resposta inesperada".
@@ -195,7 +278,11 @@ Projeto ≠ pasta: o projeto organiza conversas e pode apontar para uma pasta
    Verificando → Extraindo → Testando → Instalando → Pronto. Se falhar,
    **Detalhes** diz a fase e o motivo; **Copiar detalhes** copia o registro
    inteiro (estado, PID, saída, encerramento, comparações) — cole e envie.
-4. Passo 1 fica *Pronto* com Codex 0.153.4 (gerenciado pelo aplicativo).
+4. Passo 1 fica *Pronto* com Codex 0.153.4 (gerenciado pelo aplicativo). Em
+   **Detalhes** deve aparecer `OPENSSL_ia32cap=<valor>` no ambiente e a
+   linha `política: o Codex gerenciado roda sem OPENSSL_ia32cap…`. Opcional:
+   `where codex` e `echo %OPENSSL_ia32cap%` no cmd, para saber quem definiu
+   a variável (o aplicativo não a altera).
 5. Contas Codex e Claude conectadas.
 6. GitHub: colar o Client ID do GitHub App (Iv1…/Iv23li…), **Conectar**.
 7. O diálogo mostra o código; o navegador abre.

@@ -535,3 +535,141 @@ test('a first start held for longer than the check, then a fast one: installed, 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+
+/* ------------------------------------------------------------------------ *
+ * The real Windows cause: OPENSSL_ia32cap in the person's environment makes
+ * AWS-LC (inside Codex 0.105+) abort before main. The install proves it on
+ * the staged build, records the policy, and the managed build runs under it -
+ * health checks and agent runs alike - while the machine's variables, the old
+ * Codex on the PATH and the account profiles stay exactly as they were.
+ * ------------------------------------------------------------------------ */
+
+import { STAGED_VERSION_TIMEOUT_MS } from '../src/runtime/managed-runtime.js';
+
+const ABORTING_ON_OVERRIDE =
+  process.platform === 'win32'
+    ? `@echo off\r\nif defined OPENSSL_ia32cap (echo Fatal Error: HW capability found: 0x178BFBFF 0x7EF8320B, but HW capability requested: %OPENSSL_ia32cap% 0x00. 1>&2 & exit /b -1073740791)\r\necho codex-cli ${RUNTIME_COMPATIBILITY.codex.testedVersion}\r\n`
+    : `#!/bin/sh\nif [ -n "$OPENSSL_ia32cap" ]; then echo "Fatal Error: HW capability found: 0x178BFBFF 0x7EF8320B, but HW capability requested: $OPENSSL_ia32cap 0x00." >&2; exit 134; fi\necho "codex-cli ${RUNTIME_COMPATIBILITY.codex.testedVersion}"\n`;
+
+const ABORTING_ALWAYS =
+  process.platform === 'win32'
+    ? `@echo off\r\necho Fatal Error: HW capability found: 0x178BFBFF 0x7EF8320B, but HW capability requested: 0x20000000 0x00. 1>&2\r\nexit /b -1073740791\r\n`
+    : `#!/bin/sh\necho "Fatal Error: HW capability found: 0x178BFBFF 0x7EF8320B, but HW capability requested: 0x20000000 0x00." >&2; exit 134\n`;
+
+function withOverride<T>(value: string | null, body: () => Promise<T>): Promise<T> {
+  const previous = process.env.OPENSSL_ia32cap;
+  if (value === null) delete process.env.OPENSSL_ia32cap;
+  else process.env.OPENSSL_ia32cap = value;
+  return body().finally(() => {
+    if (previous === undefined) delete process.env.OPENSSL_ia32cap;
+    else process.env.OPENSSL_ia32cap = previous;
+  });
+}
+
+test('the staged check does not wait longer than before', () => {
+  assert.equal(STAGED_VERSION_TIMEOUT_MS, 180_000);
+});
+
+test('OPENSSL_ia32cap in the environment: the build is installed under a policy, and everything else is untouched', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lao-ia32cap-'));
+  try {
+    await withOverride('0x20000000', async () => {
+      const paths = pathsFor(home);
+      const tested = RUNTIME_COMPATIBILITY.codex.testedVersion;
+      // The person's Codex 0.104.0 on the PATH, and an account profile with credentials.
+      const pathDir = join(home, 'on-path');
+      mkdirSync(pathDir, { recursive: true });
+      const oldCodex = join(pathDir, fakeExecutableName('codex'));
+      writeFileSync(oldCodex, fakeExecutableBody('codex-cli 0.104.0'), 'utf8');
+      const oldBytes = readFileSync(oldCodex);
+      const profile = join(paths.profiles, 'acct-1');
+      mkdirSync(profile, { recursive: true });
+      writeFileSync(join(profile, 'auth.json'), '{"tokens":"untouched"}', 'utf8');
+
+      const source = scriptedSource(home, tested, 'github-like', ABORTING_ON_OVERRIDE);
+      const second = scriptedSource(home, tested, 'npm-like', ABORTING_ON_OVERRIDE);
+      const { fetch, hits } = countingFetch({ ...source.routes, ...second.routes });
+      const runtime = new CodexOnPath(
+        [source.source, second.source],
+        { paths, fetchImpl: fetch, probeTimeouts: { primaryMs: 10_000, followUpMs: 10_000 } },
+        { path: oldCodex, versionLine: 'codex-cli 0.104.0' },
+      );
+
+      const messages: string[] = [];
+      const result = await runtime.install((p) => messages.push(`${p.phase}: ${p.message}`));
+      assert.equal(result.health.healthy, true, `the post-promotion health check ran under the policy: ${result.health.detail}`);
+      assert.equal(result.health.version, `codex-cli ${tested}`);
+      assert.deepEqual(result.manifest.environment?.drop, ['OPENSSL_ia32cap', 'OPENSSL_armcap']);
+      assert.match(result.manifest.environment?.reason ?? '', /OPENSSL_ia32cap=0x20000000 faz a AWS-LC abortar/);
+      assert.ok(messages.some((m) => /staging-health-check: Testando sem OPENSSL_ia32cap/.test(m)), messages.join('\n'));
+      assert.equal(hits[second.url] ?? 0, 0, 'one download: the abort is local, and it was recovered');
+
+      // Every run of the managed build drops the variable; nothing else changes.
+      assert.deepEqual(runtime.childEnvironmentOverlay(), { OPENSSL_ia32cap: undefined });
+      const manager = new RuntimeManager({ paths, fetchImpl: fetch });
+      manager.register(runtime);
+      assert.deepEqual(manager.childEnvironmentOverlay('codex'), { OPENSSL_ia32cap: undefined });
+      assert.equal((await runtime.detect()).origin, 'managed');
+      assert.equal((await runtime.healthCheck()).healthy, true);
+      assert.equal(process.env.OPENSSL_ia32cap, '0x20000000', 'the machine keeps its variable');
+      assert.deepEqual(readFileSync(oldCodex), oldBytes, 'the old Codex on the PATH is byte for byte the same');
+      assert.equal(readFileSync(join(profile, 'auth.json'), 'utf8'), '{"tokens":"untouched"}');
+      assert.ok(!('CODEX_HOME' in runtime.childEnvironmentOverlay()), 'the policy never touches CODEX_HOME');
+      assert.deepEqual(readdirSync(paths.staging), [], 'staging and probe folders cleaned up');
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('without the variable the manifest carries no policy and the overlay is empty', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lao-no-override-'));
+  try {
+    await withOverride(null, async () => {
+      const paths = pathsFor(home);
+      const tested = RUNTIME_COMPATIBILITY.codex.testedVersion;
+      const source = scriptedSource(home, tested, 'plain', ABORTING_ON_OVERRIDE);
+      const { fetch } = countingFetch(source.routes);
+      const runtime = new CodexOnPath([source.source], { paths, fetchImpl: fetch }, null);
+      const result = await runtime.install();
+      assert.equal(result.health.healthy, true);
+      assert.equal(result.manifest.environment, undefined);
+      assert.deepEqual(runtime.childEnvironmentOverlay(), {});
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('an abort that survives dropping the variable is reported in its own words, once, without a second download', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lao-ia32cap-stuck-'));
+  try {
+    await withOverride('0x20000000', async () => {
+      const paths = pathsFor(home);
+      const tested = RUNTIME_COMPATIBILITY.codex.testedVersion;
+      const first = scriptedSource(home, tested, 'github-like', ABORTING_ALWAYS);
+      const second = scriptedSource(home, tested, 'npm-like', ABORTING_ALWAYS);
+      const { fetch, hits } = countingFetch({ ...first.routes, ...second.routes });
+      const runtime = new CodexOnPath(
+        [first.source, second.source],
+        { paths, fetchImpl: fetch, probeTimeouts: { primaryMs: 10_000, followUpMs: 2_000 } },
+        null,
+      );
+      await assert.rejects(runtime.install(), (error: unknown) => {
+        assert.ok(error instanceof RuntimeError);
+        assert.equal(error.userMessage, 'Esta versão do Codex não consegue iniciar neste computador.');
+        return true;
+      });
+      const failure = runtime.lastFailure!;
+      assert.match(failure.detail, /estado: CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE/);
+      assert.match(failure.detail, /mesmo sem OPENSSL_ia32cap no processo filho o executável falhou/);
+      assert.match(failure.detail, /falha local de execução, não da fonte/);
+      assert.doesNotMatch(failure.detail, /did not report a version within|timeout/);
+      assert.equal(hits[second.url] ?? 0, 0, 'the same executable was not downloaded again');
+      assert.equal((await runtime.detect()).origin, 'missing', 'nothing was promoted');
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

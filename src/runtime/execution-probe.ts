@@ -62,7 +62,13 @@ export type ExecutionState =
   /** Died with an NTSTATUS-style code: access violation, missing DLL, ... */
   | 'PROCESS_CRASHED'
   /** Ended by a signal or by a cancel, not by our timeout. */
-  | 'PROCESS_KILLED';
+  | 'PROCESS_KILLED'
+  /**
+   * AWS-LC (the crypto library inside Codex 0.105+) aborted at start-up
+   * because the `OPENSSL_ia32cap` environment variable asked for a CPU
+   * capability this processor does not report. The variable, not the CPU.
+   */
+  | 'CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE';
 
 /** States that mean "the bytes are fine; this machine could not run them". */
 const LOCAL_EXECUTION_STATES: ReadonlySet<ExecutionState> = new Set<ExecutionState>([
@@ -76,7 +82,64 @@ const LOCAL_EXECUTION_STATES: ReadonlySet<ExecutionState> = new Set<ExecutionSta
   'PROCESS_EXITED_NONZERO',
   'PROCESS_CRASHED',
   'PROCESS_KILLED',
+  'CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE',
 ]);
+
+/**
+ * The variables OpenSSL-family libraries read to override CPU detection.
+ * AWS-LC's `OPENSSL_cpuid_setup` (crypto/fipsmodule/cpucap/cpu_intel.c)
+ * returns at once when `OPENSSL_ia32cap` is unset; when it is set to a value
+ * that requests a bit the CPU lacks, it prints the fatal error below and
+ * calls abort() - from a static initializer, before `main`, so `--version`
+ * never runs. Windows reads environment names case-insensitively, hence the
+ * lower-casing here.
+ */
+export const CPU_OVERRIDE_ENV_NAMES = ['OPENSSL_ia32cap', 'OPENSSL_armcap'] as const;
+
+const CAPABILITY_ABORT =
+  /Fatal Error: HW capability found: (0x[0-9A-Fa-f]+) (0x[0-9A-Fa-f]+), but HW capability requested: (0x[0-9A-Fa-f]+) (0x[0-9A-Fa-f]+)/;
+
+export interface CapabilityAbort {
+  /** CPUID leaf 1 EDX and ECX as the library read them. */
+  found: [string, string];
+  /** What the environment variable asked for. */
+  requested: [string, string];
+}
+
+/** The exact AWS-LC signature, from stderr; null when it is not there. */
+export function parseCapabilityAbort(stderr: string): CapabilityAbort | null {
+  const m = CAPABILITY_ABORT.exec(stderr);
+  if (!m) return null;
+  return { found: [m[1]!, m[2]!], requested: [m[3]!, m[4]!] };
+}
+
+/**
+ * The real keys under which `names` are set in `env`, compared
+ * case-insensitively (Windows does), each mapped to `undefined`: the overlay
+ * `buildChildEnv` needs to drop them from a child's environment.
+ */
+export function dropEnvKeys(env: NodeJS.ProcessEnv, names: readonly string[]): Record<string, undefined> {
+  const wanted = new Set(names.map((n) => n.toLowerCase()));
+  const overlay: Record<string, undefined> = {};
+  for (const key of Object.keys(env)) {
+    if (wanted.has(key.toLowerCase())) overlay[key] = undefined;
+  }
+  return overlay;
+}
+
+/** `NAME=value` for each override variable present, whatever its casing. */
+export function cpuOverridesIn(env: NodeJS.ProcessEnv): Array<{ key: string; value: string }> {
+  const wanted = new Set(CPU_OVERRIDE_ENV_NAMES.map((n) => n.toLowerCase()));
+  return Object.entries(env)
+    .filter(([key, value]) => wanted.has(key.toLowerCase()) && value !== undefined)
+    .map(([key, value]) => ({ key, value: value as string }));
+}
+
+/** What a runtime's child processes must not inherit, and why. */
+export interface EnvironmentPolicy {
+  drop: string[];
+  reason: string;
+}
 
 /**
  * True when downloading the same build again could not change the outcome:
@@ -138,6 +201,8 @@ export interface ExecutionRun {
   errorCode: string | null;
   termination: string | null;
   notes: string[];
+  /** Set when stderr carried AWS-LC's capability abort. */
+  capability: CapabilityAbort | null;
 }
 
 export interface ExecutionProbe {
@@ -151,6 +216,12 @@ export interface ExecutionProbe {
   versionLine: string | null;
   /** First start slow, next start fast: the file was being scanned. */
   antivirusDelaySuspected: boolean;
+  /**
+   * Proved on this machine: the executable runs once these variables are
+   * left out of its environment. Recorded in the manifest and applied to
+   * every run of the managed build. Null when nothing had to be dropped.
+   */
+  environmentPolicy: EnvironmentPolicy | null;
   conclusions: string[];
 }
 
@@ -173,6 +244,8 @@ export interface ProbeOptions {
   thorough?: boolean;
   /** Hash the file in the static check. Default true. */
   hash?: boolean;
+  /** Applied to every run through the ProcessManager (a manifest's policy). */
+  envOverlay?: Record<string, string | undefined>;
   /** A run slower than this triggers the second-start measurement. */
   slowStartMs?: number;
   onStep?: (message: string) => void;
@@ -181,6 +254,8 @@ export interface ProbeOptions {
 }
 
 const ENV_OF_INTEREST = [
+  'OPENSSL_ia32cap',
+  'OPENSSL_armcap',
   'CODEX_HOME',
   'CLAUDE_CONFIG_DIR',
   'HOME',
@@ -391,6 +466,9 @@ function hex(bytes: Buffer): string {
 /** The state of one finished run, from the ProcessManager's own record. */
 export function classifyRun(result: ProcessResult, versionLine: string | null): ExecutionState {
   const trace = result.trace;
+  // The library's own words beat the exit code: on Windows abort() reports
+  // 0xC0000409, on Linux SIGABRT, and both mean this one thing.
+  if (parseCapabilityAbort(result.stderr)) return 'CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE';
   if (result.outcome === 'spawn-error') {
     switch (trace.errorCode) {
       case 'EACCES':
@@ -426,8 +504,11 @@ export function versionLineOf(stdout: string, stderr: string): string | null {
 /** Names and safe values: paths are fine, proxy URLs (credentials) are not. */
 export function summariseEnv(env: NodeJS.ProcessEnv, extra: string[] = []): Record<string, string> {
   const out: Record<string, string> = {};
+  const byLower = new Map(Object.entries(env).map(([k, v]) => [k.toLowerCase(), v] as const));
   for (const name of [...ENV_OF_INTEREST, ...extra]) {
-    const value = env[name];
+    // Windows environment names are case-insensitive; `OPENSSL_IA32CAP` set
+    // through the system dialog is the same variable as `OPENSSL_ia32cap`.
+    const value = env[name] ?? byLower.get(name.toLowerCase());
     if (value === undefined) {
       out[name] = '(não definido)';
     } else if (/PROXY/i.test(name)) {
@@ -492,6 +573,7 @@ function runFromResult(
         ? trace.termination.attempts.map((a) => `${a.method} → ${a.exited ? 'saiu' : 'não saiu'}`).join(', ')
         : null,
     notes,
+    capability: parseCapabilityAbort(result.stderr),
   };
 }
 
@@ -683,8 +765,10 @@ export async function probeExecution(options: ProbeOptions): Promise<ExecutionPr
     recovered: false,
     versionLine: null,
     antivirusDelaySuspected: false,
+    environmentPolicy: null,
     conclusions: [],
   };
+  const baseOverlay = options.envOverlay ?? {};
 
   if (probe.static.problem) {
     probe.state = !probe.static.exists
@@ -695,15 +779,26 @@ export async function probeExecution(options: ProbeOptions): Promise<ExecutionPr
     return probe;
   }
 
-  const viaManager = async (label: string, cwd: string, overlay: Record<string, string> | undefined, timeoutMs: number): Promise<ExecutionRun> => {
+  const viaManager = async (
+    label: string,
+    cwd: string,
+    overlay: Record<string, string | undefined> | undefined,
+    timeoutMs: number,
+  ): Promise<ExecutionRun> => {
+    const merged = { ...baseOverlay, ...(overlay ?? {}) };
     const result = await options.processManager.run({
       command: options.executablePath,
       args,
       cwd,
-      ...(overlay ? { env: overlay } : {}),
+      ...(Object.keys(merged).length ? { env: merged } : {}),
       timeoutMs,
     });
-    const run = runFromResult(label, 'process-manager', args, cwd, { ...env, ...(overlay ?? {}) }, result);
+    const seen: NodeJS.ProcessEnv = { ...env };
+    for (const [k, v] of Object.entries(merged)) {
+      if (v === undefined) delete seen[k];
+      else seen[k] = v;
+    }
+    const run = runFromResult(label, 'process-manager', args, cwd, seen, result);
     probe.runs.push(run);
     return run;
   };
@@ -729,6 +824,33 @@ export async function probeExecution(options: ProbeOptions): Promise<ExecutionPr
 
   if (!options.thorough) return probe;
 
+  // 0. AWS-LC's capability abort: the environment asked for a CPU bit the
+  //    processor lacks. The same file, with the override left out of the
+  //    child's environment only - nothing on the machine changes - is the
+  //    proof, and the policy the managed build then runs under.
+  if (first.capability) {
+    const overrides = cpuOverridesIn(env);
+    const drop = dropEnvKeys(env, CPU_OVERRIDE_ENV_NAMES);
+    say('Testando sem OPENSSL_ia32cap no processo filho...');
+    const without = await viaManager('ProcessManager, sem OPENSSL_ia32cap', options.cwd, drop, followUp);
+    const shown = overrides.map((o) => `${o.key}=${o.value}`).join(', ') || '(não encontrada no ambiente do aplicativo)';
+    if (without.state === 'OK') {
+      probe.recovered = true;
+      probe.versionLine = without.versionLine;
+      probe.environmentPolicy = {
+        drop: [...CPU_OVERRIDE_ENV_NAMES],
+        reason: `${shown} faz a AWS-LC abortar (pede ${first.capability.requested.join(' ')}, a CPU tem ${first.capability.found.join(' ')}); sem a variável o executável responde`,
+      };
+      probe.conclusions.push(
+        `sem ${overrides.map((o) => o.key).join('/') || 'OPENSSL_ia32cap'} no ambiente do processo filho o executável respondeu (${without.versionLine}): a causa é a variável ${shown}, não o processador`,
+      );
+      return probe;
+    }
+    probe.conclusions.push(
+      `mesmo sem OPENSSL_ia32cap no processo filho o executável falhou (${without.state}); ambiente visto pelo aplicativo: ${shown}`,
+    );
+  }
+
   // 1. The same path again, briefly: a first start held by a scan is fast now.
   say('Testando de novo (o primeiro início não respondeu)...');
   const second = await viaManager('ProcessManager, segunda execução', options.cwd, undefined, followUp);
@@ -745,6 +867,10 @@ export async function probeExecution(options: ProbeOptions): Promise<ExecutionPr
   // 2. Node alone: is the wrapper the difference?
   say('Comparando com uma execução direta...');
   const rawEnv = { ...env };
+  for (const [k, v] of Object.entries(baseOverlay)) {
+    if (v === undefined) delete rawEnv[k];
+    else rawEnv[k] = v;
+  }
   const raw = await rawSpawn({ executablePath: options.executablePath, args, cwd: dirname(options.executablePath), env: rawEnv, timeoutMs: followUp });
   const rawRun = runFromResult('child_process direto (cwd = pasta do executável)', 'child_process', args, dirname(options.executablePath), rawEnv, raw);
   probe.runs.push(rawRun);
@@ -788,7 +914,13 @@ export async function probeExecution(options: ProbeOptions): Promise<ExecutionPr
       say('Testando uma cópia em pasta controlada...');
       copyFileSync(options.executablePath, copy);
       const copied = await inspectExecutable(copy, { platform, arch: options.arch, ...(options.sleep ? { sleep: options.sleep } : {}) });
-      const result = await options.processManager.run({ command: copy, args, cwd: controlledDir, timeoutMs: followUp });
+      const result = await options.processManager.run({
+        command: copy,
+        args,
+        cwd: controlledDir,
+        ...(Object.keys(baseOverlay).length ? { env: baseOverlay } : {}),
+        timeoutMs: followUp,
+      });
       const copyRun = runFromResult(`ProcessManager, cópia em ${controlledDir}`, 'process-manager', args, controlledDir, env, result);
       if (copied.sha256 !== probe.static.sha256) copyRun.notes.push(`a cópia tem outro SHA-256 (${copied.sha256})`);
       probe.runs.push(copyRun);
@@ -846,6 +978,9 @@ export function describeProbe(probe: ExecutionProbe, platform: NodeJS.Platform =
     }
   });
   for (const c of probe.conclusions) lines.push(`conclusão: ${c}`);
+  if (probe.environmentPolicy) {
+    lines.push(`política: o Codex gerenciado roda sem ${probe.environmentPolicy.drop.join(', ')} no seu ambiente (${probe.environmentPolicy.reason})`);
+  }
   return lines.join('\n');
 }
 
@@ -884,6 +1019,17 @@ function headline(probe: ExecutionProbe, os: string): string {
       return `O executável iniciou e morreu com ${exitLabel(first?.exitCode ?? 0)}.`;
     case 'PROCESS_KILLED':
       return `O executável foi encerrado por fora (${first?.signal ?? first?.error ?? 'sinal'}) antes de responder.`;
+    case 'CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE': {
+      const cap = first?.capability;
+      const asked = cap ? `${cap.requested[0]} ${cap.requested[1]}` : '?';
+      const has = cap ? `${cap.found[0]} ${cap.found[1]}` : '?';
+      return (
+        `Esta versão do Codex não consegue iniciar neste computador com a variável de ambiente OPENSSL_ia32cap: ` +
+        `a biblioteca criptográfica (AWS-LC) aborta ao iniciar porque a variável pede a capacidade ${asked} e a CPU informa ${has}. ` +
+        `Não é o processador; é a variável.` +
+        (probe.recovered ? ` Sem a variável, só no processo do Codex, o executável respondeu.` : '')
+      );
+    }
     default:
       return `O executável não respondeu.`;
   }

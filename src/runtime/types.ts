@@ -130,6 +130,11 @@ export interface RuntimeManifest {
   installedAt: string;
   /** The version this install replaced, when it replaced one. */
   previousVersion?: string;
+  /**
+   * Variables this build's child processes must not inherit, proved on this
+   * machine at install time (an `OPENSSL_ia32cap` that makes AWS-LC abort).
+   */
+  environment?: { drop: string[]; reason: string };
   /** Licence notices shipped with the runtime, relative to `current`. */
   licenseFiles?: string[];
 }

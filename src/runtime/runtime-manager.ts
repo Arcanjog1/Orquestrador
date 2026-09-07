@@ -101,6 +101,11 @@ export class RuntimeManager {
     return results;
   }
 
+  /** What a child process of this runtime must not inherit (see the manifest's policy). */
+  childEnvironmentOverlay(runtimeId: RuntimeId): Record<string, undefined> {
+    return this.get(runtimeId).childEnvironmentOverlay();
+  }
+
   async getExecutablePath(runtimeId: RuntimeId): Promise<string> {
     return this.get(runtimeId).getExecutablePath();
   }

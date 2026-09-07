@@ -24,7 +24,14 @@ import { scanPath } from '../preflight/preflight.js';
 import { extractArchive, findExecutable, planPromotion } from './archive.js';
 import { downloadAndVerify } from './downloader.js';
 import { moveDirectoryWithRetry, removeTreeWithRetry } from './fs-retry.js';
-import { describeProbe, probeExecution, probeFailedLocally, type ExecutionProbe } from './execution-probe.js';
+import {
+  describeProbe,
+  dropEnvKeys,
+  probeExecution,
+  probeFailedLocally,
+  type EnvironmentPolicy,
+  type ExecutionProbe,
+} from './execution-probe.js';
 import {
   judgeAuthenticode,
   readAuthenticode,
@@ -101,14 +108,16 @@ class InstallStepError extends Error {
      * reach the same place; the record says so instead.
      */
     readonly local = false,
+    /** The sentence the interface shows, when one more specific than the default fits. */
+    readonly userMessage: string | null = null,
   ) {
     super(message);
     this.name = 'InstallStepError';
   }
 }
 
-/** A downloaded executable's first run: the antivirus scans it first. */
-const STAGED_VERSION_TIMEOUT_MS = 180_000;
+/** A downloaded executable's first run: the antivirus scans it first. Not raised: a slow start is measured, not waited out. */
+export const STAGED_VERSION_TIMEOUT_MS = 180_000;
 /** Each comparison run after a failed first run; a start held by a scan is fast by then. */
 const FOLLOW_UP_TIMEOUT_MS = 30_000;
 
@@ -349,6 +358,7 @@ export abstract class ManagedRuntime {
     timeoutMs: number,
     options: { thorough: boolean; hash?: boolean; onStep?: (message: string) => void },
   ): Promise<ExecutionProbe> {
+    const overlay = this.childEnvironmentOverlay();
     return probeExecution({
       executablePath,
       args: this.versionArgs,
@@ -356,6 +366,7 @@ export abstract class ManagedRuntime {
       processManager: this.processManager,
       timeoutMs,
       followUpTimeoutMs: this.probeTimeouts.followUpMs,
+      ...(Object.keys(overlay).length ? { envOverlay: overlay } : {}),
       scratchRoot: this.paths.staging,
       homeEnvVar: this.homeEnvVar,
       platform: this.target.platform,
@@ -383,6 +394,18 @@ export abstract class ManagedRuntime {
       return { ok: true, detail, local: false, probe };
     }
     return { ok: false, detail, local: probeFailedLocally(probe), probe };
+  }
+
+  /**
+   * The environment overlay every run of the managed build gets: the
+   * variables its manifest says to drop, resolved to the keys actually
+   * present now (Windows names are case-insensitive). Empty when the
+   * manifest carries no policy or the build is not managed.
+   */
+  childEnvironmentOverlay(env: NodeJS.ProcessEnv = process.env): Record<string, undefined> {
+    const policy = this.readManifest()?.environment;
+    if (!policy) return {};
+    return dropEnvKeys(env, policy.drop);
   }
 
   /**
@@ -489,6 +512,7 @@ export abstract class ManagedRuntime {
       onProgress?.({ runtimeId: this.id, phase, message, ...(percent === undefined ? {} : { percent }) });
     };
     const trail: InstallTrailEntry[] = [];
+    let specificMessage: string | null = null;
     const wanted = request.kind === 'tested' ? `version ${request.version}` : 'latest';
     const where = `${this.target.platform}-${this.target.arch}`;
 
@@ -532,6 +556,7 @@ export abstract class ManagedRuntime {
         if (err instanceof RuntimeInstallCancelledError) throw err;
         const phase = err instanceof InstallStepError ? err.phase : 'installing';
         trail.push({ source: source.id, phase, message: `${(err as Error).message} (url: ${resolved.url})` });
+        if (err instanceof InstallStepError && err.userMessage) specificMessage = err.userMessage;
         if (err instanceof InstallStepError && err.local) {
           // The download, the checksum and the extraction were fine; the
           // machine could not run the result. Another source ships the same
@@ -548,7 +573,7 @@ export abstract class ManagedRuntime {
     }
 
     throwIfCancelled(this.id, options.signal);
-    const message = `Não foi possível preparar ${this.displayName} automaticamente.`;
+    const message = specificMessage ?? `Não foi possível preparar ${this.displayName} automaticamente.`;
     const detail = trail.map((entry) => `[${entry.source}] ${entry.phase}: ${entry.message}`).join('\n');
     this.lastFailure = { at: new Date().toISOString(), message, detail, trail };
     throw new RuntimeError(this.id, message, 'Tentar novamente', detail);
@@ -653,8 +678,12 @@ export abstract class ManagedRuntime {
           'staging-health-check',
           `the downloaded build failed its capability check:\n${capability.detail}`,
           capability.local,
+          capability.probe?.state === 'CPU_CAPABILITY_OVERRIDE_INCOMPATIBLE'
+            ? `Esta versão do ${this.displayName} não consegue iniciar neste computador.`
+            : null,
         );
       }
+      const environmentPolicy: EnvironmentPolicy | null = capability.probe?.environmentPolicy ?? null;
 
       const promotion = planPromotion(extractedRoot, stagedExecutable);
       const previousManifest = this.readManifest();
@@ -679,6 +708,7 @@ export abstract class ManagedRuntime {
         trustLevel: verdict.trustLevel,
         executableRelativePath: promotion.executableRelativePath,
         installedAt: new Date().toISOString(),
+        ...(environmentPolicy ? { environment: environmentPolicy } : {}),
         ...(previousManifest ? { previousVersion: previousManifest.version } : {}),
         ...(this.licenseFilesIn(this.currentDir).length
           ? { licenseFiles: this.licenseFilesIn(this.currentDir) }
@@ -753,10 +783,14 @@ export abstract class ManagedRuntime {
   }
 
   protected async readVersion(executablePath: string, timeoutMs = 60_000): Promise<string | null> {
+    // The managed build runs under its manifest's policy here too, or a
+    // health check would trip over the very variable the install proved.
+    const overlay = this.childEnvironmentOverlay();
     const result = await this.processManager.run({
       command: executablePath,
       args: this.versionArgs,
       cwd: this.paths.root,
+      ...(Object.keys(overlay).length ? { env: overlay } : {}),
       timeoutMs,
     });
     if (result.outcome !== 'completed' || result.exitCode !== 0) return null;
