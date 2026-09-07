@@ -74,11 +74,15 @@ commit com a identidade do aplicativo (nunca a da pessoa), push com token
 nunca commit vazio, e uma repetição escreve a mesma branch em vez de uma
 segunda. *Teste:* `cloud-publish.test.ts`.
 
-**Falta:** abrir o pull request automaticamente. O `GitHubClient` já sabe
-abrir PR; o que falta é chamá-lo do coordenador com o token de instalação e uma
-chave de idempotência derivada do `run_id`, para que uma repetição não abra um
-segundo PR.
-*Bloqueado por:* instalação do GitHub App com permissão de escrita.
+O pull request também está implementado, e é **opt-in**: abrir um é um ato
+para fora, no repositório de alguém, e deve ser uma escolha da pessoa, não algo
+que acontece porque uma execução terminou. A idempotência vem de perguntar ao
+GitHub, não de lembrar: o PR aberto cuja head é aquela branch **é** o registro,
+e ele sobrevive a reinício do coordenador, a nova tentativa e a um segundo
+processo.
+
+*Bloqueado por:* instalação do GitHub App com permissão de escrita — o código
+está pronto e testado; o que falta é a autorização.
 
 ### Bloco 10 — E2E real  *(bloqueado)*
 Ver `CLOUD_SESSION_HANDOFF.md`. Precisa de host, imagem construída, GitHub App

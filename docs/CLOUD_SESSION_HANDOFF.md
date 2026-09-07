@@ -31,6 +31,8 @@ real. O que não existe é a prova contra um host de verdade.
 | 5 | Run Coordinator: store durável, API, reaper, processo | `apps/coordinator/` |
 | 6 | Cliente e sincronização no desktop | `apps/desktop/src/main/services/cloud-*.ts` |
 | 7 | Modo Nuvem na interface | `dialogs.tsx`, `TopContextBar.tsx`, `CloudCard.tsx` |
+| 8 | Evidência real na timeline de nuvem | `orchestration-service.ts`, `cloud-service.ts` |
+| 9 | Publicação: branch, commit, push e PR opcional | `src/cloud/publish.ts` |
 
 Detalhes e decisões: `CLOUD_ARCHITECTURE_DECISION.md`,
 `CLOUD_SECURITY_AND_COSTS.md`, `CLOUD_IMPLEMENTATION_PLAN.md`.
@@ -138,19 +140,17 @@ Só depois disso `CLOUD_EXECUTION_VERIFIED` pode ser declarado.
 
 ## Próximo passo menor e concreto
 
-**Bloco 8 — evidência rica na timeline de nuvem.** Hoje um evento remoto chega
-à timeline local como um passo com o resumo do evento; falta apresentar
-arquivos alterados, diff e resultado de verificação com a mesma riqueza do modo
-local, **sem baixar o repositório**.
+**Expor a escolha de publicação na interface.** O coordenador já publica o
+resultado (branch, commit, push) e abre um pull request quando a execução pede,
+mas hoje isso é um campo do `team` que a interface ainda não escreve — então a
+publicação usa o padrão (publica, sem PR) e ninguém consegue pedir o PR pela
+GUI.
 
-*Menor passo:* fazer o coordenador anexar o `GitEvidence` que ele já coleta
-(arquivos, inserções, remoções) à carga do evento `orchestration.run:progress`
-da fase `evidence`, e o `CloudService` gravá-lo onde a timeline local já lê.
-Nada nisso depende de um human gate.
-
-Depois: bloco 9 (branch/push/PR de dentro do workspace), descrito em
-`CLOUD_IMPLEMENTATION_PLAN.md` — esse depende do GitHub App com permissão de
-escrita.
+*Menor passo:* dois controles no formulário de equipe de um projeto de nuvem —
+"publicar o resultado em uma branch" (ligado) e "abrir pull request" (desligado)
+— gravados no workspace e enviados no `team` da submissão, que já os aceita.
+Nada nisso depende de um human gate; só o PR *funcionar* depende do GitHub App
+com permissão de escrita.
 
 ## O que não fazer
 

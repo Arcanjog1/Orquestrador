@@ -37,6 +37,16 @@ export interface PublishRequest {
   readonly repositoryAccess: RepositoryAccess;
   /** Branch to push to. Defaults to one derived from the run id. */
   readonly branch?: string | null;
+  /**
+   * Opens a pull request after the push, when one is asked for.
+   *
+   * Off unless both this and `pullRequest` are given: opening a pull request
+   * is an outward-facing act on somebody's repository, and it should be a
+   * choice a person made rather than something that happens because a run
+   * finished.
+   */
+  readonly opener?: PullRequestOpener;
+  readonly pullRequest?: boolean;
   readonly signal?: AbortSignal;
 }
 
@@ -47,6 +57,22 @@ export interface PublishResult {
   readonly commit: string | null;
   /** Why nothing was published, when nothing was. */
   readonly reason: string | null;
+  /** The pull request, when one was asked for and opened or already existed. */
+  readonly pullRequest: { readonly number: number; readonly url: string; readonly created: boolean } | null;
+}
+
+/** Opens pull requests, and says what is already open. The GitHub client. */
+export interface PullRequestOpener {
+  pullRequestsFor(
+    token: string,
+    owner: string,
+    repo: string,
+    branch: string,
+  ): Promise<readonly { number: number; htmlUrl: string }[]>;
+  createPullRequest(
+    token: string,
+    input: { owner: string; repo: string; title: string; body: string; head: string; base: string },
+  ): Promise<{ number: number; htmlUrl: string }>;
 }
 
 export class PublishError extends Error {
@@ -88,7 +114,13 @@ export async function publishRun(request: PublishRequest): Promise<PublishResult
     throw new PublishError('COMMIT_FAILED', 'Não foi possível ler o estado do repositório remoto.', firstLine(status.stderr));
   }
   if (status.stdout.trim().length === 0) {
-    return { published: false, branch: null, commit: null, reason: 'nada mudou nesta execução' };
+    return {
+      published: false,
+      branch: null,
+      commit: null,
+      reason: 'nada mudou nesta execução',
+      pullRequest: null,
+    };
   }
 
   const branch = request.branch?.trim() || branchForRun(request.runId);
@@ -119,12 +151,16 @@ export async function publishRun(request: PublishRequest): Promise<PublishResult
     // "nothing to commit" here means another attempt already committed these
     // changes, which is success, not failure.
     if (/nothing to commit|nada a submeter/i.test(`${commit.stdout}${commit.stderr}`)) {
+      // A previous attempt already committed and pushed these changes. The
+      // branch is where it should be; the only thing that may still be missing
+      // is the pull request, and asking GitHub settles whether it is.
       const head = await run(['rev-parse', 'HEAD']);
       return {
         published: true,
         branch,
         commit: head.exitCode === 0 ? head.stdout.trim() : null,
         reason: null,
+        pullRequest: await openPullRequest(request, branch),
       };
     }
     throw new PublishError('COMMIT_FAILED', 'Não foi possível registrar as alterações.', firstLine(commit.stderr));
@@ -132,6 +168,8 @@ export async function publishRun(request: PublishRequest): Promise<PublishResult
 
   // A write token, minted for this push alone and reaching git through the
   // askpass file - never a URL, never argv.
+  // One write token for the push and the pull request: both are the same
+  // authorisation, and minting twice would be two credentials for one act.
   const token = await request.repositoryAccess.token(request.repository, 'write');
   const secretFile = `${SECRET_DIR}/${randomUUID()}`;
   const wrote = await processes.run({
@@ -178,7 +216,60 @@ export async function publishRun(request: PublishRequest): Promise<PublishResult
     branch,
     commit: head.exitCode === 0 ? head.stdout.trim() : null,
     reason: null,
+    pullRequest: await openPullRequest(request, branch),
   };
+}
+
+/**
+ * Opens the pull request for this branch, if one was asked for and none exists.
+ *
+ * Idempotent by asking GitHub rather than by remembering: the open pull
+ * request whose head is this branch **is** the record, and it survives a
+ * coordinator restart, a retry and a second attempt from another process. That
+ * is what stops one press of a button becoming two pull requests.
+ */
+async function openPullRequest(
+  request: PublishRequest,
+  branch: string,
+): Promise<PublishResult['pullRequest']> {
+  if (!request.pullRequest || !request.opener) return null;
+  const [owner, repo] = request.repository.split('/');
+  if (!owner || !repo) return null;
+
+  // A fresh token for the API call. Minted here rather than reused from the
+  // push so the pull request path works on the attempt where nothing new had
+  // to be pushed - and so a token is never held longer than the act it is for.
+  const { value: token } = await request.repositoryAccess.token(request.repository, 'write');
+
+  const existing = await request.opener.pullRequestsFor(token, owner, repo, branch);
+  const already = existing[0];
+  if (already) return { number: already.number, url: already.htmlUrl, created: false };
+
+  const opened = await request.opener.createPullRequest(token, {
+    owner,
+    repo,
+    title: request.objective.replace(/\s+/g, ' ').trim().slice(0, 72) || `Execução ${request.runId}`,
+    body: pullRequestBody(request),
+    head: branch,
+    base: request.baseBranch,
+  });
+  return { number: opened.number, url: opened.htmlUrl, created: true };
+}
+
+function pullRequestBody(request: PublishRequest): string {
+  return [
+    request.objective.trim(),
+    '',
+    '---',
+    '',
+    'Produzido por uma execução do AI Orchestrator na nuvem: o Codex planejou, o',
+    'Claude Code executou, as evidências foram coletadas do git pelo próprio',
+    'programa e as verificações registradas do projeto foram executadas de novo,',
+    'do zero, antes desta execução ser considerada concluída.',
+    '',
+    `Execução: \`${request.runId}\``,
+    `Base: \`${request.baseBranch}\``,
+  ].join('\n');
 }
 
 function commitMessage(objective: string, runId: string): string {

@@ -15,6 +15,7 @@ import { createCoordinatorServer } from './http.js';
 import { Reaper } from './reaper.js';
 import { ContainerWorkspaceProvisioner } from '../../../src/cloud/container-provisioner.js';
 import { GitHubAppRepositoryAccess } from '../../../src/cloud/github-app-access.js';
+import { GitHubClient } from '../../../src/github/github-client.js';
 import { DEFAULT_LIMITS, type WorkspaceLimits } from '../../../src/cloud/provisioner.js';
 
 function required(name: string): string {
@@ -119,6 +120,9 @@ export async function main(): Promise<void> {
     database,
     provisioner,
     repositoryAccess,
+    // The same GitHub client the desktop uses, driven with the installation
+    // token rather than with anyone's personal login.
+    pullRequests: new GitHubClient(),
     limits,
     credentials: {
       openaiApiKey: process.env.ORQ_OPENAI_API_KEY,

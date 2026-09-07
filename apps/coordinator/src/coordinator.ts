@@ -46,7 +46,12 @@ import {
   type WorkspaceProvisioner,
 } from '../../../src/cloud/provisioner.js';
 import { redact } from '../../../src/security/secret-redactor.js';
-import { PublishError, publishRun, type PublishResult } from '../../../src/cloud/publish.js';
+import {
+  PublishError,
+  publishRun,
+  type PublishResult,
+  type PullRequestOpener,
+} from '../../../src/cloud/publish.js';
 
 /**
  * Where the agent CLIs live inside a workspace image.
@@ -99,7 +104,18 @@ export interface RunTeam {
    * default, and turning it off is a deliberate choice for a run whose point
    * is only to look (an audit, an investigation).
    */
-  readonly publish?: { readonly enabled?: boolean; readonly branch?: string | null };
+  readonly publish?: {
+    readonly enabled?: boolean;
+    readonly branch?: string | null;
+    /**
+     * Open a pull request after the push.
+     *
+     * Off unless asked for: opening one is an outward-facing act on somebody's
+     * repository, and it should be a choice a person made rather than
+     * something that happens because a run finished.
+     */
+    readonly pullRequest?: boolean;
+  };
   readonly orchestrator?: { model?: string | null; reasoning?: string | null };
   readonly worker?: { selection?: string | null; model?: string | null; reasoning?: string | null };
 }
@@ -109,6 +125,8 @@ export interface CoordinatorOptions {
   provisioner: WorkspaceProvisioner;
   /** Mints the short-lived write token a publish needs. */
   repositoryAccess?: RepositoryAccess;
+  /** Opens pull requests, when a run asks for one. Absent means it cannot. */
+  pullRequests?: PullRequestOpener;
   credentials: AgentCredentials;
   /** Identifies this process in a lease. Defaults to a fresh id per process. */
   owner?: string;
@@ -339,6 +357,7 @@ export class Coordinator {
           branch: published.branch,
           commit: published.commit,
           reason: published.reason,
+          pullRequest: published.pullRequest,
         });
       }
 
@@ -503,6 +522,9 @@ export class Coordinator {
       objective: run.objective,
       repositoryAccess: this.options.repositoryAccess,
       branch: team.publish?.branch ?? null,
+      ...(team.publish?.pullRequest && this.options.pullRequests
+        ? { opener: this.options.pullRequests, pullRequest: true }
+        : {}),
     });
   }
 

@@ -168,3 +168,78 @@ test('a named branch is honoured instead of the derived one', async () => {
   assert.equal(result.branch, 'feature/minha-branch');
   assert.match(flatten(calls), /checkout -B feature\/minha-branch/);
 });
+
+/* -- the pull request ------------------------------------------------------ */
+
+function fakeOpener() {
+  const opened: unknown[] = [];
+  let existing: { number: number; htmlUrl: string }[] = [];
+  return {
+    opened,
+    setExisting(prs: { number: number; htmlUrl: string }[]) {
+      existing = prs;
+    },
+    opener: {
+      async pullRequestsFor() {
+        return existing;
+      },
+      async createPullRequest(token: string, input: unknown) {
+        opened.push({ token, input });
+        return { number: 7, htmlUrl: 'https://github.com/Arcanjog1/Orquestrador/pull/7' };
+      },
+    },
+  };
+}
+
+test('no pull request is opened unless one was asked for', async () => {
+  // Opening one is an outward-facing act on somebody's repository. It should
+  // be a choice a person made, not something that happens because a run ended.
+  const { processes } = fakeWorkspace(happy);
+  const fake = fakeOpener();
+  const result = await publishRun(request(processes, { opener: fake.opener }));
+  assert.equal(result.pullRequest, null);
+  assert.deepEqual(fake.opened, []);
+});
+
+test('a pull request is opened once, against the branch the run started from', async () => {
+  const { processes } = fakeWorkspace(happy);
+  const fake = fakeOpener();
+  const result = await publishRun(
+    request(processes, { opener: fake.opener, pullRequest: true }),
+  );
+  assert.equal(result.pullRequest?.number, 7);
+  assert.equal(result.pullRequest?.created, true);
+  assert.equal(fake.opened.length, 1);
+  const { input } = fake.opened[0] as { input: { head: string; base: string; title: string } };
+  assert.equal(input.head, branchForRun('rr_1234'));
+  assert.equal(input.base, 'main');
+  assert.equal(input.title, 'Crie o arquivo que faltava');
+});
+
+test('a run whose pull request already exists does not open a second one', async () => {
+  // Idempotency by asking GitHub rather than by remembering: the open pull
+  // request whose head is this branch IS the record, and it survives a
+  // coordinator restart, a retry, and a second attempt from another process.
+  const { processes } = fakeWorkspace(happy);
+  const fake = fakeOpener();
+  fake.setExisting([{ number: 3, htmlUrl: 'https://github.com/o/r/pull/3' }]);
+  const result = await publishRun(
+    request(processes, { opener: fake.opener, pullRequest: true }),
+  );
+  assert.equal(result.pullRequest?.number, 3);
+  assert.equal(result.pullRequest?.created, false);
+  assert.deepEqual(fake.opened, [], 'a second pull request was opened');
+});
+
+test('a run that changed nothing opens no pull request either', async () => {
+  const { processes } = fakeWorkspace((key) =>
+    key.includes('status --porcelain') ? { stdout: '' } : {},
+  );
+  const fake = fakeOpener();
+  const result = await publishRun(
+    request(processes, { opener: fake.opener, pullRequest: true }),
+  );
+  assert.equal(result.published, false);
+  assert.equal(result.pullRequest, null);
+  assert.deepEqual(fake.opened, []);
+});
