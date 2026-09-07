@@ -479,6 +479,93 @@ ALTER TABLE workspaces ADD COLUMN publish_enabled INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE workspaces ADD COLUMN publish_pull_request INTEGER NOT NULL DEFAULT 0;
 `,
   },
+  {
+    id: 9,
+    name: 'provider-connections-and-run-kinds',
+    sql: `
+-- A connection is an account plus how it authenticates. Everything that
+-- existed before this migration authenticates through the vendor's official
+-- CLI, signed in by the person, which is why the column defaults to 'cli':
+-- an installation upgrading to this version keeps every account it had,
+-- working exactly as it did, and nothing is re-authenticated.
+--
+-- 'api' is the new kind: the vendor's HTTP API with the person's own key,
+-- billed separately from any subscription. Two connections may be the same
+-- provider with different credentials - "Claude Trabalho 1" and "Claude
+-- Trabalho 2" - which is why nothing here is keyed by provider alone.
+ALTER TABLE accounts ADD COLUMN connection_kind TEXT NOT NULL DEFAULT 'cli';
+-- Where the secret lives, NOT the secret. The value is a key into the
+-- encrypted store; the ciphertext is in provider_secrets and the plaintext is
+-- never in this database, in a log, in a URL, in argv or in the renderer.
+ALTER TABLE accounts ADD COLUMN secret_ref TEXT;
+-- The last four characters, for recognising a key without revealing it. A key
+-- is shown in full exactly once - while the person is typing it - and never
+-- again after it is saved.
+ALTER TABLE accounts ADD COLUMN key_hint TEXT;
+-- An override for a compatible endpoint. NULL means the vendor's documented
+-- host, which is the only thing this application talks to by default.
+ALTER TABLE accounts ADD COLUMN base_url TEXT;
+-- What this connection prefers when a team does not say. NULL leaves the
+-- choice to the router, or to the CLI's own default.
+ALTER TABLE accounts ADD COLUMN default_model TEXT;
+ALTER TABLE accounts ADD COLUMN default_reasoning TEXT;
+-- Whether the person has enabled a metered connection. A row starts at 0:
+-- the API path is OFF until it is switched on deliberately, so no key can
+-- start costing money merely by having been saved.
+ALTER TABLE accounts ADD COLUMN api_enabled INTEGER NOT NULL DEFAULT 0;
+
+-- Encrypted credentials, one row per connection, apart from the metadata so
+-- that listing connections never reads a secret.
+CREATE TABLE provider_secrets (
+  account_id  TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  ciphertext  TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+
+-- What kind of work a run is, which is what the DONE gate branches on.
+--
+-- 'coding' is every run that existed before this migration and every run that
+-- changes files: DONE demands real git evidence and re-run verifications.
+-- 'conversation' is analysis, planning and review with no workspace at all:
+-- DONE is a final answer the orchestrator accepted, and the gate never
+-- invents a git diff or a test that does not exist.
+ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'coding';
+-- What the run consumed, summed as it goes, so the history shows cost without
+-- re-reading every invocation. NULL means nothing reported it.
+ALTER TABLE runs ADD COLUMN invocation_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE runs ADD COLUMN total_tokens INTEGER;
+ALTER TABLE runs ADD COLUMN total_cost_usd REAL;
+
+-- Per-invocation provenance and consumption. Every one of these is NULL on
+-- rows written before this migration, and on any provider that does not
+-- report the figure - which is rendered as "não informado", never as zero.
+ALTER TABLE agent_invocations ADD COLUMN provider_id TEXT;
+ALTER TABLE agent_invocations ADD COLUMN connection_kind TEXT;
+ALTER TABLE agent_invocations ADD COLUMN worker_id TEXT;
+ALTER TABLE agent_invocations ADD COLUMN billing TEXT;
+ALTER TABLE agent_invocations ADD COLUMN input_tokens INTEGER;
+ALTER TABLE agent_invocations ADD COLUMN output_tokens INTEGER;
+ALTER TABLE agent_invocations ADD COLUMN total_tokens INTEGER;
+ALTER TABLE agent_invocations ADD COLUMN cost_usd REAL;
+-- The classified provider failure, so "why did this stop?" is answerable from
+-- the record rather than from a string in a log.
+ALTER TABLE agent_invocations ADD COLUMN failure_kind TEXT;
+
+-- A team may have more than two members. The primary key already allowed
+-- several agents in one role; this says in which order they are offered, and
+-- gives each a stable name the orchestrator can address by.
+ALTER TABLE workspace_agents ADD COLUMN slot INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workspace_agents ADD COLUMN label TEXT;
+
+-- Per-project spending limits for metered connections. NULL means no limit,
+-- which is what every existing project gets: this migration changes no
+-- behaviour on its own.
+ALTER TABLE workspaces ADD COLUMN budget_max_invocations INTEGER;
+ALTER TABLE workspaces ADD COLUMN budget_max_tokens INTEGER;
+ALTER TABLE workspaces ADD COLUMN budget_max_cost_usd REAL;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

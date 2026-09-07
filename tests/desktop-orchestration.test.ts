@@ -360,8 +360,11 @@ test('the interface is fed live progress, in words a person can read', async () 
 
     for (const expected of [
       'Analisando...',
-      'Codex preparando a tarefa...',
-      'Claude executando...',
+      // Named by role rather than by vendor: the orchestrator may be the Codex
+      // CLI or an OpenAI API connection, and the worker is whichever team
+      // member the delegation named.
+      'Orquestrador analisando...',
+      'Worker executando...',
       'Coletando alterações...',
       'Executando verificações...',
       'Codex revisando...',
@@ -625,7 +628,7 @@ test('a run waiting at the human gate can be closed by the person, and stays clo
 test('a run refuses to start when a runtime or account is not ready, instead of hanging', async () => {
   // Measured, not imagined: an unauthenticated Codex prints "Reading prompt
   // from stdin..." and waits. Without this check the interface would show
-  // "Codex preparando a tarefa..." until the agent timeout.
+  // "Orquestrador analisando..." until the agent timeout.
   //
   // No `createRunners` override here on purpose: supplying one means supplying
   // your own agents, which switches the readiness check off. This exercises the

@@ -23,7 +23,7 @@
 import { ALLOWED_ACTIONS } from './decision-parser.js';
 import { CAPABILITY_TIERS, REASONING_TIERS } from '../routing/tiers.js';
 
-export const DECISION_SCHEMA_VERSION = 3;
+export const DECISION_SCHEMA_VERSION = 4;
 
 /** The tiers as the decision JSON spells them (lowercase). */
 export const WIRE_CAPABILITIES = CAPABILITY_TIERS.map((tier) => tier.toLowerCase());
@@ -42,6 +42,9 @@ export const DECISION_JSON_SCHEMA = {
     'reason',
     'relevantFiles',
     'workerRequirements',
+    'workerId',
+    'requiresTools',
+    'satisfiedCriteria',
   ],
   properties: {
     action: {
@@ -77,6 +80,28 @@ export const DECISION_JSON_SCHEMA = {
       type: 'array',
       items: { type: 'string' },
       description: 'Files the coding agent should look at first. Empty when there are none.',
+    },
+    workerId: {
+      type: ['string', 'null'],
+      description:
+        'Which worker on the team this delegation is for, by the id listed in the prompt. ' +
+        'Null means the first worker. An id the team does not have is refused and reported ' +
+        'back to you; it is never redirected to a different connection.',
+    },
+    requiresTools: {
+      type: ['boolean', 'null'],
+      description:
+        'True when this delegation must read, edit or run things in the workspace. A worker ' +
+        'that cannot execute tools is refused such a delegation rather than asked to ' +
+        'describe an edit it cannot make. Null means false.',
+    },
+    satisfiedCriteria: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'Acceptance criteria your review of the answer found satisfied. Used only in a ' +
+        'conversation run, where no command can be run and your independent review is the ' +
+        'check. In a run that changes code this is ignored: evidence decides there.',
     },
     workerRequirements: {
       type: 'object',

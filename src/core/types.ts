@@ -111,6 +111,36 @@ export interface Decision {
    * router then falls back to BALANCED/MEDIUM.
    */
   workerRequirements?: WorkerRequirements;
+  /**
+   * Which team member this delegation is for.
+   *
+   * Names a worker the team actually has. The application validates it - a
+   * decision naming a worker that does not exist is answered with a structured
+   * error listing the real ones, never silently redirected to some other
+   * connection. Absent means the team's first worker, which is what every
+   * single-worker project gets and what every decision written before this
+   * field existed means.
+   */
+  workerId?: string;
+  /**
+   * Whether this delegation needs to change files.
+   *
+   * The orchestrator says what the task needs; the application decides whether
+   * the chosen worker can supply it. A worker whose provider declares
+   * `toolExecution: false` is refused this delegation with a reason, rather
+   * than being asked to describe an edit it cannot make.
+   */
+  requiresTools?: boolean;
+  /**
+   * Criteria the orchestrator judged satisfied when it reviewed the answer.
+   *
+   * Only meaningful in a conversation run, where there is no command to run
+   * and the orchestrator's independent review *is* the check. It is still not
+   * self-certification: the worker cannot write this field, because only the
+   * orchestrator produces decisions, and the DONE gate re-reads the ledger
+   * afterwards. In a coding run this is ignored - there, evidence decides.
+   */
+  satisfiedCriteria?: string[];
 }
 
 /** The model and reasoning resolved for one invocation, as the CLI takes them. */

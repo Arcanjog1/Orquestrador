@@ -16,6 +16,7 @@ import {
   ChatRepository,
   CloudWorkspaceRepository,
   ProviderRepository,
+  ProviderSecretRepository,
   RunRepository,
   VerificationDefinitionRepository,
   WorkspaceRepository,
@@ -88,6 +89,8 @@ export class Database {
   readonly runtimeInstallations = new RuntimeInstallationRepository(() => this.driver);
   readonly settings = new SettingsRepository(() => this.driver);
   readonly providers = new ProviderRepository(() => this.driver);
+  /** Encrypted API credentials, one row per connection. Never listed with them. */
+  readonly providerSecrets = new ProviderSecretRepository(() => this.driver);
   readonly accounts = new AccountRepository(() => this.driver);
   readonly agents = new AgentRepository(() => this.driver);
   readonly workspaces = new WorkspaceRepository(() => this.driver);

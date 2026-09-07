@@ -23,6 +23,7 @@ import type {
   AgentResult,
   AgentRunner,
   Baseline,
+  ProviderFailureKind,
   CommandResult,
   Database,
   Decision,
@@ -43,6 +44,7 @@ import {
   GitEvidenceCollector,
   Verifier,
   commandPassed,
+  evaluateConversationDone,
   evaluateDone,
   formatDoneRejection,
   isMechanicalFailure,
@@ -62,6 +64,8 @@ import type {
 } from '../../shared/ipc-contract.js';
 import type { EventBus } from '../events.js';
 import { toMessageView, toRunDetailView, toRunView } from './views.js';
+import { BudgetLedger, isAgentProvider } from '../core.js';
+import type { BudgetLimits, ProviderCapabilities } from '../core.js';
 
 /** Everything a run needs that is not persisted state. */
 export interface RunnerPair {
@@ -75,6 +79,38 @@ export interface RunnerPair {
    * fixture's scripted agents, for one).
    */
   workerRouting?: WorkerRoutingSource;
+  /**
+   * The team, when it has more than the one worker above.
+   *
+   * Absent means a team of one, built from `worker` - which is what every
+   * project had before teams could grow, and what every existing caller and
+   * test still passes. When present, the first entry is the default target of
+   * a delegation that names no worker, so a single-worker team behaves
+   * identically either way.
+   */
+  workers?: readonly WorkerSlot[];
+  /** Spending limits for this run. Absent means the ledger only counts. */
+  budget?: BudgetLimits;
+}
+
+/**
+ * One member of the team, as the loop addresses it.
+ *
+ * `id` is what the orchestrator names in a delegation. It is the application's
+ * own id, never a credential and never a model, so a decision can never reach
+ * for a connection by guessing at one.
+ */
+export interface WorkerSlot {
+  id: string;
+  /** What the person called this worker. Shown in the timeline. */
+  label: string;
+  runner: AgentRunner;
+  accountId: string | null;
+  providerId: string | null;
+  connectionKind: 'cli' | 'api' | null;
+  /** The agent row, for the invocation record. */
+  agentId: string | null;
+  routing?: WorkerRoutingSource;
 }
 
 export interface WorkerRoutingSource {
@@ -114,6 +150,8 @@ export interface OrchestrationOptions {
    * every existing caller wants and what every existing test asserts.
    */
   environments?: EnvironmentFactory;
+  /** Default spending limits, when a project sets none. Absent means none. */
+  budget?: BudgetLimits;
 }
 
 /**
@@ -370,34 +408,57 @@ export class OrchestrationService {
       return;
     }
 
+    // What kind of run this is. A conversation run has no folder, no git and
+    // no commands: analysing a problem, comparing two designs or drafting a
+    // plan needs none of them, and demanding them would be the thing that
+    // forces a person to clone a repository before they can ask a question.
+    const conversation = isConversation(workspace);
+
     // Where this run executes. Everything below - evidence, verification, both
     // agents - goes through this one environment, so the loop never mixes a
     // remote workspace's path with a local runner or the other way round.
-    const environment = await this.resolveEnvironment(workspace, signal);
-    this.environments.set(runId, environment);
-    const cwd = environment.workingDirectory;
+    // A conversation run resolves none: there is nothing to provision, so
+    // nothing is provisioned and nothing is charged for.
+    const environment = conversation ? null : await this.resolveEnvironment(workspace, signal);
+    if (environment) this.environments.set(runId, environment);
+    const cwd = environment?.workingDirectory ?? '';
 
-    const runners = await this.createRunners(workspace, environment);
+    const runners = await this.createRunners(workspace, environment ?? NO_ENVIRONMENT);
     this.runners.set(runId, runners);
-    const gitCommand = await this.options.gitCommand?.().catch(() => undefined);
-    const collector = gitCommand
-      ? new GitEvidenceCollector(cwd, environment.processes, gitCommand)
-      : new GitEvidenceCollector(cwd, environment.processes);
-    const verifier = new Verifier({
-      cwd,
-      timeoutMs: this.options.verificationTimeoutMs ?? DEFAULTS.verificationTimeoutMs,
-      processManager: environment.processes,
-      signal,
-      // A remote environment resolves its own commands: walking this
-      // computer's PATH would answer about the wrong filesystem, and on
-      // Windows it would spawn `where.exe` here - a child process outside the
-      // boundary the environment exists to draw.
-      ...(environment.kind === 'remote' ? { resolveCommand: async (command: string) => command } : {}),
-    });
+    const team = teamOf(runners);
+    const budget = new BudgetLedger(runners.budget ?? this.options.budget ?? {});
 
-    const baseline = await collector.captureBaseline();
-    this.database.runs.setBaseline(runId, baseline.branch, baseline.commit, baseline.dirty);
-    this.step(runId, 0, 'baseline', 'ok', baseline.commit ?? 'sem commit');
+    const gitCommand = conversation
+      ? undefined
+      : await this.options.gitCommand?.().catch(() => undefined);
+    const collector =
+      environment && !conversation
+        ? gitCommand
+          ? new GitEvidenceCollector(cwd, environment.processes, gitCommand)
+          : new GitEvidenceCollector(cwd, environment.processes)
+        : null;
+    const verifier =
+      environment && !conversation
+        ? new Verifier({
+            cwd,
+            timeoutMs: this.options.verificationTimeoutMs ?? DEFAULTS.verificationTimeoutMs,
+            processManager: environment.processes,
+            signal,
+            // A remote environment resolves its own commands: walking this
+            // computer's PATH would answer about the wrong filesystem, and on
+            // Windows it would spawn `where.exe` here - a child process
+            // outside the boundary the environment exists to draw.
+            ...(environment.kind === 'remote'
+              ? { resolveCommand: async (command: string) => command }
+              : {}),
+          })
+        : null;
+
+    const baseline = collector ? await collector.captureBaseline() : EMPTY_BASELINE;
+    if (collector) {
+      this.database.runs.setBaseline(runId, baseline.branch, baseline.commit, baseline.dirty);
+      this.step(runId, 0, 'baseline', 'ok', baseline.commit ?? 'sem commit');
+    }
 
     const ledger = new AcceptanceCriteriaLedger();
     const iterations: IterationRecord[] = [];
@@ -405,15 +466,20 @@ export class OrchestrationService {
     const resolvedCommands = new Set<string>();
     let feedback: string | null = null;
 
-    // Routing state for this run: what the worker's CLI can take (read once,
-    // for this account), the attempts so far as the router reads them, the
-    // models the CLI refused, and the tree as the last attempt left it.
-    const routing = runners.workerRouting ?? null;
-    const capabilities = routing
-      ? await routing.capabilities().catch(() => NO_CAPABILITIES)
-      : NO_CAPABILITIES;
+    // Routing state for this run: what each worker's CLI can take (read once
+    // per worker), the attempts so far as the router reads them, the models a
+    // CLI refused, and the tree as the last attempt left it.
+    const capabilitiesOf = new Map<string, WorkerRuntimeCapabilities>();
+    for (const slot of team) {
+      capabilitiesOf.set(
+        slot.id,
+        slot.routing ? await slot.routing.capabilities().catch(() => NO_CAPABILITIES) : NO_CAPABILITIES,
+      );
+    }
     const attempts: PreviousAttempt[] = [];
     const unavailableModels: string[] = [];
+    /** The last answer a worker gave, which is what a conversation run ends with. */
+    let lastWorkerAnswer = '';
     let previousTree = treeKey(baseline.statusShort, baseline.unstagedDiff + baseline.stagedDiff);
     let warnedOrchestratorLevel = false;
     // What was said in this conversation before this run, so a follow-up
@@ -432,8 +498,18 @@ export class OrchestrationService {
       };
       iterations.push(record);
 
-      // 1. Ask the orchestrator what to do.
-      this.progress(runId, sessionId, 'orchestrator', 'Codex preparando a tarefa...', 'RUNNING');
+      // 1. Ask the orchestrator what to do - if the run may still spend.
+      //
+      // The check is here, before the call, because after it the money is
+      // already gone. A run stopped by its own budget is NEEDS_HUMAN, not a
+      // failure: nothing went wrong, a limit the person set was reached.
+      const verdict = budget.check();
+      if (!verdict.allowed) {
+        return this.finishAtBudget(runId, sessionId, verdict.reason, budget);
+      }
+      if (verdict.warning) this.say(sessionId, runId, 'system', verdict.warning);
+
+      this.progress(runId, sessionId, 'orchestrator', 'Orquestrador analisando...', 'RUNNING');
       const prompt = this.buildOrchestratorPrompt({
         workspace,
         cwd,
@@ -443,6 +519,8 @@ export class OrchestrationService {
         feedback,
         iterations,
         history,
+        conversation,
+        team,
       });
       const asked = await this.askForDecision({
         runId,
@@ -452,6 +530,7 @@ export class OrchestrationService {
         prompt,
         iteration,
         signal,
+        budget,
         onApplied: (applied) => {
           // The orchestrator's fixed level was not what its CLI supports:
           // said once per run, in the words the interface promises.
@@ -490,26 +569,105 @@ export class OrchestrationService {
 
       if (decision.action === 'delegate') {
         const task = decision.task ?? objective;
-        this.progress(runId, sessionId, 'worker', 'Claude executando...', 'RUNNING');
-        record.worker = await this.delegate({
+
+        // Which worker, and can it do what was asked? Both questions are the
+        // application's, not the model's: a decision naming a worker the team
+        // does not have is answered with the real list, and a delegation that
+        // needs files changed is refused for a connection that cannot change
+        // them. Neither is silently redirected to some other connection.
+        const chosen = this.chooseWorker(team, decision, conversation);
+        if (!chosen.ok) {
+          this.step(runId, iteration, 'delegation', 'refused', chosen.reason);
+          this.say(sessionId, runId, 'system', chosen.reason);
+          feedback = chosen.feedback;
+          continue;
+        }
+        const slot = chosen.slot;
+
+        const spend = budget.check();
+        if (!spend.allowed) return this.finishAtBudget(runId, sessionId, spend.reason, budget);
+        if (spend.warning) this.say(sessionId, runId, 'system', spend.warning);
+
+        this.progress(runId, sessionId, 'worker', `${slot.label} executando...`, 'RUNNING', {
+          workerId: slot.id,
+          workerLabel: slot.label,
+        });
+        const delegated = await this.delegate({
           runId,
           sessionId,
           workspace,
           cwd,
           runners,
+          slot,
           iteration,
           task,
           decision,
-          routing,
-          capabilities,
+          routing: slot.routing ?? null,
+          capabilities: capabilitiesOf.get(slot.id) ?? NO_CAPABILITIES,
           attempts,
           unavailableModels,
           signal,
+          budget,
         });
+        record.worker = delegated.record;
+        if (delegated.answer.trim()) lastWorkerAnswer = delegated.answer;
+
+        // A provider that will keep refusing must stop the run rather than be
+        // asked again eight times: an empty balance and a rejected credential
+        // are not made better by another attempt, and each attempt may cost.
+        const terminal = terminalFailure(delegated.record.failure);
+        if (terminal) {
+          this.database.runs.setStatus(runId, 'NEEDS_HUMAN', terminal);
+          this.say(sessionId, runId, 'system', terminal);
+          this.step(runId, iteration, 'worker', 'needs-human', terminal);
+          this.progress(runId, sessionId, 'needs-human', terminal, 'NEEDS_HUMAN');
+          return;
+        }
         if (signal.aborted) return this.finishCancelled(runId, sessionId);
       }
 
       // 3. Collect evidence ourselves, whatever the worker claims.
+      //
+      // A conversation run collects none, and says so by having none: it must
+      // never report a diff or a changed file, because there is no working
+      // copy for one to have happened in.
+      if (!collector) {
+        // In a conversation run there is no command to run, so the check is
+        // the orchestrator's own review of an answer a *different* agent
+        // produced. That is still not self-certification: a worker cannot
+        // write this field, because only the orchestrator produces decisions.
+        for (const criterion of decision.satisfiedCriteria ?? []) {
+          ledger.markByText(criterion, 'satisfied', iteration, 'Revisado pelo orquestrador.');
+        }
+        feedback = this.buildConversationFeedback(record, lastWorkerAnswer);
+        if (decision.action === 'done') {
+          const gate = await evaluateConversationDone({
+            ledger,
+            iterations,
+            answer: decision.summary ?? lastWorkerAnswer,
+          });
+          record.doneRejection = gate.passed ? undefined : gate;
+          this.step(
+            runId,
+            iteration,
+            'done-gate',
+            gate.passed ? 'passed' : 'rejected',
+            gate.failures.join('; ').slice(0, 500) || 'resposta final aceita',
+          );
+          if (gate.passed) {
+            const answer = (decision.summary ?? lastWorkerAnswer).trim();
+            this.database.runs.setStatus(runId, 'DONE', 'Resposta final validada pelo orquestrador.');
+            if (answer) this.say(sessionId, runId, 'orchestrator', answer);
+            this.sayCost(sessionId, runId, budget);
+            this.progress(runId, sessionId, 'done', 'Concluído.', 'DONE');
+            return;
+          }
+          feedback = formatDoneRejection(gate);
+          this.say(sessionId, runId, 'system', 'A revisão final não passou; o orquestrador vai continuar.');
+        }
+        continue;
+      }
+
       this.progress(runId, sessionId, 'evidence', 'Coletando alterações...', 'RUNNING');
       const evidence: GitEvidence = await collector.collectEvidence(baseline);
       record.evidence = evidence;
@@ -568,7 +726,7 @@ export class OrchestrationService {
         const resolution = this.database.verifications.resolve(workspace.id, requested);
         unknownIds = resolution.unknown;
         for (const command of resolution.commands) resolvedCommands.add(command);
-        verification = await verifier.runAll(resolution.commands);
+        verification = await verifier!.runAll(resolution.commands);
         record.verification = verification;
         for (const result of verification) {
           this.database.runs.recordVerification({
@@ -608,7 +766,7 @@ export class OrchestrationService {
           iterations,
           baseline,
           evidence: fresh,
-          verifier,
+          verifier: verifier!,
           allowNoChanges: this.options.allowNoChanges ?? false,
         });
         record.doneRejection = gate.passed ? undefined : gate;
@@ -617,6 +775,7 @@ export class OrchestrationService {
         if (gate.passed) {
           this.database.runs.setStatus(runId, 'DONE', 'Validação independente aprovada.');
           this.say(sessionId, runId, 'orchestrator', 'Tarefa concluída e verificada.');
+          this.sayCost(sessionId, runId, budget);
           this.progress(runId, sessionId, 'done', 'Tarefa concluída.', 'DONE');
           return;
         }
@@ -674,6 +833,8 @@ export class OrchestrationService {
     prompt: string;
     iteration: number;
     signal: AbortSignal;
+    /** Counts what each attempt consumed, so a repair round trip is not free. */
+    budget: BudgetLedger;
     /** Told what the adapter actually sent for model and level, once per attempt. */
     onApplied?: (applied: NonNullable<AgentResult['applied']>) => void;
   }): Promise<{ decision: Decision | null; failure?: string }> {
@@ -690,6 +851,10 @@ export class OrchestrationService {
         runId,
         iteration,
       });
+      // Counted before anything is decided about the answer: a repair round
+      // trip is a second call and costs a second time.
+      input.budget.record(result.usage ?? null);
+      const orchestratorCapabilities = capabilitiesOfRunner(runners.orchestrator);
       this.database.runs.recordInvocation({
         runId,
         iteration,
@@ -697,6 +862,18 @@ export class OrchestrationService {
         accountId: this.orchestratorAccountId(workspace),
         role: 'ORCHESTRATOR',
         task: null,
+        providerId: orchestratorCapabilities?.providerId ?? null,
+        connectionKind: orchestratorCapabilities?.connectionKind ?? null,
+        usage: result.usage
+          ? {
+              billing: result.usage.billing,
+              inputTokens: result.usage.inputTokens,
+              outputTokens: result.usage.outputTokens,
+              totalTokens: result.usage.totalTokens,
+              costUsd: result.usage.costUsd,
+            }
+          : null,
+        failureKind: result.failure ?? null,
         outcome: result.outcome,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
@@ -816,33 +993,66 @@ export class OrchestrationService {
     feedback: string | null;
     iterations: readonly IterationRecord[];
     history?: string | null;
+    /** True for a run with no workspace: no git, no commands, no evidence. */
+    conversation: boolean;
+    team: readonly WorkerSlot[];
   }): string {
-    const catalogue = this.database.verifications.list(input.workspace.id);
+    const catalogue = input.conversation ? [] : this.database.verifications.list(input.workspace.id);
     const lines: string[] = [
-      'You are the orchestrator of a local coding agent system.',
-      'You supervise; a separate coding agent executes. You never edit files yourself.',
+      'You are the orchestrator of an agent team.',
+      'You supervise; the workers below do the work. You never do it yourself.',
       '',
       `OBJECTIVE: ${input.objective}`,
-      `WORKSPACE: ${input.cwd}`,
       `ITERATION: ${input.iteration}`,
       '',
-      'BASELINE:',
-      `  branch: ${input.baseline.branch ?? '(none)'}`,
-      `  commit: ${input.baseline.commit ?? '(none)'}`,
-      `  dirty:  ${input.baseline.dirty ? 'yes' : 'no'}`,
+      // The team, by the ids a delegation may name. Spelling them out is what
+      // lets `workerId` be validated instead of guessed at.
+      'YOUR TEAM (delegate by "workerId", using exactly these ids):',
+      ...input.team.map((slot) => {
+        const capabilities = capabilitiesOfRunner(slot.runner);
+        const can =
+          capabilities === null
+            ? 'reads, edits and runs things in the workspace'
+            : capabilities.toolExecution
+              ? 'reads, edits and runs things in the workspace'
+              : 'analyses, plans and reviews only - CANNOT read, edit or run anything';
+        return `  ${slot.id} - ${slot.label}: ${can}`;
+      }),
       '',
-      'AVAILABLE VERIFICATIONS (request them by id, never by command line):',
-      ...(catalogue.length > 0
-        ? catalogue.map((row) => `  ${row.id} - ${row.label}`)
-        : ['  (none registered for this workspace)']),
-      '',
+      ...(input.conversation
+        ? [
+            'THIS IS A CONVERSATION RUN. There is no workspace, no repository and no command',
+            'to run. Nothing you or a worker says will change a file, and you must not claim',
+            'otherwise, ask for a verification, or describe a diff. Finish by answering the',
+            'objective: reply with action "done", put the final answer for the person in',
+            '"summary", and list in "satisfiedCriteria" the criteria your own review of the',
+            "worker's answer found satisfied.",
+            '',
+          ]
+        : [
+            `WORKSPACE: ${input.cwd}`,
+            '',
+            'BASELINE:',
+            `  branch: ${input.baseline.branch ?? '(none)'}`,
+            `  commit: ${input.baseline.commit ?? '(none)'}`,
+            `  dirty:  ${input.baseline.dirty ? 'yes' : 'no'}`,
+            '',
+            'AVAILABLE VERIFICATIONS (request them by id, never by command line):',
+            ...(catalogue.length > 0
+              ? catalogue.map((row) => `  ${row.id} - ${row.label}`)
+              : ['  (none registered for this workspace)']),
+            '',
+          ]),
       'Answer with a single JSON object and nothing else:',
       '{',
       '  "action": "delegate" | "verify" | "done" | "blocked",',
       '  "task": "what the coding agent must do (required for delegate)",',
       '  "acceptanceCriteria": ["objective, checkable statements"],',
       '  "verificationCommands": ["verification ids from the list above"],',
-      '  "summary": "one line for the user",',
+      '  "workerId": "which worker this delegation is for, from the team above",',
+      '  "requiresTools": true | false,',
+      '  "satisfiedCriteria": ["criteria your review found satisfied"],',
+      '  "summary": "one line for the user, or the final answer on done",',
       '  "reason": "required for blocked",',
       '  "workerRequirements": {',
       '    "capability": "fast" | "balanced" | "strong" | "max",',
@@ -851,9 +1061,15 @@ export class OrchestrationService {
       '  }',
       '}',
       '',
-      'Rules: "done" is a request, not a conclusion - it is re-validated against',
-      'freshly collected git evidence and by re-running every verification. An',
-      'unknown verification id is reported as a failure and never executed.',
+      'Rules: "done" is a request, not a conclusion - it is re-validated before the run',
+      'can end. In a run with a workspace that means freshly collected git evidence and',
+      'every verification re-run from scratch; an unknown verification id is reported as a',
+      'failure and never executed. In a conversation run it means a real final answer and',
+      'every criterion you set accounted for.',
+      '',
+      'Never delegate work that needs files changed to a worker the team above says cannot',
+      'read, edit or run anything. Such a worker can describe an edit; it cannot make one,',
+      'and its answer is never evidence that anything changed.',
       '',
       'workerRequirements says what THIS delegation needs from the coding agent, as',
       'tiers - never a model name; the system maps tiers to models. capability:',
@@ -952,6 +1168,8 @@ export class OrchestrationService {
     /** The repository path **inside the environment this run executes in**. */
     cwd: string;
     runners: RunnerPair;
+    /** The team member this delegation is for, already validated. */
+    slot: WorkerSlot;
     iteration: number;
     task: string;
     decision: Decision;
@@ -960,9 +1178,11 @@ export class OrchestrationService {
     attempts: readonly PreviousAttempt[];
     unavailableModels: string[];
     signal: AbortSignal;
-  }): Promise<NonNullable<IterationRecord['worker']>> {
-    const { runId, sessionId, workspace, cwd, runners, iteration, task } = input;
+    budget: BudgetLedger;
+  }): Promise<{ record: NonNullable<IterationRecord['worker']>; answer: string }> {
+    const { runId, sessionId, workspace, cwd, runners, slot, iteration, task } = input;
     let last: NonNullable<IterationRecord['worker']> | null = null;
+    let answer = '';
 
     for (let attempt = 0; attempt <= MODEL_RETRIES; attempt += 1) {
       const routed: RouterOutput | null = input.routing
@@ -995,12 +1215,12 @@ export class OrchestrationService {
         sessionId,
         runId,
         'worker',
-        attempt === 0 ? `Executando: ${task}` : `Tentando outro modelo: ${task}`,
-        planned ? { routing: planned } : undefined,
+        attempt === 0 ? `${slot.label}: ${task}` : `${slot.label}, tentando outro modelo: ${task}`,
+        { workerId: slot.id, workerLabel: slot.label, ...(planned ? { routing: planned } : {}) },
       );
 
       const startedAt = new Date().toISOString();
-      const result = await runners.worker.run({
+      const result = await slot.runner.run({
         prompt: task,
         workingDirectory: cwd,
         timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
@@ -1027,9 +1247,17 @@ export class OrchestrationService {
         routed?.resolvedModel !== null && routed?.resolvedModel !== undefined && modelUnavailableIn(result);
       const mechanical = !modelUnavailable && isMechanicalFailure(result);
 
+      input.budget.record(result.usage ?? null);
+      // The worker's answer is what a conversation run finishes with, and it
+      // is only ever *an answer*: nothing here treats it as evidence that a
+      // file changed. In a coding run the evidence collector, not this string,
+      // decides what happened.
+      if (result.stdout.trim()) answer = result.stdout;
+
+      const slotCapabilities = capabilitiesOfRunner(slot.runner);
       last = {
-        agent: 'claude-code',
-        profile: runners.workerAccountId,
+        agent: slot.runner.kind,
+        profile: slot.accountId,
         task,
         startedAt,
         finishedAt: result.finishedAt,
@@ -1039,14 +1267,29 @@ export class OrchestrationService {
         ...(recorded ? { routing: recorded } : {}),
         mechanical,
         modelUnavailable,
+        ...(result.usage ? { usage: result.usage } : {}),
+        ...(result.failure ? { failure: result.failure } : {}),
       };
       this.database.runs.recordInvocation({
         runId,
         iteration,
-        agentId: workspace.worker_agent_id,
-        accountId: runners.workerAccountId,
+        agentId: slot.agentId ?? workspace.worker_agent_id,
+        accountId: slot.accountId,
         role: 'CODING_WORKER',
         task,
+        workerId: slot.id,
+        providerId: slotCapabilities?.providerId ?? slot.providerId,
+        connectionKind: slotCapabilities?.connectionKind ?? slot.connectionKind,
+        usage: result.usage
+          ? {
+              billing: result.usage.billing,
+              inputTokens: result.usage.inputTokens,
+              outputTokens: result.usage.outputTokens,
+              totalTokens: result.usage.totalTokens,
+              costUsd: result.usage.costUsd,
+            }
+          : null,
+        failureKind: result.failure ?? null,
         outcome: result.outcome,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
@@ -1055,6 +1298,7 @@ export class OrchestrationService {
       });
       this.step(runId, iteration, 'worker', result.outcome, task.slice(0, 200), {
         attempt: attempt + 1,
+        workerId: slot.id,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         ...(result.executable ? { executable: result.executable } : {}),
@@ -1064,8 +1308,16 @@ export class OrchestrationService {
         stderrExcerpt: excerpt(result.stderr),
       });
 
-      if (input.signal.aborted || !modelUnavailable || !routed?.resolvedModel) return last;
-      if (attempt === MODEL_RETRIES || routed.alternatives.length === 0) return last;
+      // A failure that another model cannot fix - no balance, a rejected key -
+      // must not be answered by trying another model, which would only spend
+      // again to be refused again.
+      if (terminalFailure(result.failure)) return { record: last, answer };
+      if (input.signal.aborted || !modelUnavailable || !routed?.resolvedModel) {
+        return { record: last, answer };
+      }
+      if (attempt === MODEL_RETRIES || routed.alternatives.length === 0) {
+        return { record: last, answer };
+      }
 
       // The CLI refused the model by name: remember it for the whole run
       // and try the next candidate, with the router saying why.
@@ -1077,7 +1329,126 @@ export class OrchestrationService {
         `O modelo ${routed.resolvedModel} não está disponível nesta conta; tentando ${routed.alternatives[0]}.`,
       );
     }
-    return last!;
+    return { record: last!, answer };
+  }
+
+  /**
+   * Which worker a delegation is for, and whether it can actually do it.
+   *
+   * Two refusals, both of them the application's job rather than the model's:
+   *
+   *  - A worker id the team does not have. The orchestrator is told the real
+   *    ids instead of having its delegation quietly sent somewhere else.
+   *  - A delegation that needs files changed, aimed at a connection that
+   *    cannot change them. This is the rule that stops a model API's account
+   *    of an edit from standing in for an edit.
+   */
+  private chooseWorker(
+    team: readonly WorkerSlot[],
+    decision: Decision,
+    conversation: boolean,
+  ):
+    | { ok: true; slot: WorkerSlot }
+    | { ok: false; reason: string; feedback: string } {
+    if (team.length === 0) {
+      const reason = 'Nenhum worker está configurado para este projeto. Escolha um em Equipe.';
+      return { ok: false, reason, feedback: `NO_WORKER_CONFIGURED\n\n${reason}` };
+    }
+    const wanted = decision.workerId;
+    const slot = wanted ? team.find((entry) => entry.id === wanted) : team[0];
+    if (!slot) {
+      const known = team.map((entry) => `${entry.id} (${entry.label})`).join(', ');
+      return {
+        ok: false,
+        reason: `O orquestrador pediu um worker que não existe nesta equipe: "${wanted}".`,
+        feedback:
+          `UNKNOWN_WORKER\n\nYou delegated to "${wanted}", which is not on this team. ` +
+          `The workers available are: ${known}. Delegate again naming one of these, ` +
+          'or answer "blocked" with a reason.',
+      };
+    }
+
+    // Does this delegation need a real executor, and does this worker have one?
+    const needsTools = decision.requiresTools ?? !conversation;
+    if (!needsTools) return { ok: true, slot };
+    const capabilities = capabilitiesOfRunner(slot.runner);
+    if (!capabilities || capabilities.toolExecution) return { ok: true, slot };
+    const alternatives = team
+      .filter((entry) => capabilitiesOfRunner(entry.runner)?.toolExecution !== false)
+      .map((entry) => `${entry.id} (${entry.label})`);
+    return {
+      ok: false,
+      reason:
+        `"${slot.label}" responde e analisa, mas não edita arquivos: é uma conexão de API, ` +
+        'sem executor. Esta tarefa precisa de um worker com ferramentas.',
+      feedback:
+        `WORKER_CANNOT_EXECUTE_TOOLS\n\nWorker "${slot.id}" (${slot.label}) is a model API ` +
+        'connection. It can analyse, plan and review, but it cannot read, edit or run ' +
+        'anything: it has no tool executor. Do not ask it to change files, and do not treat ' +
+        'any answer as evidence that a file changed.\n' +
+        (alternatives.length > 0
+          ? `Workers on this team that can execute tools: ${alternatives.join(', ')}.`
+          : 'No worker on this team can execute tools. Answer "blocked" explaining that the ' +
+            'project needs a coding worker configured in Equipe.'),
+    };
+  }
+
+  /**
+   * Ends a run because its own budget said stop.
+   *
+   * NEEDS_HUMAN rather than FAILED: nothing broke. The person set a limit, the
+   * limit was reached, and what happens next is their decision.
+   */
+  private finishAtBudget(
+    runId: string,
+    sessionId: string,
+    reason: string,
+    budget: BudgetLedger,
+  ): void {
+    this.database.runs.setStatus(runId, 'NEEDS_HUMAN', reason);
+    this.step(runId, this.database.runs.require(runId).iteration, 'budget', 'stopped', reason);
+    this.say(sessionId, runId, 'system', reason);
+    this.sayCost(sessionId, runId, budget);
+    this.progress(runId, sessionId, 'needs-human', 'Limite atingido.', 'NEEDS_HUMAN', {
+      usage: usageView(budget),
+    });
+  }
+
+  /** What the run consumed, said once at the end, in the ledger's own words. */
+  private sayCost(sessionId: string, runId: string, budget: BudgetLedger): void {
+    const totals = budget.snapshot;
+    if (totals.invocations === 0) return;
+    this.say(sessionId, runId, 'system', `Consumo desta execução: ${budget.describe()}.`);
+  }
+
+  /**
+   * What to tell the orchestrator after a conversation delegation.
+   *
+   * It carries the worker's answer and nothing else - no git section, no
+   * verification section, no "changed files: (none)". Printing an empty
+   * evidence report for a run that has no working copy would invite the
+   * orchestrator to reason about a repository that is not there.
+   */
+  private buildConversationFeedback(record: IterationRecord, answer: string): string {
+    const lines: string[] = [];
+    const worker = record.worker;
+    if (worker) {
+      lines.push(
+        'WORKER OF THIS ITERATION:',
+        `  outcome: ${worker.outcome}${worker.exitCode !== null ? ` (exit ${worker.exitCode})` : ''}`,
+        `  ran as: model ${worker.routing?.resolvedModel ?? '(provider default)'}`,
+        '',
+      );
+    }
+    lines.push(
+      "WORKER'S ANSWER (this is a conversation run: no files were changed and no command was run):",
+      answer.trim() ? indent(answer.trim().slice(0, 12_000)) : '    (the worker returned nothing)',
+      '',
+      'Review it. If it answers the objective, reply with action "done" and put the final answer',
+      'for the person in "summary", listing in "satisfiedCriteria" the criteria your review found',
+      'satisfied. If it does not, delegate again with what is missing.',
+    );
+    return lines.join('\n');
   }
 
   private finishCancelled(runId: string, sessionId: string): void {
@@ -1141,6 +1512,125 @@ export class OrchestrationService {
   ): void {
     this.events.emit('run:progress', { runId, sessionId, stage, label, status, ...extra });
   }
+}
+
+/**
+ * True when this project is a conversation: no folder, no git, no commands.
+ *
+ * The environment column already said where a run executes; `conversation` is
+ * the third answer - nowhere, because nothing needs executing. Reading it here
+ * rather than from a second flag keeps one column as the single source of
+ * "what kind of project is this".
+ */
+export function isConversation(workspace: WorkspaceWithAgents): boolean {
+  return workspace.environment === 'conversation';
+}
+
+/**
+ * The environment handed to `createRunners` for a conversation run.
+ *
+ * A factory still needs *something* to build against, and this says plainly
+ * what is true: no working directory, and a process manager that refuses. If a
+ * conversation run ever tried to spawn a process, this would throw rather than
+ * quietly reach the user's machine.
+ */
+const NO_ENVIRONMENT: ExecutionEnvironment = {
+  kind: 'local',
+  id: '',
+  workingDirectory: '',
+  processes: {
+    run: async () => {
+      throw new Error('Uma conversa não executa processos.');
+    },
+    cancelAll: async () => {},
+  },
+};
+
+/** The baseline of a run that has no working copy: everything empty, nothing dirty. */
+const EMPTY_BASELINE: Baseline = {
+  capturedAt: new Date(0).toISOString(),
+  isGitRepository: false,
+  commit: null,
+  branch: null,
+  statusShort: '',
+  unstagedDiff: '',
+  stagedDiff: '',
+  modifiedFiles: [],
+  stagedFiles: [],
+  dirty: false,
+};
+
+/**
+ * The team, as one list.
+ *
+ * A pair with no explicit team is a team of one built from `worker`, so every
+ * caller written before teams could grow keeps working and behaves identically.
+ */
+export function teamOf(runners: RunnerPair): readonly WorkerSlot[] {
+  if (runners.workers && runners.workers.length > 0) return runners.workers;
+  return [
+    {
+      id: 'worker-1',
+      label: 'Worker',
+      runner: runners.worker,
+      accountId: runners.workerAccountId,
+      providerId: null,
+      connectionKind: null,
+      agentId: null,
+      ...(runners.workerRouting ? { routing: runners.workerRouting } : {}),
+    },
+  ];
+}
+
+/**
+ * The failures that must end a run rather than be tried again.
+ *
+ * Retrying an empty balance or a rejected key cannot succeed, and each attempt
+ * may cost. Stopping with a sentence is the honest outcome; eight more
+ * identical refusals is not.
+ */
+export function terminalFailure(failure: ProviderFailureKind | undefined): string | null {
+  switch (failure) {
+    case 'insufficient-credit':
+      return (
+        'A conexão está sem saldo ou fora da cota do provider. A execução parou aqui: ' +
+        'insistir só repetiria a recusa. Resolva o saldo e continue quando quiser.'
+      );
+    case 'authentication':
+      return 'A credencial desta conexão não foi aceita. Atualize a chave em Contas e continue quando quiser.';
+    case 'permission':
+      return 'Esta conexão não tem permissão para o que foi pedido. Verifique a conta no provider.';
+    default:
+      return null;
+  }
+}
+
+/**
+ * What a runner declares it can do, or null when it declares nothing.
+ *
+ * Null is the honest answer for the CLI adapters and the tests' scripted
+ * agents: they predate the capability declaration, and *absence of a
+ * declaration is not a declaration of absence*. Only an explicit
+ * `toolExecution: false` refuses a delegation.
+ */
+export function capabilitiesOfRunner(runner: AgentRunner): ProviderCapabilities | null {
+  return isAgentProvider(runner) ? runner.getCapabilities() : null;
+}
+
+/** The ledger, as the interface renders it. Nulls stay nulls. */
+export function usageView(budget: BudgetLedger): {
+  invocations: number;
+  tokens: number | null;
+  costUsd: number | null;
+  unpriced: number;
+} {
+  const totals = budget.snapshot;
+  return {
+    invocations: totals.invocations,
+    tokens: totals.tokens > 0 ? totals.tokens : null,
+    costUsd: totals.costUsd > 0 ? totals.costUsd : null,
+    unpriced: totals.unpricedInvocations,
+  };
 }
 
 /** A cheap fingerprint of the working tree, to tell one attempt's outcome from the next. */

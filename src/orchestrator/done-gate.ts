@@ -114,3 +114,69 @@ export function formatDoneRejection(result: DoneGateResult): string {
     'or answer `blocked` with a reason if they cannot be fixed.',
   ].join('\n');
 }
+
+/* ------------------------------------------------------------------ *
+ * Conversation runs
+ * ------------------------------------------------------------------ */
+
+export interface ConversationDoneInput {
+  ledger: AcceptanceCriteriaLedger;
+  iterations: readonly IterationRecord[];
+  /** The orchestrator's final answer, as it will be shown to the person. */
+  answer: string;
+}
+
+/**
+ * The DONE gate for a run that never touches a workspace.
+ *
+ * The coding gate is not loosened for these runs - it is the *wrong* gate for
+ * them. Demanding a git diff from a run whose objective was "compare two
+ * approaches" would either block every such run or, worse, invite someone to
+ * relax the real gate until it let a coding run through on an assertion. So a
+ * conversation run gets its own, and this one refuses to invent evidence it
+ * does not have: it never reports a diff, never claims a test ran, and never
+ * says a file changed.
+ *
+ * What it does demand is real:
+ *
+ *  1. There is an answer, of substance, not an empty string.
+ *  2. Every criterion the orchestrator itself set is accounted for. A
+ *     criterion it declared and then left unaddressed blocks DONE here exactly
+ *     as it does in a coding run.
+ *  3. The last worker invocation actually completed. A run whose final
+ *     delegation timed out has not finished, however confident the summary is.
+ */
+export async function evaluateConversationDone(
+  input: ConversationDoneInput,
+): Promise<DoneGateResult> {
+  const failures: string[] = [];
+
+  const answer = input.answer.trim();
+  if (answer.length < MINIMUM_ANSWER_LENGTH) {
+    failures.push(
+      'The run proposed `done` without a final answer. Provide the answer the person asked ' +
+        'for, in the `summary` of your `done` decision.',
+    );
+  }
+
+  for (const criterion of input.ledger.pending()) {
+    const state = criterion.status === 'failed' ? 'is recorded as failed' : 'was never addressed';
+    failures.push(`Acceptance criterion ${state}: "${criterion.text}"`);
+  }
+
+  const unresolved = findUnresolvedWorkerFailure(input.iterations);
+  if (unresolved) failures.push(unresolved);
+
+  return {
+    passed: failures.length === 0,
+    failures,
+    checkedAt: new Date().toISOString(),
+    // Deliberately empty, and it must stay empty: a conversation run ran no
+    // verification, and reporting one it did not run is the exact dishonesty
+    // this gate exists to prevent.
+    verification: [],
+  };
+}
+
+/** Short enough to allow a terse answer, long enough to reject "ok". */
+const MINIMUM_ANSWER_LENGTH = 20;

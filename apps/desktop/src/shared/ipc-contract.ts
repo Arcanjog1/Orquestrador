@@ -622,6 +622,26 @@ export interface RunProgressEvent {
    * here; the interface reads one thing either way.
    */
   readonly evidence?: RunEvidenceView;
+  /** Which team member this step is about, so the timeline can name them. */
+  readonly workerId?: string;
+  readonly workerLabel?: string;
+  /** What this run has consumed so far, when anything reported it. */
+  readonly usage?: RunUsageView;
+}
+
+/**
+ * A run's consumption, as the timeline and the history show it.
+ *
+ * Every field may be null, and null is rendered as "não informado" rather than
+ * as zero: a run whose providers report nothing must not look free.
+ */
+export interface RunUsageView {
+  readonly invocations: number;
+  readonly tokens: number | null;
+  /** Estimated US dollars for metered calls only. Plan calls contribute none. */
+  readonly costUsd: number | null;
+  /** Metered calls whose price this build does not know. */
+  readonly unpriced: number;
 }
 
 /** The shape of one evidence collection, as the timeline shows it. */
@@ -856,6 +876,18 @@ export interface EventMap {
   'runtime:progress': RuntimeProgressEvent;
   'account:progress': AccountProgressEvent;
   'run:progress': RunProgressEvent;
+  /** A connection was added, renamed, enabled, or had its credential changed. */
+  'connections:changed': ConnectionsChangedEvent;
+}
+
+/**
+ * Something about a connection changed.
+ *
+ * Deliberately carries only an id: the renderer re-reads the list through IPC,
+ * so no credential, hint or state can travel on an event by accident.
+ */
+export interface ConnectionsChangedEvent {
+  readonly connectionId: string;
 }
 
 /** Every response crosses the bridge wrapped, so a rejection is data. */

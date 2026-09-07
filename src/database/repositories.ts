@@ -71,6 +71,17 @@ export interface AccountRecord extends SqlRow {
   last_checked_at: string | null;
   last_connected_at: string | null;
   created_at: string;
+  /** `cli` (the vendor's official tool) or `api` (the person's own key). */
+  connection_kind: string;
+  /** A key *into* the encrypted store. Never a credential. */
+  secret_ref: string | null;
+  /** The last characters of the key, so it can be recognised, never read. */
+  key_hint: string | null;
+  base_url: string | null;
+  default_model: string | null;
+  default_reasoning: string | null;
+  /** 0 until the person deliberately switches a metered connection on. */
+  api_enabled: number;
 }
 
 export class AccountRepository extends Repository {
@@ -79,10 +90,22 @@ export class AccountRepository extends Repository {
     providerId: string;
     displayName: string;
     profileDirectory: string;
+    /** Omitted means `cli`: the vendor's official tool, as before. */
+    connectionKind?: 'cli' | 'api';
+    baseUrl?: string | null;
   }): AccountRecord {
     this.db.run(
-      'INSERT INTO accounts (id, provider_id, display_name, profile_directory, auth_state, created_at) VALUES (?,?,?,?,?,?)',
-      [input.id, input.providerId, input.displayName, input.profileDirectory, 'disconnected', now()],
+      'INSERT INTO accounts (id, provider_id, display_name, profile_directory, auth_state, created_at, connection_kind, base_url) VALUES (?,?,?,?,?,?,?,?)',
+      [
+        input.id,
+        input.providerId,
+        input.displayName,
+        input.profileDirectory,
+        'disconnected',
+        now(),
+        input.connectionKind ?? 'cli',
+        input.baseUrl ?? null,
+      ],
     );
     return this.require(input.id);
   }
@@ -109,8 +132,82 @@ export class AccountRepository extends Repository {
     );
   }
 
+  rename(id: string, displayName: string): void {
+    this.db.run('UPDATE accounts SET display_name = ? WHERE id = ?', [displayName, id]);
+  }
+
+  /** The model and level this connection prefers when a team does not say. */
+  setPreferences(id: string, model: string | null, reasoning: string | null): void {
+    this.db.run('UPDATE accounts SET default_model = ?, default_reasoning = ? WHERE id = ?', [
+      model,
+      reasoning,
+      id,
+    ]);
+  }
+
+  /**
+   * Turns a metered connection on or off.
+   *
+   * Off is the state a connection is born in, and the only thing that turns it
+   * on is a person choosing to. Nothing is ever sent to a paid API by a
+   * connection whose `api_enabled` is 0.
+   */
+  setApiEnabled(id: string, enabled: boolean): void {
+    this.db.run('UPDATE accounts SET api_enabled = ? WHERE id = ?', [enabled ? 1 : 0, id]);
+  }
+
+  /**
+   * Records that a credential was stored, with only enough of it to recognise.
+   *
+   * The ciphertext goes to `provider_secrets`; what lands here is a reference
+   * and four characters. After this call the full key is not readable from any
+   * screen, and it is not in this table at all.
+   */
+  setCredentialReference(id: string, secretRef: string | null, keyHint: string | null): void {
+    this.db.run('UPDATE accounts SET secret_ref = ?, key_hint = ? WHERE id = ?', [
+      secretRef,
+      keyHint,
+      id,
+    ]);
+  }
+
   remove(id: string): boolean {
     return this.db.run('DELETE FROM accounts WHERE id = ?', [id]).changes > 0;
+  }
+}
+
+/**
+ * Encrypted credentials, kept apart from the connection metadata.
+ *
+ * Listing connections must never need to touch a secret, which is why this is
+ * a separate table and a separate repository: the only code path that reads
+ * ciphertext is the one that is about to make a call with it.
+ */
+export class ProviderSecretRepository extends Repository {
+  put(accountId: string, ciphertext: string): void {
+    const timestamp = now();
+    this.db.run(
+      'INSERT INTO provider_secrets (account_id, ciphertext, created_at, updated_at) VALUES (?,?,?,?) ' +
+        'ON CONFLICT(account_id) DO UPDATE SET ciphertext = excluded.ciphertext, updated_at = excluded.updated_at',
+      [accountId, ciphertext, timestamp, timestamp],
+    );
+  }
+
+  get(accountId: string): string | null {
+    const row = this.db.get<{ ciphertext: string }>(
+      'SELECT ciphertext FROM provider_secrets WHERE account_id = ?',
+      [accountId],
+    );
+    return row?.ciphertext ?? null;
+  }
+
+  has(accountId: string): boolean {
+    return this.get(accountId) !== null;
+  }
+
+  /** Forgets the credential on this computer. The account itself stays. */
+  remove(accountId: string): boolean {
+    return this.db.run('DELETE FROM provider_secrets WHERE account_id = ?', [accountId]).changes > 0;
   }
 }
 
@@ -253,6 +350,19 @@ export interface TeamMemberInput {
   model?: string | null;
   reasoning?: string | null;
   selection?: string | null;
+  /** What the person calls this member. Null falls back to the agent's name. */
+  label?: string | null;
+}
+
+/** One team member as it comes back out, with its slot. */
+export interface TeamMemberRecord {
+  agentId: string;
+  role: string;
+  model: string | null;
+  reasoning: string | null;
+  selection: string | null;
+  slot: number;
+  label: string | null;
 }
 
 export class WorkspaceRepository extends Repository {
@@ -346,26 +456,43 @@ export class WorkspaceRepository extends Repository {
   setTeam(
     workspaceId: string,
     orchestrator: TeamMemberInput,
-    worker: TeamMemberInput,
+    /**
+     * The workers, in order. A single member keeps the two-argument shape every
+     * existing caller uses; several are stored in slots, and slot 0 remains
+     * `worker_agent_id`, so nothing that reads one worker has to change.
+     */
+    workers: TeamMemberInput | readonly TeamMemberInput[],
   ): WorkspaceWithAgents {
+    const list = Array.isArray(workers) ? workers : [workers as TeamMemberInput];
     this.db.transaction(() => {
       this.db.run('DELETE FROM workspace_agents WHERE workspace_id = ?', [workspaceId]);
-      for (const [role, member] of [
-        ['ORCHESTRATOR', orchestrator],
-        ['CODING_WORKER', worker],
-      ] as const) {
+      this.db.run(
+        'INSERT INTO workspace_agents (workspace_id, agent_id, role, model, reasoning, selection, slot, label) VALUES (?,?,?,?,?,?,0,?)',
+        [
+          workspaceId,
+          orchestrator.agentId,
+          'ORCHESTRATOR',
+          blankToNull(orchestrator.model),
+          blankToNull(orchestrator.reasoning),
+          blankToNull(orchestrator.selection),
+          blankToNull(orchestrator.label),
+        ],
+      );
+      list.forEach((member, slot) => {
         this.db.run(
-          'INSERT INTO workspace_agents (workspace_id, agent_id, role, model, reasoning, selection) VALUES (?,?,?,?,?,?)',
+          'INSERT INTO workspace_agents (workspace_id, agent_id, role, model, reasoning, selection, slot, label) VALUES (?,?,?,?,?,?,?,?)',
           [
             workspaceId,
             member.agentId,
-            role,
+            'CODING_WORKER',
             blankToNull(member.model),
             blankToNull(member.reasoning),
             blankToNull(member.selection),
+            slot,
+            blankToNull(member.label),
           ],
         );
-      }
+      });
       this.touch(workspaceId);
     });
     return this.require(workspaceId);
@@ -373,6 +500,39 @@ export class WorkspaceRepository extends Repository {
 
   touch(workspaceId: string): void {
     this.db.run('UPDATE workspaces SET updated_at = ? WHERE id = ?', [now(), workspaceId]);
+  }
+
+  /**
+   * The team, in slot order.
+   *
+   * A separate read rather than a field on the workspace row, because a row is
+   * flat by construction and a team is a list. `worker_agent_id` on the row
+   * remains slot 0, so a caller that wants one worker still gets one.
+   */
+  team(workspaceId: string): TeamMemberRecord[] {
+    return this.db
+      .all<{
+        agent_id: string;
+        role: string;
+        model: string | null;
+        reasoning: string | null;
+        selection: string | null;
+        slot: number | null;
+        label: string | null;
+      }>(
+        'SELECT agent_id, role, model, reasoning, selection, slot, label FROM workspace_agents ' +
+          'WHERE workspace_id = ? ORDER BY role, slot',
+        [workspaceId],
+      )
+      .map((row) => ({
+        agentId: row.agent_id,
+        role: row.role,
+        model: row.model,
+        reasoning: row.reasoning,
+        selection: row.selection,
+        slot: row.slot ?? 0,
+        label: row.label,
+      }));
   }
 
   rename(workspaceId: string, name: string): WorkspaceWithAgents {
@@ -401,11 +561,19 @@ export class WorkspaceRepository extends Repository {
       model: string | null;
       reasoning: string | null;
       selection: string | null;
-    }>('SELECT agent_id, role, model, reasoning, selection FROM workspace_agents WHERE workspace_id = ?', [
-      row.id,
-    ]);
+      slot: number | null;
+      label: string | null;
+    }>(
+      'SELECT agent_id, role, model, reasoning, selection, slot, label FROM workspace_agents WHERE workspace_id = ?',
+      [row.id],
+    );
     const orchestrator = bindings.find((b) => b.role === 'ORCHESTRATOR');
-    const worker = bindings.find((b) => b.role === 'CODING_WORKER');
+    const workers = bindings
+      .filter((b) => b.role === 'CODING_WORKER')
+      .sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0));
+    // Slot 0 stays `worker_agent_id`: everything written before teams could
+    // grow reads one worker, and for a team of one this is the same worker.
+    const worker = workers[0];
     return {
       ...row,
       orchestrator_agent_id: orchestrator?.agent_id ?? null,
@@ -678,7 +846,22 @@ export class ChatRepository extends Repository {
  * Runs
  * ------------------------------------------------------------------ */
 
-export type RunStatus = 'PENDING' | 'RUNNING' | 'DONE' | 'FAILED' | 'CANCELLED' | 'BLOCKED';
+export type RunStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'DONE'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'BLOCKED'
+  /**
+   * Stopped and waiting for a person, with nothing wrong.
+   *
+   * A budget the person set was reached, a subscription hit its limit, or a
+   * credential needs attention. It is deliberately not FAILED: nothing broke,
+   * and the difference decides what the interface offers next - "raise the
+   * limit and continue" rather than "something went wrong".
+   */
+  | 'NEEDS_HUMAN';
 
 export interface RunRecord extends SqlRow {
   id: string;
@@ -702,6 +885,11 @@ export interface RunRecord extends SqlRow {
   remote_run_id: string | null;
   /** The last event sequence this desktop applied. Null before the first sync. */
   remote_cursor: number | null;
+  /** `coding` (needs evidence to finish) or `conversation` (needs an answer). */
+  kind: string;
+  invocation_count: number;
+  total_tokens: number | null;
+  total_cost_usd: number | null;
 }
 
 export interface RunStepRecord extends SqlRow {
@@ -725,9 +913,11 @@ export class RunRepository extends Repository {
     orchestratorAgentId: string | null;
     maxIterations: number;
     artifactsPath?: string | null;
+    /** Omitted means `coding`, which is what every run was before run kinds. */
+    kind?: 'coding' | 'conversation';
   }): RunRecord {
     this.db.run(
-      'INSERT INTO runs (id, session_id, workspace_id, objective, status, orchestrator_agent_id, iteration, max_iterations, artifacts_path, started_at) VALUES (?,?,?,?,?,?,0,?,?,?)',
+      'INSERT INTO runs (id, session_id, workspace_id, objective, status, orchestrator_agent_id, iteration, max_iterations, artifacts_path, started_at, kind) VALUES (?,?,?,?,?,?,0,?,?,?,?)',
       [
         input.id,
         input.sessionId,
@@ -738,6 +928,7 @@ export class RunRepository extends Repository {
         input.maxIterations,
         input.artifactsPath ?? null,
         now(),
+        input.kind ?? 'coding',
       ],
     );
     return this.require(input.id);
@@ -878,11 +1069,26 @@ export class RunRepository extends Repository {
       selectionReason: string;
       fallbackUsed: boolean;
     } | null;
+    /** Which vendor, reached how, and as which team member. */
+    providerId?: string | null;
+    connectionKind?: string | null;
+    workerId?: string | null;
+    /** Tokens and estimated cost. Every field null when nothing reported them. */
+    usage?: {
+      billing: string;
+      inputTokens: number | null;
+      outputTokens: number | null;
+      totalTokens: number | null;
+      costUsd: number | null;
+    } | null;
+    /** The classified provider failure, when there was one. */
+    failureKind?: string | null;
   }): string {
     const id = newId('inv');
     const routing = input.routing ?? null;
+    const usage = input.usage ?? null;
     this.db.run(
-      'INSERT INTO agent_invocations (id, run_id, iteration, agent_id, account_id, role, task, outcome, exit_code, duration_ms, started_at, finished_at, requested_capability, requested_reasoning, resolved_model, resolved_reasoning, selection_mode, selection_reason, fallback_used) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO agent_invocations (id, run_id, iteration, agent_id, account_id, role, task, outcome, exit_code, duration_ms, started_at, finished_at, requested_capability, requested_reasoning, resolved_model, resolved_reasoning, selection_mode, selection_reason, fallback_used, provider_id, connection_kind, worker_id, billing, input_tokens, output_tokens, total_tokens, cost_usd, failure_kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [
         id,
         input.runId,
@@ -903,9 +1109,49 @@ export class RunRepository extends Repository {
         routing?.selectionMode ?? null,
         routing ? routing.selectionReason.slice(0, 1000) : null,
         routing ? (routing.fallbackUsed ? 1 : 0) : null,
+        input.providerId ?? null,
+        input.connectionKind ?? null,
+        input.workerId ?? null,
+        usage?.billing ?? null,
+        usage?.inputTokens ?? null,
+        usage?.outputTokens ?? null,
+        usage?.totalTokens ?? null,
+        usage?.costUsd ?? null,
+        input.failureKind ?? null,
       ] as SqlValue[],
     );
+    this.addConsumption(input.runId, usage);
     return id;
+  }
+
+  /**
+   * Adds one invocation's consumption to the run's running totals.
+   *
+   * Counted on every invocation, including a failed one: a call that was
+   * refused after the tokens were read still cost something, and a run that
+   * ended badly must not look cheaper than one that ended well.
+   *
+   * `NULL + n` is NULL in SQL, which is exactly right here: a run whose
+   * providers reported nothing keeps NULL totals and is rendered as "não
+   * informado", never as zero.
+   */
+  private addConsumption(
+    runId: string,
+    usage: { totalTokens: number | null; costUsd: number | null } | null,
+  ): void {
+    this.db.run(
+      'UPDATE runs SET invocation_count = invocation_count + 1, ' +
+        'total_tokens = CASE WHEN ? IS NULL THEN total_tokens ELSE COALESCE(total_tokens, 0) + ? END, ' +
+        'total_cost_usd = CASE WHEN ? IS NULL THEN total_cost_usd ELSE COALESCE(total_cost_usd, 0) + ? END ' +
+        'WHERE id = ?',
+      [
+        usage?.totalTokens ?? null,
+        usage?.totalTokens ?? null,
+        usage?.costUsd ?? null,
+        usage?.costUsd ?? null,
+        runId,
+      ] as SqlValue[],
+    );
   }
 
   invocations(runId: string): SqlRow[] {

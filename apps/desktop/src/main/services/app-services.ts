@@ -18,8 +18,15 @@ import {
   appPaths,
   isUsable,
 } from '../core.js';
-import type { AppPaths, WorkspaceWithAgents } from '../core.js';
+import type {
+  AgentProvider,
+  AppPaths,
+  BudgetLimits,
+  TeamMemberRecord,
+  WorkspaceWithAgents,
+} from '../core.js';
 import { isWorkerSelection } from '../core.js';
+import type { HttpTransport } from '../core.js';
 import { EventBus } from '../events.js';
 import { AccountService, type UrlOpener } from './account-service.js';
 import { AgentService, workerAgentIdFor } from './agent-service.js';
@@ -27,10 +34,13 @@ import { ChatService } from './chat-service.js';
 import { ProjectService } from './project-service.js';
 import {
   OrchestrationService,
+  isConversation,
   type OrchestrationOptions,
   type RunnerFactory,
   type RunnerPair,
+  type WorkerSlot,
 } from './orchestration-service.js';
+import { ConnectionService } from './connection-service.js';
 import { RuntimeService } from './runtime-service.js';
 import { VerificationService } from './verification-service.js';
 import { WorkspaceService, orchestratorSelectionOf } from './workspace-service.js';
@@ -55,7 +65,34 @@ export interface AppServicesOptions {
   secrets?: SecretStore;
   /** Endpoints and transport for GitHub; tests point them at a local fake. */
   github?: GitHubClientOptions;
+  /** HTTP for the provider APIs; tests point it at a scripted transport. */
+  providerTransport?: HttpTransport;
 }
+
+/**
+ * What the orchestrator is, when it runs through an API rather than a CLI.
+ *
+ * The Codex CLI carries its own supervising posture; a bare model API does
+ * not, so it is told here. The decision contract itself still comes from the
+ * prompt the loop builds, which is the same prompt either way.
+ */
+const ORCHESTRATOR_INSTRUCTIONS =
+  'You are the orchestrator of an agent team. You supervise and decide; the workers do the ' +
+  'work. You never edit files yourself, and you never claim work was done that you did not ' +
+  'see evidence for. Answer with a single JSON object and nothing else.';
+
+/**
+ * What a worker reached through a model API is, and what it must not pretend.
+ *
+ * Said plainly because it is the failure this product refuses to have: a model
+ * that narrates an edit it could not make, whose narration is then mistaken
+ * for the edit.
+ */
+const WORKER_INSTRUCTIONS =
+  'You are a worker on an agent team. You have no file access and no shell: you can analyse, ' +
+  'plan, review, compare and draft. Never state that you edited a file, ran a command or ' +
+  'changed a repository - you cannot, and saying so would be taken as false evidence. If the ' +
+  'task requires changing files, say so plainly and stop.';
 
 /** The settings keys the loop reads. The Execution screen writes the same ones. */
 export const SETTING = {
@@ -94,6 +131,8 @@ export class AppServices {
   readonly chat: ChatService;
   readonly projects: ProjectService;
   readonly github: GitHubService;
+  /** Provider connections: the vendors' official CLIs and the person's API keys. */
+  readonly connections: ConnectionService;
   /** This computer's connection to a Run Coordinator. */
   readonly cloudAccount: CloudAccountService;
   /** Cloud runs: submitting them, and catching up with them. */
@@ -119,6 +158,12 @@ export class AppServices {
     });
 
     this.runtimes = new RuntimeService(this.runtimeManager, this.events, this.database);
+    this.connections = new ConnectionService({
+      database: this.database,
+      secrets: options.secrets ?? NO_SECRET_STORE,
+      events: this.events,
+      ...(options.providerTransport ? { transport: options.providerTransport } : {}),
+    });
     this.accounts = new AccountService(
       this.database,
       { anthropic: this.accountManager, openai: this.codexAccountManager },
@@ -209,10 +254,18 @@ export class AppServices {
    * silent minutes.
    */
   private async checkAgentsReady(workspace: WorkspaceWithAgents): Promise<string | null> {
-    for (const [agentId, what, provider] of [
+    const team = this.database.workspaces.team(workspace.id);
+    const workers = team.filter((member) => member.role === 'CODING_WORKER');
+    const roles: Array<readonly [string | null, string, string]> = [
       [workspace.orchestrator_agent_id, 'que supervisiona', 'OpenAI (Codex)'],
-      [workspace.worker_agent_id, 'que executa', 'Anthropic (Claude)'],
-    ] as const) {
+      ...(workers.length > 0
+        ? workers.map(
+            (member) => [member.agentId, 'que executa', 'Anthropic (Claude)'] as const,
+          )
+        : [[workspace.worker_agent_id, 'que executa', 'Anthropic (Claude)'] as const]),
+    ];
+
+    for (const [agentId, what, provider] of roles) {
       if (!agentId) return `Escolha a conta ${what} este projeto em Equipe.`;
       const agent = this.database.agents.find(agentId);
       if (!agent) return `O agente ${what} este projeto não existe mais. Escolha a conta em Equipe.`;
@@ -223,6 +276,22 @@ export class AppServices {
       const record = agent.account_id ? this.database.accounts.find(agent.account_id) : undefined;
       if (!record) {
         return `Escolha a conta ${provider} ${what} este projeto em Equipe.`;
+      }
+
+      // An API connection has no CLI to install and no CLI login to check.
+      // Asking a person to install a runtime they will never run would be the
+      // very obstacle the API path exists to remove.
+      if (record.connection_kind === 'api') {
+        if (record.api_enabled !== 1) {
+          return (
+            `A conexão "${record.display_name}" usa uma API com cobrança separada e ainda não ` +
+            'foi habilitada. Habilite-a em Contas e integrações antes de enviar.'
+          );
+        }
+        if (!this.database.providerSecrets.has(record.id)) {
+          return `A conexão "${record.display_name}" ainda não tem uma chave de API salva.`;
+        }
+        continue;
       }
 
       const runtimeId = agent.adapter_id === 'codex-cli' ? 'codex' : 'claude-code';
@@ -255,10 +324,20 @@ export class AppServices {
   }
 
   /**
-   * The production agent pair: Codex supervises, Claude Code executes with the
-   * account the workspace's worker agent is bound to.
+   * The production team.
+   *
+   * One place decides, per role, whether a member runs through the vendor's
+   * official CLI on the person's subscription or through the vendor's API on
+   * the person's key. The loop below is the same loop either way: it is handed
+   * runners, and a runner is a runner.
+   *
+   * The CLI path stays the default and the preferred one, because it is the
+   * one that costs nothing beyond the subscription the person already pays.
    */
   private async buildRunners(workspace: WorkspaceWithAgents): Promise<RunnerPair> {
+    const team = this.database.workspaces.team(workspace.id);
+    const workerBindings = team.filter((member) => member.role === 'CODING_WORKER');
+
     const workerAgent = workspace.worker_agent_id
       ? this.database.agents.require(workspace.worker_agent_id)
       : null;
@@ -268,6 +347,16 @@ export class AppServices {
       ? this.database.agents.require(workspace.orchestrator_agent_id)
       : null;
     const orchestratorAccountId = orchestratorAgent?.account_id ?? null;
+
+    // An orchestrator bound to an API connection speaks the same decision
+    // contract as the Codex CLI: same schema, same parser, same DONE gate.
+    const orchestratorApi = this.apiProviderFor(orchestratorAccountId, ORCHESTRATOR_INSTRUCTIONS);
+    if (orchestratorApi) {
+      return {
+        orchestrator: orchestratorApi,
+        ...(await this.buildWorkers(workspace, workerBindings, accountId)),
+      };
+    }
 
     const orchestrator = new CodexAdapter({
       processManager: this.processManager,
@@ -307,11 +396,9 @@ export class AppServices {
       model: selection === 'manual' ? workspace.worker_model : null,
       effort: selection === 'manual' ? workspace.worker_reasoning : null,
     });
-    return {
-      orchestrator,
-      worker,
-      workerAccountId: accountId,
-      workerRouting: {
+    const workers = await this.buildWorkers(workspace, workerBindings, accountId, {
+      runner: worker,
+      routing: {
         provider: 'anthropic',
         selection,
         manual: { model: workspace.worker_model, reasoning: workspace.worker_reasoning },
@@ -319,6 +406,137 @@ export class AppServices {
         // a changed account or an updated Claude Code is read again.
         capabilities: () => worker.describeCapabilities(workspace.local_path),
       },
+    });
+    return { orchestrator, ...workers };
+  }
+
+  /**
+   * The workers, in the order the team lists them.
+   *
+   * Each binding becomes one slot with a stable id the orchestrator addresses
+   * it by. Two bindings on the same Anthropic provider with different
+   * connections are two slots and two credentials - not two adapters, and with
+   * nothing shared between them.
+   */
+  private async buildWorkers(
+    workspace: WorkspaceWithAgents,
+    bindings: readonly TeamMemberRecord[],
+    firstAccountId: string | null,
+    cli?: { runner: ClaudeCodeAdapter; routing: RunnerPair['workerRouting'] },
+  ): Promise<Omit<RunnerPair, 'orchestrator'>> {
+    const slots: WorkerSlot[] = [];
+    for (const [index, binding] of bindings.entries()) {
+      const agent = this.database.agents.find(binding.agentId);
+      const connectionId = agent?.account_id ?? null;
+      const account = connectionId ? this.database.accounts.find(connectionId) : undefined;
+      const label = binding.label ?? agent?.display_name ?? `Worker ${index + 1}`;
+      const id = `worker-${index + 1}`;
+
+      const api = this.apiProviderFor(connectionId, WORKER_INSTRUCTIONS);
+      if (api) {
+        slots.push({
+          id,
+          label,
+          runner: api,
+          accountId: connectionId,
+          providerId: account?.provider_id ?? null,
+          connectionKind: 'api',
+          agentId: binding.agentId,
+        });
+        continue;
+      }
+      // Not an API connection: the official CLI, on the person's subscription.
+      // The first slot reuses the adapter already built above, so a
+      // single-worker project behaves exactly as it always has.
+      if (index === 0 && cli) {
+        slots.push({
+          id,
+          label,
+          runner: cli.runner,
+          accountId: firstAccountId,
+          providerId: account?.provider_id ?? 'anthropic',
+          connectionKind: 'cli',
+          agentId: binding.agentId,
+          ...(cli.routing ? { routing: cli.routing } : {}),
+        });
+        continue;
+      }
+      const adapter = this.claudeAdapterFor(workspace, connectionId, binding);
+      slots.push({
+        id,
+        label,
+        runner: adapter,
+        accountId: connectionId,
+        providerId: account?.provider_id ?? 'anthropic',
+        connectionKind: 'cli',
+        agentId: binding.agentId,
+        routing: {
+          provider: 'anthropic',
+          selection: isWorkerSelection(binding.selection) ? binding.selection : 'auto',
+          manual: { model: binding.model, reasoning: binding.reasoning },
+          capabilities: () => adapter.describeCapabilities(workspace.local_path || process.cwd()),
+        },
+      });
+    }
+
+    const first = slots[0];
+    return {
+      // `worker` remains the first slot: every caller and test that reads one
+      // worker keeps reading the same one.
+      worker: first?.runner ?? cli?.runner ?? this.claudeAdapterFor(workspace, firstAccountId, null),
+      workerAccountId: first?.accountId ?? firstAccountId,
+      ...(first?.routing ? { workerRouting: first.routing } : {}),
+      workers: slots,
+      budget: this.budgetOf(workspace),
+    };
+  }
+
+  /** One Claude Code adapter, bound to one connection's isolated profile. */
+  private claudeAdapterFor(
+    workspace: WorkspaceWithAgents,
+    connectionId: string | null,
+    binding: TeamMemberRecord | null,
+  ): ClaudeCodeAdapter {
+    const selection = isWorkerSelection(binding?.selection) ? binding!.selection : 'auto';
+    return new ClaudeCodeAdapter({
+      processManager: this.processManager,
+      resolveExecutable: () => this.runtimeManager.getExecutablePath('claude-code'),
+      buildEnvironment: () => ({
+        ...this.runtimeManager.childEnvironmentOverlay('claude-code'),
+        ...(connectionId ? this.accountManager.buildEnvironment(connectionId) : {}),
+      }),
+      model: selection === 'manual' ? (binding?.model ?? workspace.worker_model) : null,
+      effort: selection === 'manual' ? (binding?.reasoning ?? workspace.worker_reasoning) : null,
+    });
+  }
+
+  /**
+   * The API provider for a connection, or null when it is not one.
+   *
+   * Null covers three cases that must all fall back to the CLI path: there is
+   * no connection, the connection is a CLI one, or it is an API connection the
+   * person has not enabled. The last is the important one - a saved key that
+   * was never switched on must not start costing money.
+   */
+  private apiProviderFor(connectionId: string | null, instructions: string): AgentProvider | null {
+    if (!connectionId) return null;
+    const account = this.database.accounts.find(connectionId);
+    if (!account || account.connection_kind !== 'api' || account.api_enabled !== 1) return null;
+    try {
+      return this.connections.providerFor(connectionId, { system: instructions });
+    } catch {
+      // A connection that cannot be built is not a reason to fail the run
+      // here: the readiness check reports it in words the person can act on.
+      return null;
+    }
+  }
+
+  /** This project's spending limits. Absent columns mean no limit. */
+  private budgetOf(workspace: WorkspaceWithAgents): BudgetLimits {
+    return {
+      maxInvocations: numberOrNull(workspace.budget_max_invocations),
+      maxTokens: numberOrNull(workspace.budget_max_tokens),
+      maxCostUsd: numberOrNull(workspace.budget_max_cost_usd),
     };
   }
 
@@ -331,3 +549,9 @@ export class AppServices {
 }
 
 export { workerAgentIdFor };
+
+/** A stored limit, or null when the column is empty or nonsensical. */
+function numberOrNull(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}

@@ -69,6 +69,17 @@ export function parseDecision(raw: string): ParseResult {
   if (files.error) return fail(files.error, raw);
   if (files.value.length) decision.relevantFiles = files.value;
 
+  const satisfied = readStringArray(obj.satisfiedCriteria, 'satisfiedCriteria');
+  if (satisfied.error) return fail(satisfied.error, raw);
+  if (satisfied.value.length) decision.satisfiedCriteria = satisfied.value;
+
+  // Which worker, by the id the team gave it. Validated against the real team
+  // by the caller, which is the only place that knows what the team is.
+  if (typeof obj.workerId === 'string' && obj.workerId.trim()) {
+    decision.workerId = obj.workerId.trim();
+  }
+  if (typeof obj.requiresTools === 'boolean') decision.requiresTools = obj.requiresTools;
+
   // Under the strict schema every field is present, and an absent value is
   // `null`; the parser reads null exactly as it reads a missing key.
   if (obj.summary !== undefined && obj.summary !== null) {
