@@ -77,7 +77,9 @@ export interface ProviderAccountManager {
 }
 
 export { ProcessManager } from '../../../../src/process/process-manager.js';
-export type { ProcessResult } from '../../../../src/process/process-manager.js';
+export type { ProcessRunner, ExecutionEnvironment } from '../../../../src/execution/process-runner.js';
+export { localEnvironment } from '../../../../src/execution/process-runner.js';
+export type { ProcessResult, RunProcessOptions } from '../../../../src/process/process-manager.js';
 
 export { GitEvidenceCollector, parseStatusShort } from '../../../../src/git/git-evidence-collector.js';
 export { redact } from '../../../../src/security/secret-redactor.js';

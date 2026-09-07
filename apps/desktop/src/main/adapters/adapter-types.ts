@@ -4,5 +4,6 @@ export type {
   AgentResult,
   AgentRunner,
   ProcessManager,
+  ProcessRunner,
 } from '../core.js';
 export type { HealthStatus as HealthStatusCore } from '../../../../../src/core/types.js';

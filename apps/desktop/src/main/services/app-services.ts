@@ -172,6 +172,9 @@ export class AppServices {
       // Evidence is collected with the managed Git when there is one.
       gitCommand: () => this.runtimeManager.getExecutablePath('git'),
       ...(explicit.allowNoChanges !== undefined ? { allowNoChanges: explicit.allowNoChanges } : {}),
+      // Where runs execute. Absent means this computer, which is the default
+      // for every workspace that has a folder on it.
+      ...(explicit.environments ? { environments: explicit.environments } : {}),
       get maxIterations() {
         return explicit.maxIterations ?? setting(SETTING.maxIterations, 1, 50);
       },

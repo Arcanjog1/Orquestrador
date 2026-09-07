@@ -9,6 +9,7 @@
 import { accessSync, constants, statSync } from 'node:fs';
 import { delimiter, extname, isAbsolute, join, resolve } from 'node:path';
 import { ProcessManager } from '../process/process-manager.js';
+import type { ProcessRunner } from '../execution/process-runner.js';
 
 export interface ToolCheck {
   /** Label shown to the user, e.g. "Claude Code CLI". */
@@ -191,7 +192,7 @@ async function checkTool(pm: ProcessManager, opts: CheckToolOptions): Promise<To
  */
 export async function resolveExecutable(
   command: string,
-  pm: ProcessManager = new ProcessManager(),
+  pm: ProcessRunner = new ProcessManager(),
 ): Promise<string | null> {
   // An explicit path is used as-is.
   if (command.includes('/') || command.includes('\\') || isAbsolute(command)) {

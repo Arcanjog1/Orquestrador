@@ -26,10 +26,11 @@ import type {
   CommandResult,
   Database,
   Decision,
+  ExecutionEnvironment,
   GitEvidence,
   IterationRecord,
   PreviousAttempt,
-  ProcessManager,
+  ProcessRunner,
   RouterOutput,
   RoutingProvider,
   RoutingRecord,
@@ -49,6 +50,7 @@ import {
   newId,
   parseDecision,
   redact,
+  localEnvironment,
   routeWorkerModel,
 } from '../core.js';
 import type { ChatMessageView, RunDetailView, RunView } from '../../shared/ipc-contract.js';
@@ -101,9 +103,37 @@ export interface OrchestrationOptions {
    * evidence; when it cannot be resolved, `git` from PATH is tried.
    */
   gitCommand?: () => Promise<string>;
+  /**
+   * Where a run executes. Omitted means the user's own machine, which is what
+   * every existing caller wants and what every existing test asserts.
+   */
+  environments?: EnvironmentFactory;
 }
 
-export type RunnerFactory = (workspace: WorkspaceWithAgents) => Promise<RunnerPair>;
+/**
+ * Builds the agent pair for one run, in the environment that run executes in.
+ *
+ * The environment is handed in rather than assumed: a remote run's Codex and
+ * Claude Code live inside the workspace, not on this computer, so the runners
+ * must be built against that runner and that path.
+ */
+export type RunnerFactory = (
+  workspace: WorkspaceWithAgents,
+  environment: ExecutionEnvironment,
+) => Promise<RunnerPair>;
+
+/**
+ * Resolves where a run executes.
+ *
+ * The default is the user's own machine and the folder the workspace points
+ * at - the behaviour this product has always had. A cloud workspace resolves
+ * instead to a provisioned, isolated environment whose runner reaches into it.
+ * Either way the loop below is the same loop.
+ */
+export type EnvironmentFactory = (
+  workspace: WorkspaceWithAgents,
+  signal: AbortSignal,
+) => Promise<ExecutionEnvironment>;
 
 /**
  * Checks a workspace can actually run before a run is started.
@@ -126,15 +156,33 @@ export class OrchestrationService {
   private readonly active = new Map<string, AbortController>();
   /** Runners of in-flight runs, so cancelling can reach the child processes. */
   private readonly runners = new Map<string, RunnerPair>();
+  /** Environments of in-flight runs, so each is released exactly once. */
+  private readonly environments = new Map<string, ExecutionEnvironment>();
 
   constructor(
     private readonly database: Database,
-    private readonly processManager: ProcessManager,
+    private readonly processManager: ProcessRunner,
     private readonly events: EventBus,
     private readonly createRunners: RunnerFactory,
     private readonly options: OrchestrationOptions = {},
     private readonly checkReadiness: ReadinessCheck = async () => null,
   ) {}
+
+  /**
+   * Where a run executes, defaulting to this computer.
+   *
+   * Local is not a special case of remote nor the other way round: it is the
+   * factory that is absent, and the folder the workspace already points at
+   * with the ProcessManager this service was built with is exactly what the
+   * loop used before this boundary existed.
+   */
+  private async resolveEnvironment(
+    workspace: WorkspaceWithAgents,
+    signal: AbortSignal,
+  ): Promise<ExecutionEnvironment> {
+    if (this.options.environments) return this.options.environments(workspace, signal);
+    return localEnvironment(workspace.id, workspace.local_path, this.processManager);
+  }
 
   /** True while a run is still cancellable. */
   isActive(runId: string): boolean {
@@ -180,6 +228,11 @@ export class OrchestrationService {
       void pair.orchestrator.cancel();
       void pair.worker.cancel();
     }
+    // A verification or an evidence command may be the thing in flight, and
+    // in a remote environment neither agent runner can reach it. The
+    // environment can.
+    const environment = this.environments.get(runId);
+    if (environment && environment.kind !== 'local') void environment.processes.cancelAll();
     return true;
   }
 
@@ -219,6 +272,11 @@ export class OrchestrationService {
       .finally(() => {
         this.active.delete(run.id);
         this.runners.delete(run.id);
+        // Whatever the run cost - a container, a clone, a lease - is given
+        // back exactly once, on every path out of the loop.
+        const environment = this.environments.get(run.id);
+        this.environments.delete(run.id);
+        void environment?.release?.().catch(() => {});
       });
 
     return toRunView(this.database.runs.require(run.id), []);
@@ -306,16 +364,23 @@ export class OrchestrationService {
       return;
     }
 
-    const runners = await this.createRunners(workspace);
+    // Where this run executes. Everything below - evidence, verification, both
+    // agents - goes through this one environment, so the loop never mixes a
+    // remote workspace's path with a local runner or the other way round.
+    const environment = await this.resolveEnvironment(workspace, signal);
+    this.environments.set(runId, environment);
+    const cwd = environment.workingDirectory;
+
+    const runners = await this.createRunners(workspace, environment);
     this.runners.set(runId, runners);
     const gitCommand = await this.options.gitCommand?.().catch(() => undefined);
     const collector = gitCommand
-      ? new GitEvidenceCollector(workspace.local_path, this.processManager, gitCommand)
-      : new GitEvidenceCollector(workspace.local_path, this.processManager);
+      ? new GitEvidenceCollector(cwd, environment.processes, gitCommand)
+      : new GitEvidenceCollector(cwd, environment.processes);
     const verifier = new Verifier({
-      cwd: workspace.local_path,
+      cwd,
       timeoutMs: this.options.verificationTimeoutMs ?? DEFAULTS.verificationTimeoutMs,
-      processManager: this.processManager,
+      processManager: environment.processes,
       signal,
     });
 
@@ -360,6 +425,7 @@ export class OrchestrationService {
       this.progress(runId, sessionId, 'orchestrator', 'Codex preparando a tarefa...', 'RUNNING');
       const prompt = this.buildOrchestratorPrompt({
         workspace,
+        cwd,
         objective,
         baseline,
         iteration,
@@ -370,6 +436,7 @@ export class OrchestrationService {
       const asked = await this.askForDecision({
         runId,
         workspace,
+        cwd,
         runners,
         prompt,
         iteration,
@@ -417,6 +484,7 @@ export class OrchestrationService {
           runId,
           sessionId,
           workspace,
+          cwd,
           runners,
           iteration,
           task,
@@ -578,6 +646,8 @@ export class OrchestrationService {
   private async askForDecision(input: {
     runId: string;
     workspace: WorkspaceWithAgents;
+    /** The repository path **inside the environment this run executes in**. */
+    cwd: string;
     runners: RunnerPair;
     prompt: string;
     iteration: number;
@@ -585,7 +655,7 @@ export class OrchestrationService {
     /** Told what the adapter actually sent for model and level, once per attempt. */
     onApplied?: (applied: NonNullable<AgentResult['applied']>) => void;
   }): Promise<{ decision: Decision | null; failure?: string }> {
-    const { runId, workspace, runners, iteration, signal } = input;
+    const { runId, workspace, cwd, runners, iteration, signal } = input;
     let currentPrompt = input.prompt;
     let lastProblem = 'nenhuma resposta';
     let lastExcerpt = '';
@@ -593,7 +663,7 @@ export class OrchestrationService {
       const startedAt = new Date().toISOString();
       const result = await runners.orchestrator.run({
         prompt: currentPrompt,
-        workingDirectory: workspace.local_path,
+        workingDirectory: cwd,
         timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
         runId,
         iteration,
@@ -717,6 +787,7 @@ export class OrchestrationService {
 
   private buildOrchestratorPrompt(input: {
     workspace: WorkspaceWithAgents;
+    cwd: string;
     objective: string;
     baseline: Baseline;
     iteration: number;
@@ -730,7 +801,7 @@ export class OrchestrationService {
       'You supervise; a separate coding agent executes. You never edit files yourself.',
       '',
       `OBJECTIVE: ${input.objective}`,
-      `WORKSPACE: ${input.workspace.local_path}`,
+      `WORKSPACE: ${input.cwd}`,
       `ITERATION: ${input.iteration}`,
       '',
       'BASELINE:',
@@ -856,6 +927,8 @@ export class OrchestrationService {
     runId: string;
     sessionId: string;
     workspace: WorkspaceWithAgents;
+    /** The repository path **inside the environment this run executes in**. */
+    cwd: string;
     runners: RunnerPair;
     iteration: number;
     task: string;
@@ -866,7 +939,7 @@ export class OrchestrationService {
     unavailableModels: string[];
     signal: AbortSignal;
   }): Promise<NonNullable<IterationRecord['worker']>> {
-    const { runId, sessionId, workspace, runners, iteration, task } = input;
+    const { runId, sessionId, workspace, cwd, runners, iteration, task } = input;
     let last: NonNullable<IterationRecord['worker']> | null = null;
 
     for (let attempt = 0; attempt <= MODEL_RETRIES; attempt += 1) {
@@ -907,7 +980,7 @@ export class OrchestrationService {
       const startedAt = new Date().toISOString();
       const result = await runners.worker.run({
         prompt: task,
-        workingDirectory: workspace.local_path,
+        workingDirectory: cwd,
         timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
         runId,
         iteration,

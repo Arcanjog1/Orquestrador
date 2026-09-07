@@ -11,7 +11,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppServices } from '../../apps/desktop/src/main/services/app-services.js';
-import type { RunnerFactory } from '../../apps/desktop/src/main/services/orchestration-service.js';
+import type {
+  EnvironmentFactory,
+  RunnerFactory,
+} from '../../apps/desktop/src/main/services/orchestration-service.js';
 import { IpcRouter, type ShellBridge } from '../../apps/desktop/src/main/ipc-router.js';
 import type { AppPaths } from '../../src/runtime/paths.js';
 import type { GitHubClientOptions } from '../../src/github/github-client.js';
@@ -34,6 +37,8 @@ export interface DesktopFixture {
 
 export interface DesktopFixtureOptions {
   createRunners?: RunnerFactory;
+  /** Where runs execute. Omitted means this computer, as it always has. */
+  environments?: EnvironmentFactory;
   selectFolder?: () => Promise<string | null>;
   maxIterations?: number;
   allowNoChanges?: boolean;
@@ -83,6 +88,7 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
     orchestration: {
       ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {}),
       ...(options.allowNoChanges !== undefined ? { allowNoChanges: options.allowNoChanges } : {}),
+      ...(options.environments ? { environments: options.environments } : {}),
     },
     ...(options.github ? { github: options.github } : {}),
     ...(options.secrets ? { secrets: options.secrets } : {}),

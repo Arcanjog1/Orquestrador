@@ -12,6 +12,7 @@
 import type { Baseline, GitEvidence } from '../core/types.js';
 import { assertReadOnlyGitArgs } from './git-safety.js';
 import { ProcessManager } from '../process/process-manager.js';
+import type { ProcessRunner } from '../execution/process-runner.js';
 
 const GIT_TIMEOUT_MS = 120_000;
 
@@ -25,7 +26,7 @@ export interface GitCommandOutput {
 export class GitEvidenceCollector {
   constructor(
     private readonly projectPath: string,
-    private readonly processManager: ProcessManager = new ProcessManager(),
+    private readonly processManager: ProcessRunner = new ProcessManager(),
     private readonly gitCommand: string = process.platform === 'win32' ? 'git.exe' : 'git',
   ) {}
 

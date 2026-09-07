@@ -16,7 +16,7 @@
  * either. What was actually sent comes back on `AgentResult.applied`.
  */
 
-import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessManager } from './adapter-types.js';
+import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessRunner } from './adapter-types.js';
 import { makeAgentResult, resolveFixedEffort } from '../core.js';
 import type { WorkerRuntimeCapabilities } from '../core.js';
 import {
@@ -30,7 +30,7 @@ import {
 } from './cli-capabilities.js';
 
 export interface ClaudeAdapterOptions {
-  processManager: ProcessManager;
+  processManager: ProcessRunner;
   resolveExecutable: () => Promise<string>;
   /** Environment for the chosen account, from `ClaudeAccountManager`. */
   buildEnvironment: () => Record<string, string | undefined>;

@@ -12,7 +12,7 @@
  * worse, silently means something else.
  */
 
-import type { ProcessManager, ProcessResult } from '../core.js';
+import type { ProcessResult, ProcessRunner } from '../core.js';
 
 /**
  * Why a help page could not be read, or that it was.
@@ -153,7 +153,7 @@ export function classifyProbe(
 }
 
 export async function readCapabilities(
-  processManager: ProcessManager,
+  processManager: ProcessRunner,
   executable: string,
   cwd: string,
   args: readonly string[] = ['--help'],

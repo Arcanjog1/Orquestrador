@@ -14,12 +14,13 @@
 import type { CommandResult } from '../core/types.js';
 import { parseCommandLine, screenCommand } from '../git/git-safety.js';
 import { ProcessManager } from '../process/process-manager.js';
+import type { ProcessRunner } from '../execution/process-runner.js';
 import { resolveExecutable } from '../preflight/preflight.js';
 
 export interface VerifierOptions {
   cwd: string;
   timeoutMs: number;
-  processManager: ProcessManager;
+  processManager: ProcessRunner;
   /** Cancels any in-flight command. */
   signal?: AbortSignal;
   /** Called before each command so the CLI can log it. */

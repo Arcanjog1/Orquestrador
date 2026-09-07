@@ -14,6 +14,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import type { ProcessRunner } from '../execution/process-runner.js';
 import { extname } from 'node:path';
 
 export type ProcessOutcome = 'completed' | 'timeout' | 'cancelled' | 'spawn-error';
@@ -194,7 +195,7 @@ export function buildChildEnv(
  * Owns every child process the orchestrator starts, so a Ctrl+C can take the
  * whole tree down deterministically.
  */
-export class ProcessManager {
+export class ProcessManager implements ProcessRunner {
   private readonly live = new Set<ChildProcess>();
   /**
    * Why a given child was stopped. Written by `terminate`, read by `run` once

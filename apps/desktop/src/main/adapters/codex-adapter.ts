@@ -20,7 +20,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessManager } from './adapter-types.js';
+import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessRunner } from './adapter-types.js';
 import { codexSupportedEfforts, makeAgentResult, resolveFixedEffort, versionNumberOf } from '../core.js';
 import {
   describeProbe,
@@ -31,7 +31,7 @@ import {
 } from './cli-capabilities.js';
 
 export interface CodexAdapterOptions {
-  processManager: ProcessManager;
+  processManager: ProcessRunner;
   /** Resolves the managed executable; called lazily so a missing runtime is a
    *  clear error at use time rather than at construction time. */
   resolveExecutable: () => Promise<string>;
