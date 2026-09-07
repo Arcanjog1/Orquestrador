@@ -500,3 +500,74 @@ test('a remote run shows real changed files and a real diffstat, with no reposit
     await sides.close();
   }
 });
+
+test('cancelling a cloud run reaches the coordinator, not only this window', async () => {
+  // Cancelling locally would stop nothing and report that it had - and would
+  // leave the workspace running, and billing.
+  const cloud = memoryDatabase();
+  const coordinator = new Coordinator({
+    database: cloud,
+    provisioner: stalling,
+    credentials: { openaiApiKey: 'sk-test' },
+  });
+  const principal = coordinator.store.createPrincipal({ displayName: 'Pessoa' });
+  const token = coordinator.store.issueSession({ principalId: principal.id }).token;
+  const server = createCoordinatorServer({ coordinator });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+
+  const fixture = createDesktopFixture({ secrets: fakeSecretStore() });
+  try {
+    value(
+      await fixture.router.handle('cloud.connect', { endpoint: `http://127.0.0.1:${port}`, token }),
+    );
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.createCloud', {
+        repository: 'Arcanjog1/Orquestrador',
+        branch: 'main',
+      }),
+    );
+    value(await fixture.router.handle('accounts.create', { name: 'Claude', provider: 'anthropic' }));
+    const agents = value<Array<{ id: string; role: string }>>(
+      await fixture.router.handle('agents.list', null),
+    );
+    value(
+      await fixture.router.handle('workspace.setAgents', {
+        workspaceId: workspace.id,
+        orchestratorAgentId: agents.find((a) => a.role === 'ORCHESTRATOR')!.id,
+        workerAgentId: agents.find((a) => a.role === 'CODING_WORKER')!.id,
+      }),
+    );
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'c' }),
+    );
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'faça' }),
+    );
+    const remoteId = fixture.services.database.runs.require(sent.run.id).remote_run_id!;
+
+    const result = value<{ cancelled: boolean }>(
+      await fixture.router.handle('run.cancel', { runId: sent.run.id }),
+    );
+    assert.equal(result.cancelled, true);
+    // The coordinator - the only thing that can actually end it - knows.
+    assert.equal(coordinator.store.requireRunUnscoped(remoteId).status, 'CANCELLED');
+    assert.ok(
+      coordinator.store.events(remoteId, 0).some(
+        (e) => e.kind === 'run.status' && (e.payload as { status?: string }).status === 'CANCELLED',
+      ),
+      'the cancellation never reached the durable log',
+    );
+
+    // And the run does not later turn into a failure: the person's decision is
+    // already the outcome, and overwriting it with FAILED would report their
+    // own choice as an error.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(coordinator.store.requireRunUnscoped(remoteId).status, 'CANCELLED');
+  } finally {
+    await fixture.cleanup();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await coordinator.shutdown();
+    cloud.close();
+  }
+});

@@ -188,6 +188,11 @@ export class Coordinator {
   cancel(runId: string, principal: PrincipalRecord): boolean {
     const run = this.store.findRun(runId, principal);
     if (!run) return false;
+    // Provisioning is the longest thing a run does before its loop exists, and
+    // a clone of a large repository can take minutes. Aborting it is what makes
+    // "cancel" stop the meter rather than only stop the next phase.
+    this.aborts.get(runId)?.abort();
+
     const driving = this.driving.get(runId);
     if (driving) {
       driving.orchestration.cancel(driving.localRunId);
@@ -286,6 +291,9 @@ export class Coordinator {
       // A shutdown is not a failed run: the lease lapses and the next process
       // picks it up, which is the whole point of recovery.
       if (this.stopped) return;
+      // Nor is a cancellation. The person's decision is already on the record;
+      // overwriting it with FAILED would report their own choice as an error.
+      if (this.store.requireRunUnscoped(runId).status === 'CANCELLED') return;
       const reason =
         error instanceof ProvisioningError
           ? error.userMessage

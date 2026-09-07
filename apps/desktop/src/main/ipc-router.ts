@@ -312,9 +312,16 @@ export class IpcRouter {
       s.orchestration.listForWorkspace((p as { workspaceId: string }).workspaceId),
     );
     this.handlers.set('run.detail', (p) => s.orchestration.detail((p as { runId: string }).runId));
-    this.handlers.set('run.cancel', (p) => ({
-      cancelled: s.orchestration.cancel((p as { runId: string }).runId),
-    }));
+    this.handlers.set('run.cancel', async (p) => {
+      const runId = (p as { runId: string }).runId;
+      // A cloud run is not executing here, so cancelling it locally would stop
+      // nothing and tell the person it had. The cancellation has to reach the
+      // coordinator, which is the only thing that can end it - and the only
+      // thing that can stop the meter.
+      const run = s.database.runs.find(runId);
+      if (run?.remote_run_id) return { cancelled: await s.cloud.cancel(runId) };
+      return { cancelled: s.orchestration.cancel(runId) };
+    });
 
     assertCoversEveryChannel(this.handlers);
   }
