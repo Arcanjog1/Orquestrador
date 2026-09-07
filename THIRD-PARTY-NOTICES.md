@@ -61,3 +61,26 @@ entrega. Cada instalação grava um manifesto com origem, URL, versão,
 arquitetura, tamanho, SHA-256, veredito de integridade, nível de confiança e os
 arquivos de licença encontrados. Esse manifesto é a evidência de o que foi
 instalado e de onde veio.
+
+## Buzz (block/buzz) — estudado, não incorporado
+
+- Fornecedor: Block, Inc.
+- Licença: `Apache-2.0`
+- Repositório: https://github.com/block/buzz
+- Commit consultado: `3c7f288` (Buzz Desktop 0.5.23)
+
+O Buzz foi usado como **referência técnica** para o desenho do barramento de
+mensagens entre agentes: a fila por escopo com no máximo um item em voo, o
+prazo de posse (*lease*) com expiração, a repetição com recuo exponencial e a
+carta morta, e — a ideia mais importante para o nosso caso — a separação entre
+um limite de silêncio (*idle timeout*) e um limite absoluto de duração.
+
+**Nenhum código, texto de licença, marca, logotipo ou ativo do Buzz foi copiado
+para este repositório.** O que existe aqui foi escrito do zero, em TypeScript,
+contra o SQLite que este projeto já usava; o Buzz é Rust, com relay Nostr,
+Postgres e Redis, nada disso presente aqui. Como não há obra derivada nem
+redistribuição, a Apache-2.0 não impõe obrigações adicionais a este projeto —
+mas o crédito fica registrado aqui de qualquer forma, porque a origem das
+ideias merece ser dita.
+
+Os arquivos estudados estão citados em `docs/AGENT_MESSAGE_BUS.md`.

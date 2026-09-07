@@ -1,20 +1,150 @@
 # Handoff — central de agentes
 
-Estado ao fim da terceira sessão da reorientação.
+Estado ao fim da quarta sessão: a arquitetura de comunicação, inspirada no Buzz.
 
 ## Baseline
 
 | | |
 |---|---|
 | Repositório | `Arcanjog1/Orquestrador` (público) |
-| Branch | `claude/ai-orchestrator-reorientacao-ytlkw0` |
-| HEAD do início desta sessão | `ca4849a` |
+| Branch desta sessão | `claude/ai-orchestrator-buzz-arch-vblrau` |
+| HEAD do início | `2e06ae5` (ponta de `claude/ai-orchestrator-reorientacao-ytlkw0`) |
+| Branch padrão real | `claude/new-session-3am7mo` — **não é `main`, e `main` não existe** |
 | Instalador | a pre-release `desktop-dev-*` **mais recente** desta branch, em [Releases](https://github.com/Arcanjog1/Orquestrador/releases) |
-| `main` | **não existe** neste repositório |
 
-Sem reset, sem merge, sem force-push, sem apagar branch.
+Sem reset, sem merge, sem force-push, sem apagar branch. A branch desta sessão
+saiu de `2e06ae5`, que é a ponta real do trabalho — a branch padrão do
+repositório estava onze commits atrás e teria descartado tudo desde a fase
+Electron.
 
-## O que esta sessão corrigiu
+---
+
+# Quarta sessão — a troca automática, e a janela que ficava parada
+
+Documentos novos: `docs/AGENT_MESSAGE_BUS.md` (a arquitetura) e
+`docs/ACP_AND_SUBSCRIPTION_POLICY.md` (a decisão sobre ACP e assinaturas).
+
+## O que já funcionava, e o que faltava
+
+O laço **já era automático** antes desta sessão: um objetivo, o Codex decide, o
+Claude executa, evidência, verificação, o Codex revisa, DoneGate. Ninguém
+copiava prompt.
+
+O que faltava eram duas coisas, e nenhuma delas era o laço:
+
+1. **A troca não deixava rastro.** Uma delegação era uma chamada de função. Se
+   o worker não respondesse, não havia nada para olhar.
+2. **A execução não era observável.** `--output-format json` não imprime nada
+   até terminar, então um processo travado e um trabalhando eram idênticos daqui
+   — pelo tempo que o limite rígido permitisse, que é uma hora. **Era isto que
+   produzia a janela em "executando automaticamente".**
+
+## O barramento de mensagens
+
+`src/bus/` + migração `11` (`agent_messages`). Uma **fronteira de comunicação**,
+não um segundo motor: o `OrchestrationService` continua decidindo tudo, um laço,
+um DoneGate, e nada lê uma mensagem de volta para escolher o próximo passo.
+
+- persistir antes de entregar;
+- no máximo um em voo por (execução, destinatário);
+- publicação idempotente por `dedupe_key` (UNIQUE no banco);
+- *lease* com prazo — um worker que morre calado deixa um prazo vencido, que a
+  varredura converte em nova tentativa ou carta morta **com motivo**;
+- recuo exponencial com ruído, limitado; uma falha que outra tentativa não
+  conserta (permissão recusada, credencial rejeitada) **não** é repetida;
+- nada é descartado em silêncio: o fim da linha é `dead`, não um `DELETE`;
+- um run interrompido tem as mensagens pendentes **encerradas, não
+  reentregues** — reenviar uma instrução que já pode ter escrito um arquivo é
+  exatamente a repetição não idempotente que não se faz.
+
+**Sem relay, sem broker, sem porta, sem Docker, sem servidor.** O Buzz usa
+Nostr com Postgres e Redis porque os agentes dele estão em outra máquina; aqui
+os dois são processos filhos deste aplicativo. A menor coisa com o mesmo
+comportamento é uma tabela.
+
+**Um defeito real que o E2E encontrou:** no primeiro desenho, avisos ficavam na
+fila como `pending`, então fechar o run os marcava `cancelled` — e uma execução
+perfeita se lia, no próprio histórico, como abortada. Agora `pending` significa
+o que diz: *alguém ainda deve uma resposta*. Só `DELEGATION` e
+`HUMAN_APPROVAL_REQUIRED` são pedidos; o resto é aviso, final quando escrito.
+
+## A janela parada
+
+1. **`idleTimeoutMs`** no `ProcessManager`, reiniciado por qualquer byte.
+   Responde *"ainda está acontecendo alguma coisa?"*, que só um processo travado
+   reprova — diferente de `timeoutMs`, que uma refatoração legítima reprova.
+   Qual prazo foi cruzado fica em `trace.idleTimedOut`, porque "40 minutos de
+   trabalho" e "40 minutos de silêncio" pedem reações opostas.
+2. **`--output-format stream-json --verbose`** quando o build oferece. A última
+   linha do stream é o mesmo envelope que o `json` imprimiria, lida pelo
+   **mesmo** parser — `is_error`, `permission_denials` e o id de sessão
+   continuam significando o que a sessão passada fez com que significassem. Um
+   build sem streaming fica em paz, e sem limite de silêncio.
+3. **`ActivityMonitor`** — tempo decorrido, última atividade, ferramenta em
+   execução. Só **nomes** de ferramenta, nunca argumentos.
+
+Silêncio vira `no-activity`, que não é `timeout`, e é **mecânico**: nenhum
+modelo mais forte destrava um processo parado. Mesmo reflexo removido para
+permissões recusadas na sessão passada.
+
+## Na tela
+
+No painel que já existia — não há uma segunda interface:
+
+- **Agora**: tempo de execução, silêncio (em âmbar depois de metade do prazo),
+  ferramenta atual, **Cancelar**. Quando o runtime não informa progresso, diz
+  isso, e não "ocioso".
+- Delegações sem resposta contadas; carta morta em vermelho.
+- **Equipe**: cada membro com conexão, estado, tarefa e duração. `offline`
+  (não autenticado) nunca confundido com `idle` (esperando trabalho).
+
+## A decisão sobre ACP
+
+**Não é o caminho padrão.** `docs/ACP_AND_SUBSCRIPTION_POLICY.md` tem o
+raciocínio inteiro e as citações. Em resumo:
+
+- o `README` do `buzz-acp` documenta os dois adapters com **chave de API paga**
+  (*"use an OpenAI API key, not a ChatGPT subscription"*);
+- `claude-agent-acp` é construído sobre o Claude Agent SDK, cuja documentação
+  diz que **um produto de terceiros não deve oferecer login claude.ai nem os
+  limites da assinatura sem aprovação prévia**, e indica chave de API;
+- o `codex-acp` a montante **anuncia** login ChatGPT como método ACP, então
+  desse lado o caminho existe.
+
+O padrão continua sendo os **CLIs oficiais** como processos filhos, cada conta
+no seu diretório isolado. O que o ACP daria de útil já foi obtido sem ele:
+sessões (`--resume`), cancelamento, permissões e — o que faltava — progresso
+durante o turno (`stream-json`).
+
+## Testes
+
+| Suíte | Resultado |
+|---|---|
+| Root (`npm test`) | **572 passando**, 2 pulados (eram 517) |
+| Electron (`npm run desktop:test`) | **28 passando** (eram 27) |
+| Typecheck (4 projetos) | limpo |
+
+Novos: `tests/agent-message-bus.test.ts` (20), `tests/agent-activity.test.ts`
+(19), `tests/agent-exchange-e2e.test.ts` (8), mais casos em
+`desktop-adapters`, `desktop-team` e a integração Electron.
+
+Os dois E2E que o pedido nomeia:
+
+- **conversa**: objetivo → Codex → Claude 1 → revisão → Claude 2 → revisão →
+  DONE, com a troca inteira conferida no registro;
+- **código**: `hello.txt` escrito de verdade, achado pelo EvidenceCollector e
+  conferido byte a byte por uma verificação que o aplicativo reexecuta.
+
+DoneGate não foi afrouxado e nenhum teste foi removido. *(A primeira versão do
+E2E de código falhou porque eu não tinha registrado verificação nenhuma — o
+portão recusou, corretamente. A correção foi registrar a verificação, não
+afrouxar o portão.)*
+
+---
+
+# Terceira sessão — os quatro defeitos do `hello.txt`
+
+## O que aquela sessão corrigiu
 
 O teste real do usuário — *"crie hello.txt com o texto pronto"* — falhou assim:
 Claude saiu com código 0, o aplicativo não coletou progresso nenhum, o
@@ -191,5 +321,32 @@ A pendência de `docs/SECURITY_HISTORY_CLEANUP.md` **não foi tocada**.
 
 ## Próximo passo menor e concreto
 
-Rodar o roteiro do item 1 com o novo instalador e o mesmo `hello.txt`. Se
-falhar, mandar a tela de **Detalhes** — ela agora nomeia a causa.
+Rodar o roteiro do item 1 com o novo instalador e o mesmo `hello.txt`.
+
+O que mudou no que você vai ver: enquanto o Claude trabalha, o painel diz **há
+quanto tempo** e **em que ferramenta**. Se ele ficar dez minutos sem produzir
+nada, a execução para sozinha e diz *"o worker ficou sem dar sinal e foi
+interrompido"* — em vez de ficar em "executando automaticamente" até o limite
+de uma hora. Se falhar de outro jeito, **Detalhes** continua nomeando a causa.
+
+Mande a tela. É ela que responde "por que nada mudou?".
+
+---
+
+## Portões humanos desta sessão
+
+### `SUBSCRIPTION_USE_APPROVAL_PENDING`
+
+A documentação do Claude Agent SDK diz que um produto de terceiros não deve
+oferecer login claude.ai nem os limites da assinatura sem aprovação prévia.
+Isso decidiu o ACP (não é o caminho padrão) e levanta uma pergunta que **não é
+minha para responder**: se o aplicativo for distribuído a outras pessoas, e não
+apenas usado por você, vale perguntar formalmente aos fornecedores.
+
+Nada foi contornado, nada foi alterado para exigir chave paga, e o limite está
+escrito em `docs/ACP_AND_SUBSCRIPTION_POLICY.md` em vez de escondido.
+
+### `LOCAL_REAL_AUTH_TEST_PENDING`
+
+Continua de pé, com o roteiro acima. Nenhum teste desta sessão usou conta real:
+não há Codex nem Claude legítimos no CI, e este ambiente não é Windows.
