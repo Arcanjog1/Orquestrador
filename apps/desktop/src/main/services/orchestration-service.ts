@@ -65,6 +65,10 @@ import type {
   RunView,
 } from '../../shared/ipc-contract.js';
 import type { EventBus } from '../events.js';
+import { AgentMessageBus } from '../../../../../src/bus/agent-message-bus.js';
+import type { AgentMessageType, PublishInput } from '../../../../../src/bus/message-types.js';
+import { describeActivity } from '../../../../../src/agents/activity-monitor.js';
+import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
 import { toMessageView, toRunDetailView, toRunView } from './views.js';
 import { BudgetLedger, isAgentProvider } from '../core.js';
 import type { BudgetLimits, ProviderCapabilities } from '../core.js';
@@ -136,6 +140,14 @@ const NO_CAPABILITIES: WorkerRuntimeCapabilities = {
 const MODEL_RETRIES = 2;
 
 export interface OrchestrationOptions {
+  /**
+   * How long a delegation may be outstanding before the bus reclaims it.
+   *
+   * Must exceed the longest legitimate turn: the point is to notice a worker
+   * that died, not to interrupt one that is working. Defaults to the bus's own
+   * 20 minutes.
+   */
+  messageLeaseMs?: number;
   maxIterations?: number;
   agentTimeoutMs?: number;
   verificationTimeoutMs?: number;
@@ -209,12 +221,33 @@ const DEFAULTS = {
   verificationTimeoutMs: 10 * 60_000,
 };
 
+/**
+ * The orchestrator's identity on the bus.
+ *
+ * A fixed name rather than a workspace-specific id: there is exactly one
+ * supervisor per run, and the messages it sends are already scoped by run.
+ * Workers are named by their slot id, which is what the team screen shows.
+ */
+export const ORCHESTRATOR_AGENT = 'orchestrator';
+
 export class OrchestrationService {
   private readonly active = new Map<string, AbortController>();
   /** Runners of in-flight runs, so cancelling can reach the child processes. */
   private readonly runners = new Map<string, RunnerPair>();
   /** Environments of in-flight runs, so each is released exactly once. */
   private readonly environments = new Map<string, ExecutionEnvironment>();
+
+  /**
+   * The record of what the agents said to each other.
+   *
+   * A boundary, not a second engine. The loop below still decides everything;
+   * what the bus adds is that each exchange is a committed row with a delivery
+   * state, so "the orchestrator delegated and then nothing happened" is a
+   * question the interface can answer. Nothing here reads a message back to
+   * decide what to do next - that would be a second source of truth for the
+   * run, and there is one.
+   */
+  readonly bus: AgentMessageBus;
 
   constructor(
     private readonly database: Database,
@@ -223,7 +256,59 @@ export class OrchestrationService {
     private readonly createRunners: RunnerFactory,
     private readonly options: OrchestrationOptions = {},
     private readonly checkReadiness: ReadinessCheck = async () => null,
-  ) {}
+  ) {
+    this.bus = new AgentMessageBus(this.database.agentMessages, {
+      ...(this.options.messageLeaseMs !== undefined ? { leaseMs: this.options.messageLeaseMs } : {}),
+      onChange: (message) => {
+        this.events.emit('run:message', {
+          runId: message.runId,
+          conversationId: message.conversationId,
+          messageId: message.messageId,
+          messageType: message.messageType,
+          status: message.status,
+          senderAgentId: message.senderAgentId,
+          recipientAgentId: message.recipientAgentId,
+          iteration: message.iteration,
+          attempts: message.attempts,
+          failureReason: message.failureReason,
+          at: message.updatedAt,
+        });
+      },
+    });
+  }
+
+  /**
+   * Publishes to the bus without letting it break a run.
+   *
+   * The bus records the exchange; it does not gate it. The loop's control flow
+   * comes from the awaited result of the agent call, exactly as before, so a
+   * database hiccup here must cost the history entry and nothing else. It is
+   * still recorded as a step, because silently losing the record of a message
+   * is the shape of problem this whole layer exists to prevent.
+   */
+  private record(input: PublishInput): string | null {
+    try {
+      return this.bus.publish(input).message.messageId;
+    } catch (error) {
+      this.step(
+        input.runId,
+        input.iteration,
+        'bus',
+        'degraded',
+        `Não foi possível registrar a mensagem ${input.messageType}: ${describeError(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /** Same rule as `record`: the bus must never be the reason a run dies. */
+  private busSafely(action: () => void, runId: string, iteration: number): void {
+    try {
+      action();
+    } catch (error) {
+      this.step(runId, iteration, 'bus', 'degraded', describeError(error));
+    }
+  }
 
   /**
    * Where a run executes, defaulting to this computer.
@@ -280,6 +365,14 @@ export class OrchestrationService {
       return false;
     }
     controller.abort();
+    // Unfinished messages are cancelled; finished ones are left exactly as
+    // they are. Cancelling a run does not un-happen what a worker already did,
+    // and rewriting those rows would lose the only record of it.
+    this.busSafely(
+      () => void this.bus.cancelRun(runId, 'Execução cancelada pelo usuário.'),
+      runId,
+      this.database.runs.find(runId)?.iteration ?? 0,
+    );
     const pair = this.runners.get(runId);
     if (pair) {
       void pair.orchestrator.cancel();
@@ -333,6 +426,10 @@ export class OrchestrationService {
       .finally(() => {
         this.active.delete(run.id);
         this.runners.delete(run.id);
+        // The run's ending, on the record, from the one place every path out
+        // of the loop passes through. Hooking each `setStatus` instead would
+        // mean eleven call sites and a twelfth one day that forgets.
+        this.closeExchange(run.id, session.id);
         // Whatever the run cost - a container, a clone, a lease - is given
         // back exactly once, on every path out of the loop.
         const environment = this.environments.get(run.id);
@@ -355,6 +452,12 @@ export class OrchestrationService {
       const reason = 'Interrompida: o aplicativo foi fechado durante a execução.';
       this.database.runs.setStatus(run.id, 'FAILED', reason);
       this.step(run.id, run.iteration, 'interrupted', 'failed', reason);
+      // Whatever was outstanding is outstanding no longer: the child process
+      // it was handed to died with the parent. It is closed, not redelivered -
+      // re-sending an instruction that may already have written a file is
+      // exactly the non-idempotent retry spec 12 forbids. What actually
+      // happened is a question for evidence, on the next run.
+      this.busSafely(() => void this.bus.cancelRun(run.id, reason), run.id, run.iteration);
       if (run.session_id && this.database.chat.findSession(run.session_id)) {
         this.database.chat.addMessage({ sessionId: run.session_id, runId: run.id, author: 'system', body: reason });
       }
@@ -414,6 +517,19 @@ export class OrchestrationService {
 
     this.database.runs.setStatus(runId, 'RUNNING');
     this.progress(runId, sessionId, 'analysing', 'Analisando...', 'RUNNING');
+
+    // The person's goal, sent once. Everything the agents say afterwards
+    // hangs off this exchange, which is what lets the timeline show a run as
+    // one conversation rather than a pile of unrelated calls.
+    const runCorrelation = `cor-run-${runId}`;
+    this.record({
+      runId,
+      conversationId: sessionId,
+      iteration: 0,
+      messageType: 'USER_OBJECTIVE',
+      payload: { objective },
+      correlationId: runCorrelation,
+    });
 
     // Ask before spending fifteen minutes finding out.
     const problem = await this.checkReadiness(workspace);
@@ -608,6 +724,18 @@ export class OrchestrationService {
       }
       const decision = asked.decision;
       record.decision = decision;
+      // What the orchestrator decided, as a message rather than only as a log
+      // line. The action and the target worker are recorded; the prose is
+      // already a chat message, so it is not duplicated here.
+      const decisionMessageId = this.record({
+        runId,
+        conversationId: sessionId,
+        iteration,
+        messageType: 'ORCHESTRATOR_DECISION',
+        payload: { action: decision.action, workerId: decision.workerId ?? null },
+        senderAgentId: ORCHESTRATOR_AGENT,
+        correlationId: runCorrelation,
+      });
       ledger.add(decision.acceptanceCriteria, iteration);
 
       if (decision.summary) {
@@ -658,6 +786,8 @@ export class OrchestrationService {
           iteration,
           task,
           decision,
+          correlationId: runCorrelation,
+          causationId: decisionMessageId,
           routing: slot.routing ?? null,
           capabilities: capabilitiesOf.get(slot.id) ?? NO_CAPABILITIES,
           attempts,
@@ -758,6 +888,26 @@ export class OrchestrationService {
         evidence.changedSinceBaseline ? 'changed' : 'unchanged',
         `${evidence.changedFiles.length} arquivo(s)`,
       );
+      // What the application saw for itself, sent by the application - not by
+      // an agent. The sender is null on purpose: this is the one message in
+      // the exchange that is not somebody's claim, and `source` records
+      // whether git or a filesystem scan answered, because "nothing changed"
+      // and "nothing could be observed" must never collapse into one fact.
+      this.record({
+        runId,
+        conversationId: sessionId,
+        iteration,
+        messageType: 'EVIDENCE_READY',
+        payload: {
+          changed: evidence.changedSinceBaseline,
+          files: evidence.changedFiles.length,
+          source: evidence.source ?? null,
+          problem: evidence.evidenceProblem ?? null,
+        },
+        senderAgentId: null,
+        recipientAgentId: ORCHESTRATOR_AGENT,
+        correlationId: runCorrelation,
+      });
       // What actually changed, on the event itself. For a remote run this is
       // the only way a person sees real files and a real diffstat without the
       // repository ever reaching their computer.
@@ -803,6 +953,18 @@ export class OrchestrationService {
         }
         const passed = verification.filter(commandPassed).length;
         this.step(runId, iteration, 'verification', 'done', `${passed}/${verification.length} passaram`);
+        // The checks, re-run by the application. Also sent with a null sender:
+        // a verification an agent could write would verify nothing.
+        this.record({
+          runId,
+          conversationId: sessionId,
+          iteration,
+          messageType: 'VERIFICATION_RESULT',
+          payload: { passed, total: verification.length },
+          senderAgentId: null,
+          recipientAgentId: ORCHESTRATOR_AGENT,
+          correlationId: runCorrelation,
+        });
       }
 
       // Evidence, not assertion, is what marks a criterion satisfied.
@@ -1273,6 +1435,10 @@ export class OrchestrationService {
     iteration: number;
     task: string;
     decision: Decision;
+    /** Ties this delegation to the run's exchange. */
+    correlationId: string;
+    /** The decision that caused it, when the bus recorded one. */
+    causationId: string | null;
     routing: WorkerRoutingSource | null;
     capabilities: WorkerRuntimeCapabilities;
     attempts: readonly PreviousAttempt[];
@@ -1328,6 +1494,39 @@ export class OrchestrationService {
         : undefined;
 
       const startedAt = new Date().toISOString();
+
+      // The delegation, on the record before the worker is asked.
+      //
+      // Persisted first, deliberately: if this process dies between here and
+      // the worker answering, the row is what says a delegation was
+      // outstanding. The attempt number is part of the key, so a second model
+      // attempt is a second message rather than a duplicate of the first.
+      const delegationId = this.record({
+        runId,
+        conversationId: sessionId,
+        iteration,
+        stepId: `${slot.id}#${attempt}`,
+        messageType: 'DELEGATION',
+        payload: { task, workerId: slot.id },
+        senderAgentId: ORCHESTRATOR_AGENT,
+        recipientAgentId: slot.id,
+        correlationId: input.correlationId,
+        causationId: input.causationId,
+      });
+      // Claim it for this worker, then acknowledge: "handed over" and "began"
+      // are two facts, and a run stuck between them is a different problem
+      // from one stuck before the hand-over.
+      if (delegationId) {
+        this.busSafely(
+          () => {
+            this.bus.claim(slot.id);
+            this.bus.acknowledge(delegationId);
+          },
+          runId,
+          iteration,
+        );
+      }
+
       const invoke = (resumeSessionId: string | null) =>
         slot.runner.run({
           prompt: task,
@@ -1335,6 +1534,10 @@ export class OrchestrationService {
           timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
           runId,
           iteration,
+          // Liveness, straight to the window. Ephemeral: nothing here is
+          // stored, because a row per heartbeat would bloat the history and
+          // add nothing a reader could not already see.
+          onActivity: (snapshot) => this.sayActivity(runId, sessionId, slot, snapshot),
           ...(resumeSessionId ? { resumeSessionId } : {}),
           ...(routed
             ? { routing: { model: routed.resolvedModel, reasoning: routed.resolvedReasoning } }
@@ -1447,6 +1650,53 @@ export class OrchestrationService {
         startedAt,
         routing: recorded,
       });
+      // Close the delegation, and publish what came back.
+      //
+      // The distinction that matters: `complete` means this message's
+      // lifecycle ended, never that the work was correct or that a file
+      // changed. Evidence and verification answer that, below, and a
+      // WORKER_RESULT row is a claim by an agent - the same untrusted input it
+      // has always been.
+      if (delegationId) {
+        this.busSafely(
+          () => {
+            const failed = result.outcome !== 'completed' || result.exitCode !== 0;
+            if (failed) {
+              // A mechanical failure is not retried by the bus either: another
+              // delivery of the same instruction cannot grant a refused
+              // permission, and each attempt may cost money.
+              this.bus.fail(
+                delegationId,
+                result.failure ? failureExplanation(result.failure) : `saída ${result.exitCode ?? 'nula'}`,
+                { retryable: !mechanical },
+              );
+            } else {
+              this.bus.complete(delegationId);
+            }
+            this.record({
+              runId,
+              conversationId: sessionId,
+              iteration,
+              stepId: `${slot.id}#${attempt}`,
+              messageType: 'WORKER_RESULT',
+              payload: {
+                outcome: result.outcome,
+                exitCode: result.exitCode,
+                failure: result.failure ?? null,
+                reportedBytes: result.stdout.length,
+                deniedTools: result.permissionDenials ?? [],
+              },
+              senderAgentId: slot.id,
+              recipientAgentId: ORCHESTRATOR_AGENT,
+              correlationId: input.correlationId,
+              causationId: delegationId,
+            });
+          },
+          runId,
+          iteration,
+        );
+      }
+
       this.step(runId, iteration, 'worker', result.outcome, task.slice(0, 200), {
         attempt: attempt + 1,
         workerId: slot.id,
@@ -1612,6 +1862,41 @@ export class OrchestrationService {
     return lines.join('\n');
   }
 
+  /**
+   * Records how a run ended, and closes anything it left in flight.
+   *
+   * Called from `finally`, so it runs on every exit - a clean finish, a throw,
+   * a cancellation, a budget stop. A message still `pending` or `leased` when
+   * the loop is gone belongs to nobody, and leaving it looking outstanding
+   * would be a lie the next start-up would have to unpick.
+   */
+  private closeExchange(runId: string, sessionId: string): void {
+    const run = this.database.runs.find(runId);
+    if (!run) return;
+    const type: AgentMessageType =
+      run.status === 'DONE'
+        ? 'RUN_COMPLETED'
+        : run.status === 'CANCELLED'
+          ? 'RUN_CANCELLED'
+          : 'RUN_FAILED';
+    this.busSafely(
+      () => {
+        this.bus.cancelRun(runId, `A execução terminou como ${run.status}.`);
+        this.record({
+          runId,
+          conversationId: sessionId,
+          iteration: run.iteration,
+          messageType: type,
+          payload: { status: run.status, iterations: run.iteration },
+          senderAgentId: null,
+          correlationId: `cor-run-${runId}`,
+        });
+      },
+      runId,
+      run.iteration,
+    );
+  }
+
   private finishCancelled(runId: string, sessionId: string): void {
     this.database.runs.setStatus(runId, 'CANCELLED', 'Cancelado pelo usuário.');
     this.say(sessionId, runId, 'system', 'Execução cancelada.');
@@ -1672,6 +1957,36 @@ export class OrchestrationService {
     extra: Partial<RunProgressEvent> = {},
   ): void {
     this.events.emit('run:progress', { runId, sessionId, stage, label, status, ...extra });
+  }
+
+  /**
+   * Liveness, to the window, while the worker works.
+   *
+   * The ephemeral channel: nothing here is persisted, and nothing here is a
+   * record of what happened. It exists so the interface can replace
+   * "executando automaticamente" with how long the worker has been going, when
+   * it last did anything, and what it is inside - the three facts that decide
+   * whether waiting is reasonable.
+   */
+  private sayActivity(
+    runId: string,
+    sessionId: string,
+    slot: WorkerSlot,
+    snapshot: ActivitySnapshot,
+  ): void {
+    this.events.emit('run:activity', {
+      runId,
+      sessionId,
+      agentId: slot.id,
+      agentLabel: slot.label,
+      startedAt: snapshot.startedAt,
+      elapsedMs: snapshot.elapsedMs,
+      lastActivityAt: snapshot.lastActivityAt,
+      idleMs: snapshot.idleMs,
+      currentTool: snapshot.currentTool,
+      idleTimeoutMs: snapshot.idleTimeoutMs,
+      label: `${slot.label}: ${describeActivity(snapshot)}`,
+    });
   }
 }
 

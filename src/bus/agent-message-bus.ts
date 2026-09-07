@@ -58,6 +58,7 @@ import { randomUUID } from 'node:crypto';
 import {
   backoffMs,
   defaultDedupeKey,
+  isRequest,
   scopeKey,
   type AgentMessage,
   type AgentMessageStatus,
@@ -83,6 +84,7 @@ export interface AgentMessageStore {
     causationId: string | null;
     dedupeKey: string;
     availableAt: string;
+    status: string;
   }): { row: AgentMessageRowLike; created: boolean };
   find(messageId: string): AgentMessageRowLike | undefined;
   claimNext(input: {
@@ -240,6 +242,12 @@ export class AgentMessageBus {
       causationId: input.causationId ?? null,
       dedupeKey,
       availableAt: this.isoIn(input.delayMs ?? 0),
+      // A request waits for somebody; a notice is final as soon as it is
+      // written. Leaving a notice `pending` would make every successful run
+      // end with messages nothing ever completed - and closing the run would
+      // then stamp them `cancelled`, so a perfect run would read as an
+      // aborted one in its own history.
+      status: isRequest(input.messageType) ? 'pending' : 'completed',
     });
     const message = toMessage(row);
     if (created) this.emit(message);

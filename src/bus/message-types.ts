@@ -83,6 +83,31 @@ export function isDurable(type: AgentMessageType): boolean {
 }
 
 /**
+ * Message types that ask somebody for something.
+ *
+ * The distinction the queue is built on. A **request** is addressed to a
+ * recipient who owes an answer, so it is delivered, leased, acknowledged and
+ * completed. A **notice** records that something happened — a decision was
+ * made, evidence was collected, the run ended — and nobody owes anything for
+ * it; it is final the moment it is written.
+ *
+ * Getting this wrong is not cosmetic. If notices sit in the queue as
+ * `pending`, then every successful run ends with a pile of messages nothing
+ * ever completed, and closing the run marks them `cancelled` — so a run that
+ * went perfectly reads, in its own history, as one that was aborted. `pending`
+ * has to mean "somebody still owes an answer", or it means nothing.
+ */
+export const REQUEST_MESSAGE_TYPES: readonly AgentMessageType[] = [
+  'DELEGATION',
+  // A person genuinely owes an answer here, and the run waits for it.
+  'HUMAN_APPROVAL_REQUIRED',
+];
+
+export function isRequest(type: AgentMessageType): boolean {
+  return REQUEST_MESSAGE_TYPES.includes(type);
+}
+
+/**
  * How far a message got.
  *
  * These are the six distinctions spec 12 asks for, and they are distinct on

@@ -1039,8 +1039,69 @@ export interface EventMap {
   'runtime:progress': RuntimeProgressEvent;
   'account:progress': AccountProgressEvent;
   'run:progress': RunProgressEvent;
+  /**
+   * Liveness, while an agent works. The ephemeral channel.
+   *
+   * Deliberately not persisted: one row per heartbeat would bloat the history
+   * and tell a later reader nothing the timeline does not already show. What
+   * *is* kept is the summary on the invocation, and the durable exchange in
+   * `agent_messages`.
+   */
+  'run:activity': RunActivityEvent;
+  /** A message between agents changed state. The durable channel. */
+  'run:message': AgentMessageEvent;
   /** A connection was added, renamed, enabled, or had its credential changed. */
   'connections:changed': ConnectionsChangedEvent;
+}
+
+/**
+ * What an agent is doing right now.
+ *
+ * This event is the answer to the window that used to say "executando
+ * automaticamente" and nothing more. It carries the two numbers a person needs
+ * to decide whether to keep waiting - how long it has been running, and how
+ * long since it last did anything - plus the tool it is inside when the
+ * runtime says so.
+ */
+export interface RunActivityEvent {
+  readonly runId: string;
+  readonly sessionId: string;
+  /** The team member this is about. */
+  readonly agentId: string;
+  readonly agentLabel: string;
+  readonly startedAt: string;
+  readonly elapsedMs: number;
+  readonly lastActivityAt: string;
+  readonly idleMs: number;
+  /** The tool in flight, when the runtime reports one. Never its arguments. */
+  readonly currentTool: string | null;
+  /** How long silence may last before this invocation is stopped, if capped. */
+  readonly idleTimeoutMs: number | null;
+  /** A ready-made sentence, e.g. "executando há 4m · ferramenta: Write". */
+  readonly label: string;
+}
+
+/**
+ * A message between agents, as the timeline shows it.
+ *
+ * Carries no payload: the body of a delegation or a report is already a chat
+ * message, and duplicating it here would mean two places to keep in step. What
+ * this adds is the delivery fact - was it accepted, delivered, started,
+ * finished, or abandoned - which nothing else records.
+ */
+export interface AgentMessageEvent {
+  readonly runId: string;
+  readonly conversationId: string;
+  readonly messageId: string;
+  readonly messageType: string;
+  readonly status: string;
+  readonly senderAgentId: string | null;
+  readonly recipientAgentId: string | null;
+  readonly iteration: number;
+  readonly attempts: number;
+  /** Why it failed or was abandoned, in words. Null while nothing is wrong. */
+  readonly failureReason: string | null;
+  readonly at: string;
 }
 
 /**

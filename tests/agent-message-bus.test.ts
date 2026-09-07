@@ -311,8 +311,56 @@ test('an empty answer is a message, not an absence', () => {
     payload: { report: '' },
     senderAgentId: 'claude-1',
   });
-  assert.equal(message.status, 'pending');
+  // A report is a notice: nobody owes an answer to it, so it is final at once.
+  // What matters is that an empty answer is still *recorded* - the run has to
+  // be able to say "the worker returned nothing" rather than say nothing.
+  assert.equal(message.status, 'completed');
   assert.deepEqual(h.bus.find(message.messageId)?.payload, { report: '' });
+});
+
+test('a request waits for somebody; a notice is final when it is written', () => {
+  const h = harness();
+  // A delegation is owed an answer, so it enters the queue.
+  const request = h.bus.publish(delegation(h));
+  assert.equal(request.message.status, 'pending');
+  assert.ok(h.bus.claim('claude-1'), 'and it is offered to its recipient');
+
+  // A decision is a record of something that already happened. Leaving it
+  // `pending` would make every successful run end with messages nothing ever
+  // completed - and closing the run would then stamp them `cancelled`, so a
+  // run that went perfectly would read as an aborted one in its own history.
+  const notice = h.bus.publish({
+    runId: h.runId,
+    conversationId: h.conversationId,
+    iteration: 1,
+    messageType: 'ORCHESTRATOR_DECISION',
+    payload: { action: 'delegate' },
+    senderAgentId: 'codex-1',
+  });
+  assert.equal(notice.message.status, 'completed');
+  assert.equal(h.bus.claim(null), undefined, 'a notice is never queued for delivery');
+});
+
+test('closing a run leaves a successful exchange looking successful', () => {
+  const h = harness();
+  const done = h.bus.publish(delegation(h, { iteration: 1 }));
+  h.bus.claim('claude-1');
+  h.bus.complete(done.message.messageId);
+  h.bus.publish({
+    runId: h.runId,
+    conversationId: h.conversationId,
+    iteration: 1,
+    messageType: 'WORKER_RESULT',
+    payload: { report: 'pronto' },
+    senderAgentId: 'claude-1',
+  });
+
+  // The sweep a finished run performs, to close anything still outstanding.
+  assert.equal(h.bus.cancelRun(h.runId, 'terminou'), 0, 'nothing was outstanding');
+  assert.deepEqual(
+    h.bus.listForRun(h.runId).map((m) => m.status),
+    ['completed', 'completed'],
+  );
 });
 
 test('progress is not durable, and the types that are say so', () => {

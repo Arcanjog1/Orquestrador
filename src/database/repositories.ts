@@ -1647,13 +1647,15 @@ export class AgentMessageRepository extends Repository {
     causationId: string | null;
     dedupeKey: string;
     availableAt: string;
+    /** `pending` for a request; `completed` for a notice. See `isRequest`. */
+    status: string;
   }): { row: AgentMessageRow; created: boolean } {
     const timestamp = now();
     const result = this.db.run(
       'INSERT INTO agent_messages (message_id, run_id, conversation_id, iteration, step_id, invocation_id, ' +
         'sender_agent_id, recipient_agent_id, message_type, payload, status, correlation_id, causation_id, ' +
         'dedupe_key, attempts, lease_expires_at, available_at, failure_reason, created_at, updated_at) ' +
-        "VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,0,NULL,?,NULL,?,?) " +
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,?,NULL,?,?) ' +
         'ON CONFLICT(dedupe_key) DO NOTHING',
       [
         input.messageId,
@@ -1666,6 +1668,7 @@ export class AgentMessageRepository extends Repository {
         input.recipientAgentId,
         input.messageType,
         input.payload,
+        input.status,
         input.correlationId,
         input.causationId,
         input.dedupeKey,
