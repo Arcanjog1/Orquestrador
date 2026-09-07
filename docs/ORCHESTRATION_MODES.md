@@ -104,6 +104,25 @@ O `NO_ENVIRONMENT` que o loop usa nesse modo tem um `ProcessRunner` que
 **lança exceção**. Se algum caminho tentasse gerar um processo numa conversa,
 ele quebraria em vez de alcançar silenciosamente a máquina do usuário.
 
+### O diretório de trabalho de uma conversa
+
+Mesmo sem pasta de projeto, um agente CLI precisa de *algum* diretório. Deixar
+vazio faria o `spawn` herdar o diretório em que o aplicativo foi iniciado — que
+pode ser qualquer coisa.
+
+Isso não é só desleixo: os dois CLIs oficiais leem, do diretório de trabalho, o
+`CLAUDE.md`, os hooks de `.claude/settings.json` e os servidores de `.mcp.json`.
+A doc do Claude Code diz que uma sessão `-p` roda esses hooks e conecta esses
+servidores **mesmo numa pasta que ninguém marcou como confiável**. Uma conversa
+— um run sem projeto nenhum — poderia acabar executando a configuração de um
+projeto alheio.
+
+Então cada projeto de conversa recebe um diretório **vazio**, dentro da pasta
+privada do aplicativo (`<app>/conversations/<workspace-id>`). Vazio é o ponto:
+não há nada ali para um CLI interpretar como configuração. E dá ao CLI um lugar
+estável para guardar a sessão, que é o que faz o `--resume` encontrá-la na
+delegação seguinte.
+
 ### O DoneGate de conversa
 
 Não é o gate de código afrouxado — é **outro gate**, `evaluateConversationDone`.
