@@ -8,8 +8,69 @@
 /** Which role an agent plays in a run. */
 export type AgentRole = 'orchestrator' | 'worker';
 
-/** Stable identifiers for the agents the MVP knows about. */
-export type AgentKind = 'codex' | 'claude-code' | 'mock-codex' | 'mock-claude';
+/**
+ * Stable identifiers for the agents this application knows about.
+ *
+ * The `-api` kinds are the same two vendors reached over their HTTP APIs
+ * instead of their CLIs. They are separate kinds because who pays is
+ * different, and that difference is recorded on every invocation.
+ */
+export type AgentKind =
+  | 'codex'
+  | 'claude-code'
+  | 'openai-api'
+  | 'anthropic-api'
+  | 'mock-codex'
+  | 'mock-claude';
+
+/**
+ * Who pays for an invocation.
+ *
+ * `subscription` is the person's existing plan, reached through the vendor's
+ * official tool. `api-metered` is a separate per-token bill. The two are never
+ * conflated and one never silently becomes the other.
+ */
+export type BillingModel = 'subscription' | 'api-metered' | 'unknown';
+
+/**
+ * A provider failure the loop can act on, rather than a string it must guess at.
+ *
+ * The distinction carries money: `insufficient-credit` must never be retried in
+ * a loop, and `rate-limit` must never be answered by escalating to a costlier
+ * model.
+ */
+export type ProviderFailureKind =
+  | 'authentication'
+  | 'permission'
+  | 'insufficient-credit'
+  | 'rate-limit'
+  | 'timeout'
+  | 'network'
+  | 'invalid-request'
+  | 'model-unavailable'
+  | 'schema'
+  | 'provider-error'
+  | 'cancelled'
+  | 'budget-exceeded';
+
+/**
+ * What one invocation consumed.
+ *
+ * `costUsd` is null whenever it cannot be known - a subscription invocation, or
+ * a model no price table covers. A null is rendered as "não informado", never
+ * as zero: a run that spent something unknown must not look free.
+ */
+export interface InvocationUsage {
+  billing: BillingModel;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens?: number | null;
+  reasoningTokens?: number | null;
+  totalTokens: number | null;
+  costUsd: number | null;
+  /** True when the provider reported the cost rather than a price table. */
+  costReported?: boolean;
+}
 
 /** The four decisions the orchestrator agent is allowed to return (spec 10). */
 export type DecisionAction = 'delegate' | 'verify' | 'done' | 'blocked';
@@ -117,6 +178,16 @@ export interface AgentResult {
    * them against the CLI - with a note when it had to change something.
    */
   applied?: InvocationRouting & { fallbackUsed: boolean; note: string | null };
+  /** Tokens and estimated cost, when the provider reports them. */
+  usage?: InvocationUsage;
+  /**
+   * Why a provider invocation failed, classified. Absent for a CLI adapter and
+   * for any successful call. The loop reads this to decide whether trying
+   * again could possibly help - and to stop dead on `insufficient-credit`.
+   */
+  failure?: ProviderFailureKind;
+  /** Seconds the provider asked us to wait, from its `retry-after`. */
+  retryAfterSeconds?: number;
 }
 
 /** Health of an agent CLI, produced by `AgentRunner.healthCheck`. */
@@ -217,6 +288,10 @@ export interface WorkerRecord {
   mechanical?: boolean;
   /** The CLI refused the model by name. */
   modelUnavailable?: boolean;
+  /** What this attempt consumed, when the provider says. */
+  usage?: InvocationUsage;
+  /** The classified provider failure, when the attempt failed on one. */
+  failure?: ProviderFailureKind;
 }
 
 /** Outcome of the independent DONE validation (spec 15). */
