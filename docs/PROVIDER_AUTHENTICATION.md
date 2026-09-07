@@ -162,3 +162,61 @@ Derivadas do acima, e verificáveis no código:
 - [Claude Code — execução programática / headless (`-p`, `--bare`, `--output-format json`)](https://code.claude.com/docs/en/headless)
 - [Codex CLI — README oficial (Sign in with ChatGPT vs API key)](https://github.com/openai/codex)
 - [OpenAI Node SDK — tipos da Responses API (`text.format`, `ResponseUsage`, `ReasoningEffort`)](https://github.com/openai/openai-node)
+
+---
+
+## 6. Sessões existentes — o que dá para retomar, e o que não dá
+
+Pesquisado em **2026-09-07**, contra a documentação oficial, antes de
+implementar.
+
+### 6.1 O que é oficialmente suportado
+
+**Claude Code.** `claude -p --resume <session-id>` é documentado, e é o
+caminho **único** para uma sessão criada em modo não interativo: a doc diz que
+sessões criadas com `claude -p` ficam **fora** do seletor interativo e fora do
+`--continue`, e que só podem ser retomadas pelo id. O id vem do envelope
+documentado `--output-format json`, que também traz `total_cost_usd`.
+
+**Codex CLI.** `codex exec resume <SESSION_ID>` e `codex exec resume --last`
+existem como subcomandos não interativos.
+
+### 6.2 O que o aplicativo faz
+
+Guarda o id das sessões **que ele mesmo criou**, por (conversa × conexão), e
+retoma a do worker na delegação seguinte. É isso que faz o Claude carregar o
+que aprendeu de uma delegação para a próxima em vez de reencontrar o código do
+zero a cada volta do loop.
+
+A chave ser `(conversa, conexão)` é o requisito de isolamento virando
+estrutura: duas conexões Claude na mesma conversa são duas linhas, então a
+sessão de uma conta nunca é entregue à outra. Os transcritos já vivem em dois
+`CLAUDE_CONFIG_DIR` diferentes; isto faz o que o app pede combinar com isso. O
+diretório de trabalho também precisa bater, porque as duas ferramentas guardam
+sessão por projeto.
+
+### 6.3 O que **não** dá, e não é fingido
+
+**Listar as sessões que você já tem.** Nenhum dos dois CLIs oferece uma
+listagem não interativa — só um seletor interativo, que um aplicativo não pode
+dirigir. E a doc do Claude Code diz, sobre os arquivos de transcrito:
+
+> *"The entry format is internal to Claude Code and changes between versions, so
+> scripts that parse these files directly can break on any release."*
+
+Então o aplicativo **não lê transcrito de ninguém**, não varre
+`~/.claude/projects`, e não constrói um seletor a partir de arquivos internos
+de outro programa. Ele oferece as sessões que ele mesmo iniciou.
+
+**Retomar uma conversa do Claude Desktop pelo CLI.** A doc é explícita: o app
+desktop, o Claude Code na web e a extensão do VS Code *"each maintain their own
+session history"*, e uma sessão do desktop *"resumes in the app"*. Não há
+caminho oficial do CLI para ela, e este produto não inventa um.
+
+**Retomar a sessão do orquestrador.** Tecnicamente possível (`codex exec
+resume`), deliberadamente não usado: o orquestrador recebe um prompt completo e
+auto-contido a cada volta, e é isso que o impede de se afastar do objetivo.
+Retomá-lo trocaria essa propriedade por nada.
+
+**Uma versão sem `--resume`.** Simplesmente começa uma sessão nova a cada
+delegação, e nada é prometido em nome dela.
