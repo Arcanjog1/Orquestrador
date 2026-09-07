@@ -22,6 +22,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessRunner } from './adapter-types.js';
 import { codexSupportedEfforts, makeAgentResult, resolveFixedEffort, versionNumberOf } from '../core.js';
+import { ActivityMonitor } from '../../../../../src/agents/activity-monitor.js';
+import { DEFAULT_IDLE_TIMEOUT_MS } from './claude-adapter.js';
 import {
   describeProbe,
   readCapabilities,
@@ -31,6 +33,8 @@ import {
 } from './cli-capabilities.js';
 
 export interface CodexAdapterOptions {
+  /** How long a turn may produce nothing before it is stopped. */
+  idleTimeoutMs?: number;
   processManager: ProcessRunner;
   /** Resolves the managed executable; called lazily so a missing runtime is a
    *  clear error at use time rather than at construction time. */
@@ -107,13 +111,32 @@ export class CodexAdapter implements AgentRunner {
       // runs under exactly the environment the real invocation will.
       const env = this.environment(input.env);
       const plan = await this.buildArgs(executable, input.workingDirectory, scratch, routing, env);
+
+      // Liveness for the supervisor too.
+      //
+      // `codex exec` writes a readable transcript to stdout as it goes, so
+      // unlike the Claude side there is nothing to change about the output
+      // format: the bytes are already arriving. The answer is read from
+      // `--output-last-message`, not from stdout, so watching stdout cannot
+      // affect what is parsed.
+      //
+      // A supervisor that hangs leaves the same blank window as a worker that
+      // hangs. There is no reason to make only half the problem visible.
+      const idleTimeoutMs = input.idleTimeoutMs ?? this.options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+      const monitor = new ActivityMonitor(new Date(startedAt), {
+        idleTimeoutMs,
+        ...(input.onActivity ? { onChange: input.onActivity } : {}),
+      });
+
       const result = await this.options.processManager.run({
         command: executable,
         args: plan.args,
         cwd: input.workingDirectory,
         stdin: input.prompt,
         timeoutMs: input.timeoutMs,
+        ...(idleTimeoutMs > 0 ? { idleTimeoutMs } : {}),
         signal: controller.signal,
+        onStdout: (chunk) => monitor.observe(chunk),
         ...(Object.keys(env).length > 0 ? { env } : {}),
       });
 
@@ -123,16 +146,29 @@ export class CodexAdapter implements AgentRunner {
       const lastMessage = plan.lastMessagePath ? readIfPresent(plan.lastMessagePath) : null;
       const stdout = lastMessage && lastMessage.trim().length > 0 ? lastMessage : result.stdout;
 
+      // A supervisor stopped for saying nothing is its own diagnosis, and no
+      // stronger model unsticks it - the same rule as on the worker side.
+      const stalled = result.trace?.idleTimedOut === true;
       return makeAgentResult({
         startedAt,
         outcome: result.outcome,
-        exitCode: result.exitCode,
+        exitCode: stalled && result.exitCode === 0 ? 1 : result.exitCode,
         signal: result.signal,
         stdout,
-        stderr: result.stderr,
+        stderr: stalled
+          ? [
+              result.stderr,
+              `O orquestrador ficou ${Math.round(idleTimeoutMs / 1000)}s sem produzir nenhuma ` +
+                'saída e foi interrompido.',
+            ]
+              .filter((part) => part.trim().length > 0)
+              .join('\n')
+          : result.stderr,
         truncated: result.truncated,
         executable,
         applied: plan.applied,
+        activity: monitor.snapshot(),
+        ...(stalled ? { failure: 'no-activity' as const } : {}),
         ...(result.error ? { error: result.error } : {}),
       });
     } finally {

@@ -1347,3 +1347,78 @@ test('a turn stopped for silence is classified as silence, not as a bad answer',
   assert.match(result.stderr, /sem produzir nenhuma saída/);
   assert.match(result.stderr, /modelo mais forte não destrava/);
 });
+
+test('a supervisor that goes silent is stopped and named, like a worker', async () => {
+  // The hang the user hit was in the worker, but a supervisor that hangs
+  // leaves the same blank window. There is no reason to make only half the
+  // problem visible.
+  const { manager, calls } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': CODEX_EXEC_HELP,
+  });
+  const stalling = {
+    ...manager,
+    async run(options: RunProcessOptions): Promise<ProcessResult> {
+      const result = await manager.run(options);
+      const args = options.args ?? [];
+      if (!args.includes('exec') || args.includes('--help')) return result;
+      return {
+        ...result,
+        outcome: 'timeout',
+        exitCode: 0,
+        error: 'Process produced no output for 600s',
+        trace: { idleTimedOut: true, lastActivityAt: new Date().toISOString() },
+      } as ProcessResult;
+    },
+  } as ProcessManager;
+
+  const adapter = new CodexAdapter({
+    processManager: stalling,
+    resolveExecutable: async () => '/managed/codex.exe',
+    idleTimeoutMs: 45_000,
+  });
+  const result = await adapter.run({
+    prompt: 'decida',
+    workingDirectory: '/work',
+    timeoutMs: 3_600_000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  const exec = calls.find(
+    (call) => (call.args ?? []).includes('exec') && !(call.args ?? []).includes('--help'),
+  )!;
+  assert.equal(exec.idleTimeoutMs, 45_000);
+  assert.ok(exec.idleTimeoutMs! < exec.timeoutMs!, 'silence is caught long before the hard cap');
+  assert.equal(result.failure, 'no-activity');
+  // Exit 0 from a stalled turn must not read as success downstream.
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /sem produzir nenhuma saída/);
+});
+
+test('a healthy supervisor turn is untouched, and its transcript still feeds liveness', async () => {
+  const { manager, calls } = fakeProcessManager({
+    '--help': CODEX_HELP,
+    'exec --help': CODEX_EXEC_HELP,
+  });
+  const adapter = new CodexAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/codex.exe',
+  });
+  const result = await adapter.run({
+    prompt: 'decida',
+    workingDirectory: '/work',
+    timeoutMs: 600_000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  assert.equal(result.failure, undefined);
+  assert.equal(result.exitCode, 0);
+  // stdout is watched, but the answer is still read from the structured file:
+  // watching the transcript must not change what is parsed.
+  const exec = calls.find(
+    (call) => (call.args ?? []).includes('exec') && !(call.args ?? []).includes('--help'),
+  )!;
+  assert.equal(typeof exec.onStdout, 'function');
+});
