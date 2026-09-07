@@ -1,6 +1,8 @@
 node_modules/
 dist/
 dist-tests/
+# The coordinator's build output, from tsconfig.coordinator.json.
+dist-coordinator/
 *.tsbuildinfo
 
 # Runtime data produced by the orchestrator
