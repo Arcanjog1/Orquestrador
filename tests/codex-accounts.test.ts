@@ -53,6 +53,7 @@ function fixture(responses: (options: RunProcessOptions) => Partial<ProcessResul
     artifacts: join(root, 'artifacts'),
     updates: join(root, 'updates'),
     staging: join(root, 'staging'),
+    conversations: join(root, 'conversations'),
   });
 
   const calls: RunProcessOptions[] = [];
@@ -212,6 +213,7 @@ test('a missing Codex runtime is reported as such, not as a failed login', async
     artifacts: join(root, 'artifacts'),
     updates: join(root, 'updates'),
     staging: join(root, 'staging'),
+    conversations: join(root, 'conversations'),
   });
   const runtimeManager = {
     async getExecutablePath() {
@@ -397,6 +399,7 @@ test('giving up on a sign-in stops only that sign-in, and the manager keeps work
     artifacts: join(root, 'artifacts'),
     updates: join(root, 'updates'),
     staging: join(root, 'staging'),
+    conversations: join(root, 'conversations'),
   });
   writeFileSync(
     join(root, 'login'),
@@ -489,6 +492,7 @@ async function connectAgainst(chunks: readonly string[]): Promise<{
     artifacts: join(root, 'artifacts'),
     updates: join(root, 'updates'),
     staging: join(root, 'staging'),
+    conversations: join(root, 'conversations'),
   });
   standInCodex(root, chunks);
   const processManager = new RealProcessManager();

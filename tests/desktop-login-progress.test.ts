@@ -70,6 +70,7 @@ async function signInThroughTheService(chunks: readonly string[]): Promise<{
     artifacts: join(root, 'artifacts'),
     updates: join(root, 'updates'),
     staging: join(root, 'staging'),
+    conversations: join(root, 'conversations'),
   });
   // The manager runs codex with the application root as its working
   // directory, so a script named `login` there is what `node login ...` runs.

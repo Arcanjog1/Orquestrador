@@ -1355,6 +1355,7 @@ async function openWindow() {
     artifacts: join(appRoot, 'artifacts'),
     updates: join(appRoot, 'updates'),
     staging: join(appRoot, 'staging'),
+    conversations: join(appRoot, 'conversations'),
   };
 
   fakeGitHub = await startFakeGitHub();

@@ -17,7 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   ScriptedAgent,
@@ -653,7 +653,7 @@ test('E2E: a coding run finishes only on a real file, real evidence and a re-run
   repo.write(
     'check.mjs',
     [
-      "import { readFileSync } from 'node:fs';",
+      "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
       "let actual = null;",
       "try { actual = readFileSync('hello.txt', 'utf8').trim(); } catch { actual = null; }",
       "if (actual !== 'pronto') { console.error('hello.txt is ' + JSON.stringify(actual)); process.exit(1); }",
@@ -989,6 +989,59 @@ test('a worker that reports no session simply starts fresh, with nothing promise
       assert.equal(call.resumeSessionId ?? null, null, 'nothing is resumed that was never reported');
     }
     assert.equal(fixture.services.database.agentSessions.listForChatSession(session.id).length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('a conversation run gives its agents an empty directory the app owns, never the one it was launched from', async () => {
+  const orchestrator = new ScriptedAgent('mock-codex', 'Codex', [
+    JSON.stringify({
+      action: 'delegate',
+      requiresTools: false,
+      task: 'analise',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+    }),
+    JSON.stringify({
+      action: 'done',
+      acceptanceCriteria: [],
+      verificationCommands: [],
+      summary: 'Uma resposta final suficientemente longa para o gate.',
+    }),
+  ]);
+  const worker = new ScriptedAgent('mock-claude', 'Claude', ['respondi']);
+
+  const fixture = createDesktopFixture({
+    createRunners: async () => ({ orchestrator, worker, workerAccountId: null }),
+    maxIterations: 3,
+  });
+  try {
+    const workspace = value<{ id: string }>(
+      await fixture.router.handle('workspace.createConversation', { name: 'Conversa' }),
+    );
+    await bindTeam(fixture, workspace.id, ['Claude']);
+    const session = value<{ id: string }>(
+      await fixture.router.handle('chat.createSession', { workspaceId: workspace.id, title: 'x' }),
+    );
+    const sent = value<{ run: { id: string } }>(
+      await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'analise' }),
+    );
+    await fixture.services.orchestration.waitFor(sent.run.id);
+
+    // Both agents ran somewhere real, under the application's own root, and
+    // not in whatever directory this process happens to be in. The official
+    // CLIs read the working directory's CLAUDE.md, hooks and MCP servers, so
+    // an inherited folder would run another project's configuration in a run
+    // that has no project.
+    const expected = join(fixture.paths.conversations, workspace.id);
+    for (const call of [...orchestrator.calls, ...worker.calls]) {
+      assert.equal(call.workingDirectory, expected);
+    }
+    assert.notEqual(expected, process.cwd());
+    assert.ok(existsSync(expected), 'and the directory really exists');
+    // Empty is the point: there is nothing in it for a CLI to pick up.
+    assert.deepEqual(readdirSync(expected), []);
   } finally {
     await fixture.cleanup();
   }

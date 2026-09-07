@@ -52,6 +52,20 @@ export interface AppPaths {
   artifacts: string;
   updates: string;
   staging: string;
+  /**
+   * Where a conversation run's agents are given as their working directory.
+   *
+   * A conversation project has no folder of its own, and a child process
+   * still needs one. Left empty, `spawn` inherits whatever directory the
+   * application happened to be launched from - which is not just untidy: the
+   * official CLIs read the working directory's `CLAUDE.md`, `.claude/settings.json`
+   * hooks and `.mcp.json` servers, so an inherited folder could run somebody
+   * else's project configuration in a run that has no project. This is an
+   * empty directory the application owns, so there is nothing there to pick
+   * up, and it gives the CLI a stable place to keep the session so `--resume`
+   * finds it next time.
+   */
+  conversations: string;
 }
 
 export function appPaths(env: NodeJS.ProcessEnv = process.env): AppPaths {
@@ -65,6 +79,7 @@ export function appPaths(env: NodeJS.ProcessEnv = process.env): AppPaths {
     artifacts: join(root, 'artifacts'),
     updates: join(root, 'updates'),
     staging: join(root, 'staging'),
+    conversations: join(root, 'conversations'),
   };
 }
 

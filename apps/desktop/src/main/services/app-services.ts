@@ -9,6 +9,8 @@
  * Nothing in this file, or anything it constructs, imports Electron.
  */
 
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   ClaudeAccountManager,
   CodexAccountManager,
@@ -228,6 +230,14 @@ export class AppServices {
     return {
       // Evidence is collected with the managed Git when there is one.
       gitCommand: () => this.runtimeManager.getExecutablePath('git'),
+      // One empty directory per conversation project, owned by the
+      // application. Empty is the point: nothing there for a CLI to read as
+      // project configuration, and a stable place for it to keep the session.
+      conversationDirectory: (workspace) => {
+        const directory = join(this.paths.conversations, workspace.id);
+        mkdirSync(directory, { recursive: true });
+        return directory;
+      },
       ...(explicit.allowNoChanges !== undefined ? { allowNoChanges: explicit.allowNoChanges } : {}),
       // Where runs execute. Absent means this computer, which is the default
       // for every workspace that has a folder on it.

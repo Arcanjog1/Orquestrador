@@ -205,6 +205,7 @@ test('cancelling a real install aborts the download and is not reported as a fai
     artifacts: join(dir, 'artifacts'),
     updates: join(dir, 'updates'),
     staging: join(dir, 'staging'),
+    conversations: join(dir, 'conversations'),
   });
 
   try {

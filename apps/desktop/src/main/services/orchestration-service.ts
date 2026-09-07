@@ -152,6 +152,17 @@ export interface OrchestrationOptions {
   environments?: EnvironmentFactory;
   /** Default spending limits, when a project sets none. Absent means none. */
   budget?: BudgetLimits;
+  /**
+   * The directory a conversation run's agents work in.
+   *
+   * A conversation project has no folder, and a child process still needs
+   * one. Left to `spawn`, an empty string inherits whatever directory the
+   * application was launched from - and the official CLIs read the working
+   * directory's CLAUDE.md, hooks and MCP servers, so an inherited folder
+   * could run another project's configuration in a run that has no project.
+   * The application therefore hands them one of its own, which is empty.
+   */
+  conversationDirectory?: (workspace: WorkspaceWithAgents) => string;
 }
 
 /**
@@ -425,7 +436,12 @@ export class OrchestrationService {
     // nothing is provisioned and nothing is charged for.
     const environment = conversation ? null : await this.resolveEnvironment(workspace, signal);
     if (environment) this.environments.set(runId, environment);
-    const cwd = environment?.workingDirectory ?? '';
+    // A conversation run still gives its agents a real directory - an empty
+    // one the application owns. See `conversationDirectory`.
+    const cwd =
+      environment?.workingDirectory ??
+      this.options.conversationDirectory?.(workspace) ??
+      process.cwd();
 
     const runners = await this.createRunners(workspace, environment ?? NO_ENVIRONMENT);
     this.runners.set(runId, runners);

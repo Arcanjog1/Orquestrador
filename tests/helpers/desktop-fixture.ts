@@ -85,6 +85,7 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
     artifacts: join(root, 'artifacts'),
     updates: join(root, 'updates'),
     staging: join(root, 'staging'),
+    conversations: join(root, 'conversations'),
   };
 
   const openedUrls: string[] = [];
