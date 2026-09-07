@@ -169,15 +169,18 @@ jobs:
       # visible only to people who already have access; it is marked
       # pre-release and uses a rolling tag, so it is never mistaken for a
       # stable release.
-      # This branch publishes under its own per-commit tag instead of the
-      # rolling one above, so the build being offered is never in doubt and the
+      # These branches publish under their own per-commit tag instead of the
+      # rolling one above, so the build being offered is never in doubt and an
       # older `desktop-dev` release keeps pointing at the commit that produced
       # it. The file comes straight from the job that built it: no artifact
       # upload and download in between, because that store is what is out of
       # quota. No `continue-on-error` here on purpose - if the installer cannot
       # be published there is nothing to download, and that should be visible.
+      #
+      # The list is explicit rather than a `claude/` prefix: every agent branch
+      # publishing a build would bury the ones anybody actually asked for.
       - name: Name this build
-        if: github.ref_name == 'claude/lovable-on-latest-core'
+        if: contains(fromJSON('["claude/lovable-on-latest-core","claude/ai-orchestrator-implementation-y7xw98"]'), github.ref_name)
         id: build
         shell: pwsh
         run: |
@@ -186,7 +189,7 @@ jobs:
           "short=$short" >> $env:GITHUB_OUTPUT
 
       - name: Publish this build as a pre-release
-        if: github.ref_name == 'claude/lovable-on-latest-core'
+        if: contains(fromJSON('["claude/lovable-on-latest-core","claude/ai-orchestrator-implementation-y7xw98"]'), github.ref_name)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.build.outputs.tag }}

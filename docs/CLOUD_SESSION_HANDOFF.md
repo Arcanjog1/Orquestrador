@@ -47,7 +47,8 @@ Detalhes e decisões: `CLOUD_ARCHITECTURE_DECISION.md`,
 | Typecheck (raiz + coordenador + main + renderer) | limpo |
 | Electron (`npm run desktop:test`) | **23 passam** |
 | Sonda contra o Codex 0.153.4 real | PASS (`scripts/probe-codex-capability.mjs`) |
-| Windows CI | ver a última execução da branch |
+| Windows CI | **verde** em `2875aaf` — typecheck, testes, Electron, NSIS, smoke do instalador, e as sondas reais de Codex, Claude e Git |
+| Linux CI | **verde** em `2875aaf`, incluindo o smoke do pacote |
 
 Testes novos deste trabalho: `execution-boundary`, `cloud-provisioner`,
 `cloud-coordinator`, `cloud-github-access`, `cloud-reconnection`, mais casos em
