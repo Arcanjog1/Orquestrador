@@ -80,6 +80,14 @@ export interface GitHubRepository {
   readonly permissions: { readonly push: boolean; readonly admin: boolean };
 }
 
+/** One branch of a repository, for the cloud picker. */
+export interface GitHubBranch {
+  readonly name: string;
+  /** True when a rule forbids pushing straight to it. */
+  readonly protected: boolean;
+  readonly commit: string;
+}
+
 export interface PullRequest {
   readonly number: number;
   readonly htmlUrl: string;
@@ -145,6 +153,8 @@ export interface GitHubClientOptions {
 const REPOS_PAGE_SIZE = 100;
 /** A thousand repositories is more than a person will scroll; the picker searches. */
 const REPOS_MAX_PAGES = 10;
+/** Five hundred branches is already more than a picker can be scrolled through. */
+const BRANCHES_MAX_PAGES = 5;
 
 export class GitHubClient {
   private readonly endpoints: GitHubEndpoints;
@@ -297,6 +307,33 @@ export class GitHubClient {
       )) as Array<Record<string, unknown>>;
       if (!Array.isArray(rows)) break;
       for (const row of rows) out.push(repositoryOf(row));
+      if (rows.length < REPOS_PAGE_SIZE) break;
+    }
+    return out;
+  }
+
+  /**
+   * The branches of one repository, so the cloud picker offers what exists
+   * rather than a free-text field a typo turns into a failed clone.
+   *
+   * The repository's default branch is listed first: it is what a person
+   * means nine times out of ten, and scrolling for it is a small daily tax.
+   */
+  async branches(token: string, owner: string, repo: string, maxPages = BRANCHES_MAX_PAGES): Promise<GitHubBranch[]> {
+    const out: GitHubBranch[] = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const rows = (await this.api(
+        token,
+        `/repos/${owner}/${repo}/branches?per_page=${REPOS_PAGE_SIZE}&page=${page}`,
+      )) as Array<Record<string, unknown>>;
+      if (!Array.isArray(rows)) break;
+      for (const row of rows) {
+        out.push({
+          name: String(row.name ?? ''),
+          protected: row.protected === true,
+          commit: String((row.commit as Record<string, unknown> | undefined)?.sha ?? ''),
+        });
+      }
       if (rows.length < REPOS_PAGE_SIZE) break;
     }
     return out;

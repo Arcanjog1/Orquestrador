@@ -1,0 +1,15 @@
+{
+  "name": "@ai-orchestrator/coordinator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI Orchestrator Run Coordinator: owns remote runs and keeps them going with no desktop connected.",
+  "main": "../../dist-coordinator/apps/coordinator/src/main.js",
+  "scripts": {
+    "build": "tsc -p ../../tsconfig.coordinator.json",
+    "start": "node ../../dist-coordinator/apps/coordinator/src/main.js"
+  },
+  "dependencies": {},
+  "author": "Arcanjo",
+  "license": "MIT"
+}

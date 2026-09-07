@@ -22,6 +22,7 @@ import { createGitFixture } from './helpers/git-fixture.js';
 import { RunStore, hashToken } from '../src/cloud/coordinator/store.js';
 import { Coordinator } from '../apps/coordinator/src/coordinator.js';
 import { createCoordinatorServer } from '../apps/coordinator/src/http.js';
+import { Reaper } from '../apps/coordinator/src/reaper.js';
 import type { AddressInfo } from 'node:net';
 import type {
   ProvisionedWorkspace,
@@ -637,3 +638,95 @@ async function waitUntil(condition: () => boolean, timeoutMs = 3_000): Promise<v
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
+
+/* -- costs: nothing is left running ---------------------------------------- */
+
+test('the reaper reclaims what expired and what a crash left behind', async () => {
+  const database = memoryDatabase();
+  try {
+    const store = new RunStore(database);
+    const provisioner = fakeProvisioner();
+    const reaper = new Reaper({ database, store, provisioner });
+    const principal = store.createPrincipal({ displayName: 'A' });
+
+    const workspaceId = database.workspaces.create({
+      id: 'ws-1',
+      name: 'o/r',
+      localPath: '',
+      environment: 'cloud',
+      repositoryFullName: 'o/r',
+      branch: 'main',
+    }).id;
+
+    // 1. Past its ceiling while its run is still going: stopped by the clock,
+    //    which is the only thing that stops a run that will not end itself.
+    const expired = database.cloudWorkspaces.create({
+      id: 'cw-expired',
+      workspaceId,
+      provisioner: 'fake',
+      repository: 'o/r',
+      branch: 'main',
+      workingDir: '/workspace/repo',
+      ttlMs: -1000,
+    });
+    database.cloudWorkspaces.setHandle(expired.id, 'handle-expired');
+    database.cloudWorkspaces.setStatus(expired.id, 'ready');
+
+    // 2. Its run finished, but the release never happened - what a crash
+    //    between the two leaves behind, and what nothing else would clear.
+    const orphan = database.cloudWorkspaces.create({
+      id: 'cw-orphan',
+      workspaceId,
+      provisioner: 'fake',
+      repository: 'o/r',
+      branch: 'main',
+      workingDir: '/workspace/repo',
+      ttlMs: 60 * 60_000,
+    });
+    database.cloudWorkspaces.setHandle(orphan.id, 'handle-orphan');
+    database.cloudWorkspaces.setStatus(orphan.id, 'ready');
+    const { run: finished } = store.createRun({
+      principal,
+      repository: 'o/r',
+      branch: 'main',
+      objective: 'x',
+    });
+    store.setCloudWorkspace(finished.id, orphan.id);
+    store.setStatus(finished.id, 'DONE');
+
+    // 3. A live workspace of a run still going, well inside its ceiling: not
+    //    the reaper's business, and reclaiming it would kill working runs.
+    const live = database.cloudWorkspaces.create({
+      id: 'cw-live',
+      workspaceId,
+      provisioner: 'fake',
+      repository: 'o/r',
+      branch: 'main',
+      workingDir: '/workspace/repo',
+      ttlMs: 60 * 60_000,
+    });
+    database.cloudWorkspaces.setStatus(live.id, 'ready');
+    const { run: running } = store.createRun({
+      principal,
+      repository: 'o/r',
+      branch: 'main',
+      objective: 'y',
+    });
+    store.setCloudWorkspace(running.id, live.id);
+    store.setStatus(running.id, 'RUNNING');
+
+    const swept = await reaper.sweep();
+    assert.deepEqual(swept.expired, ['cw-expired']);
+    assert.deepEqual(swept.orphaned, ['cw-orphan']);
+    assert.deepEqual(provisioner.released.sort(), ['handle-expired', 'handle-orphan']);
+
+    assert.equal(database.cloudWorkspaces.require('cw-expired').status, 'released');
+    assert.equal(database.cloudWorkspaces.require('cw-orphan').status, 'released');
+    assert.equal(database.cloudWorkspaces.require('cw-live').status, 'ready', 'a working run was reclaimed');
+
+    // A second sweep finds nothing: reclaiming is not repeated per pass.
+    assert.deepEqual(await reaper.sweep(), { expired: [], orphaned: [] });
+  } finally {
+    database.close();
+  }
+});

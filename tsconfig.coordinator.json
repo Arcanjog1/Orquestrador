@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-coordinator"
+  },
+  "include": [
+    "src/**/*.ts",
+    "apps/coordinator/src/**/*.ts",
+    "apps/desktop/src/main/**/*.ts",
+    "apps/desktop/src/shared/**/*.ts"
+  ]
+}
