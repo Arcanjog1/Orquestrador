@@ -962,6 +962,24 @@ ALTER TABLE accounts ADD COLUMN max_reasoning TEXT;
 ALTER TABLE accounts ADD COLUMN allow_premium_models INTEGER NOT NULL DEFAULT 0;
 `,
   },
+  {
+    id: 19,
+    name: 'cancel-requested',
+    sql: `
+-- When somebody asked for this run to stop.
+--
+-- "Cancelar" used to be only an abort signal and a kill: the run stayed
+-- RUNNING in the database until the loop happened to reach one of three
+-- checkpoints, so the interface kept saying "Analisando" and the loop could
+-- still start another delegation on the way there. The person had asked twice
+-- and watched the work continue both times.
+--
+-- Recorded rather than derived, because it must survive a restart: an
+-- application reopened mid-cancellation has to know the person already
+-- decided, and must not resume.
+ALTER TABLE runs ADD COLUMN cancel_requested_at TEXT;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

@@ -405,6 +405,15 @@ export class OrchestrationService {
    * until its own timeout.
    */
   cancel(runId: string): boolean {
+    // Recorded before anything else, and before any await.
+    //
+    // Cancelling used to be only an abort signal plus a kill, so the run
+    // stayed RUNNING in the database until the loop happened to reach a
+    // checkpoint - and on the way there it could still start another
+    // delegation. The person had asked twice and watched the work continue
+    // both times. The intent is now a fact the loop reads, not a race it has
+    // to win, and it survives a restart.
+    this.database.runs.requestCancel(runId);
     const controller = this.active.get(runId);
     if (!controller) {
       // A run waiting at the human gate is not running, but it is still
@@ -440,6 +449,12 @@ export class OrchestrationService {
     // environment can.
     const environment = this.environments.get(runId);
     if (environment && environment.kind !== 'local') void environment.processes.cancelAll();
+    // "Cancelando" on the screen, immediately, without waiting for the loop to
+    // notice. The terminal state arrives when the loop actually stops.
+    const run = this.database.runs.find(runId);
+    if (run?.session_id) {
+      this.progress(runId, run.session_id, 'cancelling', 'Cancelando...', 'RUNNING');
+    }
     return true;
   }
 
@@ -825,7 +840,7 @@ export class OrchestrationService {
     const history = this.conversationBefore(sessionId, runId);
 
     for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
-      if (signal.aborted) return this.finishCancelled(runId, sessionId);
+      if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
       this.database.runs.setIteration(runId, iteration);
 
       iterationAnswer = '';
@@ -881,7 +896,7 @@ export class OrchestrationService {
           }
         },
       });
-      if (signal.aborted) return this.finishCancelled(runId, sessionId);
+      if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
       if (!asked.decision) {
         // Say exactly what happened - the CLI's exit, or what it answered
         // instead of a decision - rather than a sentence that fits everything.
@@ -945,6 +960,10 @@ export class OrchestrationService {
           workerId: slot.id,
           workerLabel: slot.label,
         });
+        // The last chance to stop before a model is paid for. A cancellation
+        // that arrived while the supervisor was thinking used to be noticed
+        // only after the worker had already been started.
+        if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
         const delegated = await this.delegate({
           runId,
           sessionId,
@@ -1024,7 +1043,7 @@ export class OrchestrationService {
           );
           return;
         }
-        if (signal.aborted) return this.finishCancelled(runId, sessionId);
+        if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
       }
 
       // 3. Collect evidence ourselves, whatever the worker claims.
@@ -2892,8 +2911,29 @@ export class OrchestrationService {
 
   private finishCancelled(runId: string, sessionId: string): void {
     this.database.runs.setStatus(runId, 'CANCELLED', 'Cancelado pelo usuário.');
+    // Every step still open gets a terminal status. A step left `running` is
+    // what the interface draws as a spinner, and a cancelled run that kept
+    // showing "Analisando" and "Revisando" is how a person lost track of which
+    // run was finished, cancelled or still going.
+    this.database.runs.closePendingSteps(runId, 'cancelled');
     this.say(sessionId, runId, 'system', 'Execução cancelada.');
     this.progress(runId, sessionId, 'cancelled', 'Cancelado.', 'CANCELLED');
+  }
+
+  /**
+   * True when this run must not do anything else.
+   *
+   * Read from the database rather than only from the abort signal, so a
+   * cancellation that arrived while an agent was running is seen even though
+   * the signal fired inside an await nobody was checking.
+   */
+  private stopping(runId: string, signal: AbortSignal): boolean {
+    if (signal.aborted) return true;
+    try {
+      return this.database.runs.cancelRequested(runId);
+    } catch {
+      return false;
+    }
   }
 
   /**

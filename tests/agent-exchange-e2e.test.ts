@@ -515,12 +515,25 @@ test('cancelling a run stops the exchange and keeps what already happened', asyn
 test('a run interrupted by the application closing leaves nothing pretending to be in flight', async () => {
   const t = await conversationTeam();
   try {
-    const sent = value<{ run: { id: string } }>(
-      await t.fixture.router.handle('chat.sendMessage', { sessionId: t.sessionId, text: 'Compare.' }),
-    );
-    const run = await t.fixture.services.orchestration.waitFor(sent.run.id);
+    // A run the previous process left RUNNING because it died mid-flight, and
+    // a message it left behind. Created directly rather than by finishing a
+    // real run and writing RUNNING back over it: a terminal status is now
+    // final, so that shortcut would describe a state the application cannot
+    // produce - and would test nothing.
+    const session = t.fixture.services.database.chat.requireSession(t.sessionId);
+    const run = t.fixture.services.database.runs.create({
+      id: 'run-interrupted-test',
+      sessionId: t.sessionId,
+      workspaceId: session.workspace_id,
+      objective: 'Compare.',
+      orchestratorAgentId: null,
+      maxIterations: 4,
+      kind: 'conversation',
+    });
+    // A fresh run starts PENDING; the previous process had moved it to
+    // RUNNING before it died, which is the state reconciliation exists for.
+    t.fixture.services.database.runs.setStatus(run.id, 'RUNNING');
 
-    // A message the previous process left behind, of the kind a crash creates.
     const orphan = t.fixture.services.orchestration.bus.publish({
       runId: run.id,
       conversationId: t.sessionId,
@@ -531,7 +544,6 @@ test('a run interrupted by the application closing leaves nothing pretending to 
       recipientAgentId: 'worker-1',
     });
     t.fixture.services.orchestration.bus.claim('worker-1');
-    t.fixture.services.database.runs.setStatus(run.id, 'RUNNING');
 
     const reconciled = t.fixture.services.orchestration.reconcileInterrupted();
     assert.ok(reconciled >= 1);

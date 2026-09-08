@@ -12,6 +12,7 @@ import { newId } from '../core.js';
 import type { ChatMessageView, ChatSessionView, RunView } from '../../shared/ipc-contract.js';
 import type { OrchestrationService } from './orchestration-service.js';
 import { toMessageView, toSessionView } from './views.js';
+import { readStopIntent } from '../../../../../src/orchestrator/stop-intent.js';
 
 export class ChatError extends Error {
   readonly code = 'CHAT_ERROR';
@@ -21,11 +22,39 @@ export class ChatError extends Error {
   }
 }
 
+/** The most recent run of a conversation, for a message that needs one. */
+function lastRunOf(
+  database: Database,
+  sessionId: string,
+  orchestration: OrchestrationService,
+): RunView | null {
+  const runs = database.runs.listForSession(sessionId);
+  const last = runs[runs.length - 1];
+  return last ? orchestration.view(last.id) : null;
+}
+
 export class ChatService {
   constructor(
     private readonly database: Database,
     private readonly orchestration: OrchestrationService,
   ) {}
+
+  /**
+   * Cancels this conversation's run, if one is going.
+   *
+   * Returns the run it stopped so the caller can point the message at it.
+   * Nothing here calls a model: it goes straight to the orchestration
+   * service's own control path, which aborts the loop and kills the child
+   * processes.
+   */
+  private stopActiveRun(sessionId: string): RunView | null {
+    for (const run of this.database.runs.listForSession(sessionId)) {
+      if (run.status !== 'RUNNING' && run.status !== 'PENDING' && run.status !== 'BLOCKED') continue;
+      if (!this.orchestration.cancel(run.id)) continue;
+      return this.orchestration.view(run.id);
+    }
+    return null;
+  }
 
   listSessions(workspaceId: string, options: ListSessionsOptions = {}): ChatSessionView[] {
     this.database.workspaces.require(workspaceId);
@@ -123,6 +152,36 @@ export class ChatService {
     if (session.archived_at) this.database.chat.setSessionArchived(sessionId, false);
 
     const record = this.database.chat.addMessage({ sessionId, author: 'user', body: text });
+
+    // "pare tudo q esteja fazendo" is not a task.
+    //
+    // Both of the person's stop requests became new runs: the supervisor was
+    // asked to plan how to stop and the worker was delegated the job of
+    // confirming that it had. The run they wanted stopped kept going.
+    //
+    // Cancelling is a control operation. It reaches the process manager
+    // directly, no model is asked, and no run is created - which is why this
+    // returns the run it *stopped*, or the last one, rather than a new one.
+    if (readStopIntent(text) === 'stop') {
+      const stopped = this.stopActiveRun(sessionId);
+      this.database.chat.addMessage({
+        sessionId,
+        author: 'system',
+        body: stopped
+          ? 'Cancelando a execução em andamento. Nenhum agente foi chamado para isso.'
+          : 'Não há nenhuma tarefa em andamento nesta conversa. Nada foi iniciado.',
+        ...(stopped ? { runId: stopped.id } : {}),
+      });
+      this.database.workspaces.touch(workspace.id);
+      const view = stopped ?? lastRunOf(this.database, sessionId, this.orchestration);
+      if (view) {
+        return { message: toMessageView({ ...record, run_id: view.id }), run: view };
+      }
+      // Nothing to stop and nothing to point at. The message stands on its
+      // own; no run is invented to carry it.
+      throw new ChatError('Não há nenhuma tarefa em andamento nesta conversa.');
+    }
+
     const run = this.orchestration.start({ sessionId, objective: text });
     // The message that started the run carries its id, so the history of a
     // later run can leave this one out, and the interface can pair them.

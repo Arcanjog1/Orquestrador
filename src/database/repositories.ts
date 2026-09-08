@@ -1502,6 +1502,11 @@ export class ChatRepository extends Repository {
  * Runs
  * ------------------------------------------------------------------ */
 
+/** The statuses a run never leaves. */
+export function isTerminalStatus(status: string): boolean {
+  return status === 'DONE' || status === 'FAILED' || status === 'CANCELLED';
+}
+
 export type RunStatus =
   | 'PENDING'
   | 'RUNNING'
@@ -1532,6 +1537,8 @@ export interface RunRecord extends SqlRow {
   baseline_branch: string | null;
   baseline_dirty: number;
   termination_reason: string | null;
+  /** When a person asked this run to stop. Null when nobody did. */
+  cancel_requested_at: string | null;
   artifacts_path: string | null;
   started_at: string;
   finished_at: string | null;
@@ -1621,12 +1628,67 @@ export class RunRepository extends Repository {
     );
   }
 
+  /**
+   * Moves a run to a status, unless it has already finished.
+   *
+   * The guard is the point. A cancelled run could be written back to RUNNING -
+   * or to DONE - by anything that finished after the cancellation and did not
+   * know about it, and then the interface showed "Tarefa concluída e
+   * verificada" for a run the person had stopped. A terminal state is final:
+   * a later writer is ignored, and the row keeps the truth.
+   *
+   * `CANCELLED` is the one exception, and only over another terminal state:
+   * a person's decision outranks a result that arrived after it.
+   */
   setStatus(id: string, status: RunStatus, terminationReason?: string | null): void {
-    const finished = status === 'RUNNING' || status === 'PENDING' ? null : now();
+    const current = this.db.get<{ status: string }>('SELECT status FROM runs WHERE id = ?', [id]);
+    if (current && isTerminalStatus(current.status) && status !== 'CANCELLED') return;
+    const stopped = status !== 'RUNNING' && status !== 'PENDING';
+    const finished = stopped ? now() : null;
     this.db.run(
       'UPDATE runs SET status = ?, termination_reason = COALESCE(?, termination_reason), finished_at = ? WHERE id = ?',
       [status, terminationReason ?? null, finished, id],
     );
+    // A run that stopped has no step still in progress. Done here rather than
+    // at each of the fifteen places that end a run, because the one that gets
+    // forgotten is the one that leaves a spinner turning for ever.
+    if (stopped) this.closePendingSteps(id, status === 'CANCELLED' ? 'cancelled' : 'ended');
+  }
+
+  /** Records that a person asked for this run to stop. Idempotent. */
+  requestCancel(id: string): void {
+    this.db.run(
+      'UPDATE runs SET cancel_requested_at = COALESCE(cancel_requested_at, ?) WHERE id = ?',
+      [now(), id],
+    );
+  }
+
+  /** True when somebody has asked for this run to stop. */
+  cancelRequested(id: string): boolean {
+    const row = this.db.get<{ cancel_requested_at: string | null }>(
+      'SELECT cancel_requested_at FROM runs WHERE id = ?',
+      [id],
+    );
+    return Boolean(row?.cancel_requested_at);
+  }
+
+  /**
+   * Gives every unfinished step of a finished run a terminal status.
+   *
+   * A step left `running` is what the interface draws as a spinner, so a run
+   * that ended could keep showing "Analisando" and "Revisando" for ever - and
+   * a person could not tell which run was finished, cancelled or still going.
+   * The step keeps its phase and its summary; only its open-endedness goes.
+   */
+  closePendingSteps(runId: string, status: string): number {
+    const open = this.db.all<{ id: number }>(
+      "SELECT id FROM run_steps WHERE run_id = ? AND status IN ('running', 'started', 'pending')",
+      [runId],
+    );
+    for (const row of open) {
+      this.db.run('UPDATE run_steps SET status = ? WHERE id = ?', [status, row.id]);
+    }
+    return open.length;
   }
 
   setBaseline(id: string, branch: string | null, commit: string | null, dirty: boolean): void {
