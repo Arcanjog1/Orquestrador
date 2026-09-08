@@ -165,6 +165,12 @@ export function WorkspacePage({
     [permissions],
   );
 
+  /** The project this folder belongs to, when exactly one does. */
+  const projectOfWorkspace = useMemo(
+    () => (workspace ? (projects.find((p) => p.workspaceId === workspace.id)?.id ?? null) : null),
+    [projects, workspace],
+  );
+
   const activeProjectId = useMemo(() => {
     const open = sessions.find((s) => s.id === sessionId);
     if (open?.projectId) return open.projectId;
@@ -334,6 +340,16 @@ export function WorkspacePage({
   useEffect(() => {
     // Switching folders opens the conversation that asked for the switch,
     // when there is one; otherwise it starts clean.
+    //
+    // The guard is the fix for a reported defect, and it is the whole of it.
+    // Creating a conversation in a project whose workspace does not exist yet
+    // switches to a workspace this page has not been told about, so `workspace`
+    // is briefly undefined. This effect ran *then*, consumed the pending id and
+    // cleared it; when the workspace arrived it ran again and selected nothing.
+    // The person saw an empty composer, typed into it, and that made a second
+    // conversation - under "Sem projeto", because `send` created it with no
+    // project. Both halves are fixed; this is the half that lost the selection.
+    if (!workspace) return;
     setSessionId(pendingSession.current);
     pendingSession.current = null;
     setMessages([]);
@@ -749,15 +765,22 @@ export function WorkspacePage({
         // opened. Asking for it here is what lets "nova conversa" work on a
         // project the person has never opened, instead of quietly putting the
         // conversation in whichever folder happens to be on screen.
-        const workspaceId = project
-          ? (await api.project.open({ projectId: project.id })).workspaceId
-          : workspace.id;
+        const opened = project ? await api.project.open({ projectId: project.id }) : null;
+        const workspaceId = opened ? opened.workspaceId : workspace.id;
         const created = await api.chat.createSession({
           workspaceId,
           title: "Nova tarefa",
           projectId: project?.id ?? null,
         });
         if (workspaceId !== workspace.id) {
+          // A project the person has never opened has no workspace until the
+          // line above makes one, and this page only knows the workspaces the
+          // shell has loaded. Without the refresh the switch lands on a
+          // workspace nothing has heard of, the page falls back to "no
+          // project", and the conversation that was just created correctly is
+          // simply not shown - which is how a "+" on a project ended with the
+          // person typing into an empty composer.
+          if (opened?.workspaceCreated) reload();
           pendingSession.current = created.id;
           onSelectWorkspace(workspaceId);
           toast(`Nova conversa em ${project?.name ?? "Sem projeto"}`);
@@ -773,7 +796,7 @@ export function WorkspacePage({
         fail(error);
       }
     },
-    [workspace, loadSessions, fail, onSelectWorkspace],
+    [workspace, loadSessions, fail, onSelectWorkspace, reload],
   );
 
   useEffect(() => {
@@ -800,6 +823,15 @@ export function WorkspacePage({
         const created = await api.chat.createSession({
           workspaceId: workspace.id,
           title: text.trim().slice(0, 80),
+          // The project that owns this folder, when exactly one does. Leaving
+          // it out is what filed a conversation started from the composer
+          // under "Sem projeto" while the person was looking at the project.
+          //
+          // Deliberately the *owner of the folder*, not the last project
+          // opened: one folder has one project, which is an unambiguous
+          // association, while "the last one" is a guess that would put a
+          // conversation in a project the person had left.
+          projectId: projectOfWorkspace,
         });
         target = created.id;
         setSessionId(target);

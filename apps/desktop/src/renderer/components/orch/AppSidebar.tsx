@@ -210,6 +210,15 @@ export function AppSidebar({
 
   const toggleFold = (key: string) => setFolded((prev) => ({ ...prev, [key]: !prev[key] }));
 
+  // Opening a conversation inside a folded project unfolds it. Otherwise a
+  // new conversation, correctly filed, is invisible - and "it went somewhere
+  // else" is exactly what an invisible correct answer looks like.
+  const openSessionProjectId = sessions.find((s) => s.id === activeSessionId)?.projectId ?? null;
+  useEffect(() => {
+    const key = openSessionProjectId ?? NO_PROJECT;
+    setFolded((prev) => (prev[key] ? { ...prev, [key]: false } : prev));
+  }, [openSessionProjectId, activeSessionId]);
+
   const renderSession = (t: ChatSessionView, withProject: boolean) => (
     <div
       key={t.id}

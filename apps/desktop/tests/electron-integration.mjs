@@ -765,6 +765,142 @@ test('a conversation is renamed, archived, found and deleted from the real sideb
   }
 });
 
+test('projects: the "+" of a project with no folder yet still lands the conversation in it', async () => {
+  // The reported defect. Clicking "+" on a project whose workspace does not
+  // exist yet switches folders, and the switch used to eat the selection: the
+  // effect that opens the pending conversation fires once while the workspace
+  // is still unknown, consuming the pending id, and again when it arrives -
+  // that second run selected nothing. The person then typed into an empty
+  // composer, and *that* made a second conversation, with no project, under
+  // "Sem projeto". Exactly what was reported.
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-plus-'));
+  try {
+    // A folder project, opened so its workspace is the one on screen.
+    const opened = await window.webContents.executeJavaScript(
+      `window.api.workspace.openProject(${JSON.stringify({ localPath: dir })})`,
+    );
+    // And a second project that has no folder at all - a repository connected
+    // but never opened. This is the one whose "+" has to switch.
+    const connected = await window.webContents.executeJavaScript(
+      `window.api.project.create(${JSON.stringify({ name: 'Sem pasta ainda' })})`,
+    );
+
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Sem pasta ainda/, 15_000);
+
+    await click(window, `new-session-in-${connected.id}`);
+    await waitForText(window, /Nova conversa em Sem pasta ainda/, 15_000);
+
+    // One conversation, in that project - not two, and not loose.
+    const all = await window.webContents.executeJavaScript('window.api.chat.listAllSessions({})');
+    const born = all.filter((s) => s.title === 'Nova tarefa');
+    assert.equal(born.length, 1, 'one conversation, not a spare under "Sem projeto"');
+    assert.equal(born[0].projectId, connected.id);
+
+    // And it is the one on screen, so typing continues it instead of making
+    // another. This is the assertion that fails without the fix.
+    // The switch is asynchronous: the workspace is created, the shell reloads
+    // its list, and only then can the tree draw. Poll rather than guess.
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const there = await window.webContents.executeJavaScript(
+        `!!document.querySelector('[data-testid="session-${born[0].id}"]')`,
+      );
+      if (there) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    const probe = await window.webContents.executeJavaScript(
+      `(() => {
+         const el = document.querySelector('[data-testid="session-${born[0].id}"]');
+         return {
+           present: !!el,
+           className: el ? el.className : null,
+           bodyHead: document.body.innerText.slice(0, 400),
+         };
+       })()`,
+    );
+    const selected = probe.present && /bg-sidebar-accent/.test(probe.className ?? '');
+    assert.equal(selected, true, `the new conversation is the open one: ${JSON.stringify(probe)}`);
+
+    // Sending from here must not create a second, loose conversation.
+    await window.webContents.executeJavaScript(
+      `window.api.chat.listAllSessions({})`,
+    );
+    const underProject = await window.webContents.executeJavaScript(
+      `!!document.querySelector('[data-testid="project-${connected.id}"] [data-testid="session-${born[0].id}"]')`,
+    );
+    assert.equal(underProject, true, 'and it is drawn under its project');
+    assert.ok(opened.projectId, 'the folder project still exists');
+
+    // The other half of the same defect: a conversation started from the
+    // composer, with nothing selected, used to be created with no project at
+    // all - so typing while looking at a project filed the conversation under
+    // "Sem projeto". Open the folder project, which selects no conversation
+    // because it has none, and type.
+    await click(window, `open-project-${opened.projectId}`);
+    let composerReady = false;
+    const typedBy = Date.now() + 20_000;
+    while (Date.now() < typedBy) {
+      composerReady = await window.webContents.executeJavaScript(
+        `!!document.querySelector('[data-testid="composer-input"]')`,
+      );
+      if (composerReady) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    if (!composerReady) {
+      const body = await window.webContents.executeJavaScript(
+        'document.body.innerText.slice(0, 400)',
+      );
+      assert.fail(`the composer never appeared after opening the project: ${body}`);
+    }
+    await type(window, 'composer-input', 'crie hello.txt com o texto pronto');
+    await click(window, 'composer-send');
+    const fromComposer = await (async () => {
+      const until = Date.now() + 20_000;
+      while (Date.now() < until) {
+        const all = await window.webContents.executeJavaScript(
+          'window.api.chat.listAllSessions({})',
+        );
+        const found = all.find((s) => s.title.startsWith('crie hello.txt'));
+        if (found) return found;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      return null;
+    })();
+    assert.ok(fromComposer, 'the composer created a conversation');
+    assert.equal(
+      fromComposer.projectId,
+      opened.projectId,
+      'and filed it under the project on screen, not under "Sem projeto"',
+    );
+
+    // These checks share one database, so this one puts back what it made.
+    // Reported rather than thrown: a cleanup that fails must say which step
+    // failed, not surface as "script failed to execute" with no clue in it.
+    const cleanup = await window.webContents.executeJavaScript(
+      `(async () => {
+         const problems = [];
+         const steps = [
+           ['session-composer', () => window.api.chat.deleteSession(${JSON.stringify({ sessionId: fromComposer.id })})],
+           ['session-plus', () => window.api.chat.deleteSession(${JSON.stringify({ sessionId: born[0].id })})],
+           ['project', () => window.api.project.remove(${JSON.stringify({ projectId: connected.id })})],
+         ];
+         for (const [what, run] of steps) {
+           try { await run(); } catch (e) { problems.push(what + ': ' + ((e && e.message) || String(e))); }
+         }
+         return problems;
+       })()`,
+    );
+    assert.deepEqual(cleanup, [], 'cleanup should not fail');
+  } finally {
+    removeTree(dir);
+  }
+});
+
 test('projects: the sidebar files conversations under real projects, and a move persists', async () => {
   const window = await openWindow();
   const dirA = mkdtempSync(join(tmpdir(), 'lao-electron-proj-a-'));
@@ -813,7 +949,9 @@ test('projects: the sidebar files conversations under real projects, and a move 
     await click(window, `new-session-in-${revit.id}`);
     await waitForText(window, /Nova conversa em Revit/, 10_000);
     const all = await window.webContents.executeJavaScript('window.api.chat.listAllSessions({})');
-    const born = all.find((s) => s.title === 'Nova tarefa');
+    // Scoped to this project: another check may have made its own "Nova
+    // tarefa" elsewhere, and matching on the title alone would find that one.
+    const born = all.find((s) => s.title === 'Nova tarefa' && s.projectId === revit.id);
     assert.ok(born, 'the conversation exists');
     assert.equal(born.projectId, revit.id);
     assert.equal(born.workspaceId, revitFolder.id, 'in the project\'s folder');
@@ -2009,8 +2147,14 @@ async function type(window, testid, text) {
     (() => {
       const el = document.querySelector('[data-testid="${testid}"]');
       if (!el) return 'missing';
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype, 'value').set;
+      // The composer is a textarea, and a textarea does not take the input
+      // prototype's setter - calling it throws, which reaches the harness as
+      // an opaque "script failed to execute". Pick the prototype the element
+      // actually has.
+      const proto = el instanceof window.HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
       setter.call(el, ${JSON.stringify(text)});
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return 'typed';
