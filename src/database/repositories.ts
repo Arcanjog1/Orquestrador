@@ -1814,6 +1814,20 @@ export class RunRepository extends Repository {
     );
   }
 
+  /**
+   * Attaches the delegation's report to the invocation it describes.
+   *
+   * Written after the fact rather than at insert time because the report needs
+   * what only exists afterwards: the evidence the loop collected and the
+   * verifications it ran. Redacted like every other stored diagnostic.
+   */
+  setInvocationReport(invocationId: string, report: unknown): void {
+    this.db.run('UPDATE agent_invocations SET report_json = ? WHERE id = ?', [
+      redact(JSON.stringify(report)).slice(0, 200_000),
+      invocationId,
+    ]);
+  }
+
   invocations(runId: string): SqlRow[] {
     return this.db.all<SqlRow>(
       'SELECT * FROM agent_invocations WHERE run_id = ? ORDER BY started_at',

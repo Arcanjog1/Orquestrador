@@ -260,6 +260,14 @@ export interface TimelineInput {
  * produced: user objective, then each agent's turn, then the terminal card for
  * whatever the run's real status is.
  */
+/** The four states a delegation can end in, in the words the screen uses. */
+const REPORT_STATUS_LABEL: Record<'completed' | 'partial' | 'blocked' | 'failed', string> = {
+  completed: 'Concluído',
+  partial: 'Parcial',
+  blocked: 'Bloqueado',
+  failed: 'Falhou',
+};
+
 export function buildTimeline(input: TimelineInput): TimelineEntry[] {
   const { messages, run, agents, branch, liveStage, filesChanged, tests } = input;
   const entries: TimelineEntry[] = [];
@@ -286,13 +294,39 @@ export function buildTimeline(input: TimelineInput): TimelineEntry[] {
             `${message.routing.fallbackUsed ? ' (com fallback)' : ''}: ${message.routing.selectionReason}`,
         );
       }
+      // A report gets its own summary row: status, what the application
+      // observed, and which model produced it. The body stays as the detail,
+      // so the claim and the measurement are still there, still apart.
+      const report = message.report;
       entries.push({
         kind: 'agent',
         id: message.id,
         agent,
-        duration: '—',
+        duration: report ? `${(report.durationMs / 1000).toFixed(1)}s` : '—',
         headline: headline ?? message.text,
         lines,
+        ...(report
+          ? {
+              stats: [
+                { label: 'Status', value: REPORT_STATUS_LABEL[report.status] },
+                {
+                  label: 'Arquivos (evidência)',
+                  value: report.evidenceUnavailable
+                    ? 'não observável'
+                    : String(
+                        report.evidenceFiles.created.length +
+                          report.evidenceFiles.modified.length +
+                          report.evidenceFiles.deleted.length,
+                      ),
+                },
+                { label: 'Modelo', value: report.model ?? 'não informado' },
+                {
+                  label: 'Pendências',
+                  value: String(report.pending.length),
+                },
+              ],
+            }
+          : {}),
         detail: true,
       });
       continue;

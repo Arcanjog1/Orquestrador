@@ -80,6 +80,11 @@ import {
   renderPreflight,
   type PreflightResult,
 } from '../../../../../src/workspace/preflight.js';
+import {
+  buildWorkerReport,
+  renderWorkerReport,
+  type WorkerReport,
+} from '../../../../../src/worker/worker-report.js';
 import type { ContextEntry } from '../../../../../src/context/project-context.js';
 import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
 import type { DeniedToolCall } from '../core.js';
@@ -799,6 +804,8 @@ export class OrchestrationService {
     const unavailableModels: string[] = [];
     /** The last answer a worker gave, which is what a conversation run ends with. */
     let lastWorkerAnswer = '';
+    /** This iteration's worker answer, which is what its report is about. */
+    let iterationAnswer = '';
     let previousTree = treeKey(baseline.statusShort, baseline.unstagedDiff + baseline.stagedDiff);
     let warnedOrchestratorLevel = false;
     // The short path is offered once per run. A second attempt would be the
@@ -813,6 +820,8 @@ export class OrchestrationService {
     for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
       if (signal.aborted) return this.finishCancelled(runId, sessionId);
       this.database.runs.setIteration(runId, iteration);
+
+      iterationAnswer = '';
 
       const record: IterationRecord = {
         iteration,
@@ -949,6 +958,7 @@ export class OrchestrationService {
           budget,
         });
         record.worker = delegated.record;
+        iterationAnswer = delegated.answer;
         if (delegated.answer.trim()) lastWorkerAnswer = delegated.answer;
 
         // A provider that will keep refusing must stop the run rather than be
@@ -973,6 +983,19 @@ export class OrchestrationService {
                   tools: delegated.record.deniedTools ?? [],
                 })
               : [];
+          // A delegation that died before answering still gets a report,
+          // built from the process rather than from a summary nobody wrote.
+          record.workerReport = this.reportDelegation({
+            runId,
+            sessionId,
+            iteration,
+            worker: delegated.record,
+            answer: delegated.answer,
+            evidence: null,
+            verifications: [],
+            unproven: ledger.pending().filter((c) => c.status !== 'failed').map((c) => c.text),
+            failedCriteria: ledger.pending().filter((c) => c.status === 'failed').map((c) => c.text),
+          });
           const reason =
             requests.length > 0
               ? `${terminal} Há ${requests.length} pedido(s) de autorização aguardando você.`
@@ -1249,6 +1272,46 @@ export class OrchestrationService {
           iteration,
           verificationNote(verification),
         );
+      }
+
+      // 4a. What the worker did, assembled from what already came back.
+      if (record.worker) {
+        record.workerReport = this.reportDelegation({
+          runId,
+          sessionId,
+          iteration,
+          worker: record.worker,
+          answer: iterationAnswer,
+          evidence,
+          verifications: [
+            ...verification.map((result) => ({
+              label: result.command,
+              passed: commandPassed(result),
+              ...(commandPassed(result)
+                ? {}
+                : {
+                    problem: result.refused
+                      ? `recusada: ${result.refused}`
+                      : result.timedOut
+                        ? 'tempo esgotado'
+                        : `exit ${result.exitCode}`,
+                  }),
+            })),
+            ...fileChecks.map((check) => ({
+              label: `[leitura direta] ${check.request.path}`,
+              passed: check.passed,
+              ...(check.passed ? {} : { problem: check.problem ?? describeFileCheck(check) }),
+            })),
+          ],
+          unproven: ledger
+            .pending()
+            .filter((c) => c.status !== 'failed')
+            .map((c) => c.text),
+          failedCriteria: ledger
+            .pending()
+            .filter((c) => c.status === 'failed')
+            .map((c) => c.text),
+        });
       }
 
       /** Every proof that actually ran this iteration came back clean. */
@@ -1961,6 +2024,75 @@ export class OrchestrationService {
     }
   }
 
+  /**
+   * Assembles, records and shows the account of one delegation.
+   *
+   * Called from two places on purpose: after the evidence is in, which is the
+   * normal path, and on a terminal failure, where there is no evidence and the
+   * report is built from the process alone. A delegation that died before
+   * answering is exactly the case somebody most needs a report for, and
+   * "nothing happened" was all the screen used to say.
+   *
+   * No second invocation: the envelope, the process outcome, the activity
+   * notes, the evidence this loop collected and the verifications it ran are
+   * all here already. Asking the worker to write a report about its own report
+   * would cost a call and add a second account of the same events - the less
+   * reliable one, since it is the account of the party being reported on.
+   *
+   * The declaration and the measurement stay apart, and nothing here settles a
+   * criterion: the ledger did that, from evidence, before this runs.
+   */
+  private reportDelegation(input: {
+    runId: string;
+    sessionId: string;
+    iteration: number;
+    worker: NonNullable<IterationRecord['worker']>;
+    answer: string;
+    evidence: GitEvidence | null;
+    verifications: readonly { label: string; passed: boolean; problem?: string }[];
+    unproven: readonly string[];
+    failedCriteria: readonly string[];
+  }): WorkerReport {
+    const worker = input.worker;
+    const report = buildWorkerReport({
+      worker,
+      answer: input.answer,
+      evidence: input.evidence,
+      verifications: input.verifications,
+      unproven: input.unproven,
+      failedCriteria: input.failedCriteria,
+      awaitingApproval: this.database.permissions
+        .forRun(input.runId)
+        .filter((request) => request.status === 'pending')
+        .map((request) => request.tool_name),
+      invocationId: worker.invocationId ?? null,
+      iteration: input.iteration,
+      sessionId: worker.sessionId ?? null,
+      // The readable cause and the tool's own words together: one says what
+      // kind of problem it is, the other says exactly what the CLI reported,
+      // and a person debugging needs both.
+      failureDetail: worker.failure
+        ? `${failureExplanation(worker.failure)}` +
+          (worker.failureDetail ? ` (${worker.failureDetail})` : '')
+        : (worker.failureDetail ?? null),
+      tools: worker.tools ?? [],
+    });
+    // In the conversation, as a message from the worker - separate from the
+    // task that was sent to it, which is on the delegation message above.
+    this.say(input.sessionId, input.runId, 'worker', renderWorkerReport(report), {
+      kind: 'report',
+      report,
+      ...(worker.routing ? { routing: worker.routing } : {}),
+    });
+    this.step(input.runId, input.iteration, 'worker-report', report.status, report.headline, {
+      report,
+    });
+    if (worker.invocationId) {
+      this.database.runs.setInvocationReport(worker.invocationId, report);
+    }
+    return report;
+  }
+
   private buildFeedback(
     evidence: GitEvidence,
     verification: readonly CommandResult[],
@@ -1986,10 +2118,15 @@ export class OrchestrationService {
         '',
       );
     }
-    // The concrete cause, when the worker's own tool reported one. Before
-    // this, a refused write reached the orchestrator as "progressed: no",
-    // which is why it kept re-delegating the same task at ever higher tiers.
-    if (worker?.failure) {
+    // The delegation's own report: status, what was declared, what was
+    // measured, what is still missing and what to do next. It replaces the
+    // free-text guessing that used to happen here - and it keeps the
+    // declaration and the evidence in separate sections, so nothing in it can
+    // be read as proof of something nobody checked.
+    if (record?.workerReport) {
+      lines.push('WORKER REPORT:', indent(renderWorkerReport(record.workerReport)), '');
+    } else if (worker?.failure) {
+      // No report (a run that never got that far). The cause still travels.
       lines.push(
         'WHY THE WORKER DID NOT SUCCEED:',
         `  ${failureExplanation(worker.failure)}`,
@@ -2161,12 +2298,23 @@ export class OrchestrationService {
           }
         : null;
 
+      // The task, labelled as the task. This message used to read as the
+      // worker's own words - the instruction sent to it, under its name, with
+      // nothing saying which it was - and the answer never appeared at all.
+      // What comes back is the report, posted after the evidence is in.
       this.say(
         sessionId,
         runId,
         'worker',
-        attempt === 0 ? `${slot.label}: ${task}` : `${slot.label}, tentando outro modelo: ${task}`,
-        { workerId: slot.id, workerLabel: slot.label, ...(planned ? { routing: planned } : {}) },
+        attempt === 0
+          ? `${slot.label} — tarefa enviada:\n${task}`
+          : `${slot.label} — tarefa reenviada com outro modelo:\n${task}`,
+        {
+          kind: 'delegation',
+          workerId: slot.id,
+          workerLabel: slot.label,
+          ...(planned ? { routing: planned } : {}),
+        },
       );
 
       // The session this worker already has in this conversation, if any.
@@ -2310,8 +2458,14 @@ export class OrchestrationService {
         ...(result.deniedCalls && result.deniedCalls.length > 0
           ? { deniedCalls: [...result.deniedCalls] }
           : {}),
+        // What the report needs and nothing else read: the CLI's own session,
+        // its own words for the failure, and the tools the runtime saw. All
+        // three already existed on the result and were dropped here.
+        ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+        ...(result.failureDetail ? { failureDetail: result.failureDetail } : {}),
+        ...(toolsUsed(result.activity).length > 0 ? { tools: toolsUsed(result.activity) } : {}),
       };
-      this.database.runs.recordInvocation({
+      const invocationId = this.database.runs.recordInvocation({
         runId,
         iteration,
         agentId: slot.agentId ?? workspace.worker_agent_id,
@@ -2354,6 +2508,8 @@ export class OrchestrationService {
           workingDirectory: cwd,
         },
       });
+      // The row the report will be attached to, once the evidence exists.
+      last.invocationId = invocationId;
       // Close the delegation, and publish what came back.
       //
       // The distinction that matters: `complete` means this message's
@@ -3090,6 +3246,27 @@ function indent(text: string): string {
     .split(/\r?\n/)
     .map((line) => `    ${line}`)
     .join('\n');
+}
+
+/**
+ * The tools the runtime observed, in order, without repeats.
+ *
+ * Best effort by design: an activity note is a status line, so a runtime that
+ * reports none produces an empty list and the report says nothing about tools
+ * rather than guessing at them.
+ */
+function toolsUsed(activity: ActivitySnapshot | undefined): string[] {
+  if (!activity) return [];
+  const seen: string[] = [];
+  for (const note of activity.recent) {
+    // Only `tool` notes carry a tool name; the detail of an `output` note is a
+    // fragment of the worker's own text and has no business in this list.
+    if (note.kind !== 'tool') continue;
+    const tool = note.detail.trim();
+    if (tool && !seen.includes(tool)) seen.push(tool);
+  }
+  if (activity.currentTool && !seen.includes(activity.currentTool)) seen.push(activity.currentTool);
+  return seen;
 }
 
 function describeError(error: unknown): string {

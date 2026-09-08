@@ -253,7 +253,11 @@ test('within one run the model follows each delegation: STRONG then FAST, both o
     assert.equal(rows[1]!.requestedCapability, 'FAST');
 
     // What the timeline shows: the worker's message carries its routing.
-    const workerMessages = (await chat(prepared)).filter((m) => m.author === 'worker');
+    // Delegations only: a worker now also posts its report, and the routing
+    // being asserted here is the routing of the task that was sent.
+    const workerMessages = (await chat(prepared)).filter(
+      (m) => m.author === 'worker' && m.kind === 'delegation',
+    );
     assert.equal(workerMessages[0]!.routing?.model, 'opus');
     assert.equal(workerMessages[1]!.routing?.model, 'haiku');
     assert.equal(workerMessages[1]!.routing?.selectionMode, 'auto');

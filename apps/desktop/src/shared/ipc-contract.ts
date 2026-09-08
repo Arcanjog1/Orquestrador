@@ -663,6 +663,57 @@ export interface ChatMessageView {
   readonly runId: string | null;
   /** Present on a worker message whose invocation was routed. */
   readonly routing: MessageRoutingView | null;
+  /**
+   * What kind of worker message this is.
+   *
+   * `delegation` is the task that was *sent*; `report` is what came back.
+   * They used to be indistinguishable, which is how the instruction sent to
+   * the worker could be read as the worker's answer.
+   */
+  readonly kind: 'delegation' | 'report' | null;
+  /** The normalised account of the delegation, on a `report` message. */
+  readonly report: WorkerReportView | null;
+}
+
+/**
+ * The worker's report as the interface shows it.
+ *
+ * Restated on the wire rather than imported from the engine, like every other
+ * view. `declared` and `evidence*` are separate fields on purpose: a claim and
+ * a measurement must not share a shape, or the screen will end up presenting
+ * one as the other.
+ */
+export interface WorkerReportView {
+  readonly status: 'completed' | 'partial' | 'blocked' | 'failed';
+  readonly headline: string;
+  /** What the worker said. A declaration, never evidence. */
+  readonly declared: string;
+  readonly evidenceFiles: {
+    readonly created: readonly string[];
+    readonly modified: readonly string[];
+    readonly deleted: readonly string[];
+  };
+  readonly evidenceUnavailable: boolean;
+  readonly tools: readonly string[];
+  readonly verifications: readonly {
+    readonly label: string;
+    readonly passed: boolean;
+    readonly problem?: string;
+  }[];
+  readonly errors: readonly string[];
+  readonly deniedTools: readonly string[];
+  readonly awaitingApproval: readonly string[];
+  readonly pending: readonly string[];
+  readonly recommendation: string;
+  readonly invocationId: string | null;
+  readonly iteration: number;
+  readonly model: string | null;
+  readonly reasoning: string | null;
+  readonly sessionId: string | null;
+  readonly durationMs: number;
+  readonly exitCode: number | null;
+  readonly outcome: string;
+  readonly mechanical: boolean;
 }
 
 export interface RunView {

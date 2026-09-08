@@ -49,7 +49,39 @@ export function toMessageView(record: MessageRecord): ChatMessageView {
     createdAt: record.created_at,
     runId: record.run_id,
     routing: routingOfPayload(record.payload),
+    kind: kindOfPayload(record.payload),
+    report: reportOfPayload(record.payload),
   };
+}
+
+/** `delegation` or `report`, when the message was stored with one. */
+function kindOfPayload(payload: string | null): ChatMessageView['kind'] {
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(payload) as { kind?: unknown };
+    return parsed?.kind === 'delegation' || parsed?.kind === 'report' ? parsed.kind : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The report a worker message was stored with, if any.
+ *
+ * Read back as it was written and never repaired: a payload this cannot parse
+ * yields null, and the message renders as its text. Inventing a shape here
+ * would put fields on the screen that nothing measured.
+ */
+function reportOfPayload(payload: string | null): ChatMessageView['report'] {
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(payload) as { report?: unknown };
+    const report = parsed?.report;
+    if (!report || typeof report !== 'object') return null;
+    return report as ChatMessageView['report'];
+  } catch {
+    return null;
+  }
 }
 
 /** The routing a worker message was stored with, if any. Never throws on an odd payload. */

@@ -919,6 +919,25 @@ CREATE TABLE workspace_permission_grants (
 CREATE INDEX idx_permission_grants_workspace ON workspace_permission_grants(workspace_id);
 `,
   },
+  {
+    id: 17,
+    name: 'worker-report',
+    sql: `
+-- The normalised account of one delegation, stored where it happened.
+--
+-- Everything in it was already computed and then dropped: the envelope, the
+-- process outcome, the activity notes, the evidence the loop collected and the
+-- verifications it ran. The supervisor had to guess what the worker did from a
+-- free-text answer, and a person reopening the conversation had nothing at all.
+--
+-- Additive, and a column rather than a table: a report belongs to exactly one
+-- invocation, has no life of its own, and must disappear with the run it
+-- describes. JSON because the shape is a view for reading, never something
+-- this schema queries by field - and a column nothing joins on has no business
+-- being normalised into rows.
+ALTER TABLE agent_invocations ADD COLUMN report_json TEXT;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

@@ -114,6 +114,7 @@ export interface AcceptanceCriterion {
 }
 
 import type { FileCheckRequest, FileCheckResult } from '../verification/file-check.js';
+import type { WorkerReport } from '../worker/worker-report.js';
 import type { CapabilityTier, ReasoningTier, WorkerRequirements } from '../routing/tiers.js';
 
 /** A decision returned by the orchestrator agent, after validation. */
@@ -475,6 +476,8 @@ export interface IterationRecord {
   doneRejection?: DoneGateResult;
   /** Files the application read and compared for itself in this iteration. */
   fileChecks?: readonly FileCheckResult[];
+  /** The normalised account of what the worker did, and what was measured. */
+  workerReport?: WorkerReport;
   notes: string[];
 }
 
@@ -512,6 +515,14 @@ export interface WorkerRecord {
    * scope somebody should be asked to authorise.
    */
   deniedCalls?: readonly DeniedToolCall[];
+  /** The invocation row this attempt was recorded as, so a report can bind to it. */
+  invocationId?: string;
+  /** The CLI's own session id, when it reported one. */
+  sessionId?: string;
+  /** The tool's own account of the failure, in its words. */
+  failureDetail?: string;
+  /** Tools the runtime observed the worker inside, oldest first. */
+  tools?: readonly string[];
 }
 
 /** Outcome of the independent DONE validation (spec 15). */
