@@ -10,6 +10,11 @@
 import type { Baseline, DoneGateResult, GitEvidence, IterationRecord } from '../core/types.js';
 import { AcceptanceCriteriaLedger } from './acceptance-criteria.js';
 import { commandPassed, Verifier } from './verifier.js';
+import {
+  describeFileCheck,
+  runFileChecks,
+  type FileCheckRequest,
+} from '../verification/file-check.js';
 
 export interface DoneGateInput {
   ledger: AcceptanceCriteriaLedger;
@@ -25,6 +30,17 @@ export interface DoneGateInput {
    * are genuinely read-only (an audit, an investigation).
    */
   allowNoChanges: boolean;
+  /**
+   * File checks to re-run, from scratch, before finishing.
+   *
+   * Deduplicated across the run by the caller, exactly like
+   * `verificationCommands`. The gate re-reads every one of them: a file that
+   * was right in iteration 2 may have been overwritten in iteration 3, and a
+   * gate that trusted the earlier read would be certifying a memory.
+   */
+  fileChecks?: readonly FileCheckRequest[];
+  /** Where the file checks resolve against. Required when there are any. */
+  workspaceRoot?: string;
 }
 
 export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult> {
@@ -47,6 +63,18 @@ export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult
     }
   }
 
+  // 1b. Re-read every file the run claimed something about. Same rule as the
+  //     commands above: nothing is taken on trust from an earlier iteration,
+  //     because the gate certifies the state of the workspace *now*.
+  const fileChecks =
+    input.fileChecks && input.fileChecks.length > 0 && input.workspaceRoot
+      ? await runFileChecks(input.workspaceRoot, input.fileChecks)
+      : [];
+  for (const check of fileChecks) {
+    if (check.passed) continue;
+    failures.push(`File check failed: ${describeFileCheck(check)}`);
+  }
+
   // 2. Criteria still lacking evidence block completion. A criterion that was
   //    only ever asserted by the worker never reaches `satisfied` here.
   for (const criterion of input.ledger.pending()) {
@@ -54,8 +82,21 @@ export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult
     failures.push(`Acceptance criterion ${state}: "${criterion.text}"`);
   }
 
-  // 3. Something must actually have changed, unless the objective is read-only.
-  if (!input.allowNoChanges && input.evidence.isGitRepository && !input.evidence.changedSinceBaseline) {
+  // 3. Something must actually have changed, unless the objective is read-only
+  //    or the application has read the result for itself.
+  //
+  //    That second exemption is the point of a file check. If the gate has
+  //    just opened the file and found exactly the bytes the objective asked
+  //    for, "nothing changed" is not a reason to refuse - the file being
+  //    already correct is the goal, reached. Demanding a diff there would mean
+  //    demanding a pointless rewrite to manufacture one.
+  const provenByReading = fileChecks.length > 0 && fileChecks.every((check) => check.passed);
+  if (
+    !input.allowNoChanges &&
+    !provenByReading &&
+    input.evidence.isGitRepository &&
+    !input.evidence.changedSinceBaseline
+  ) {
     failures.push(
       'No file changed relative to the baseline. If the objective genuinely requires no code ' +
         'changes, re-run with --allow-no-changes.',
@@ -72,6 +113,7 @@ export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult
     failures,
     checkedAt: new Date().toISOString(),
     verification,
+    ...(fileChecks.length > 0 ? { fileChecks } : {}),
   };
 }
 

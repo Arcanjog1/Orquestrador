@@ -8,6 +8,7 @@
  */
 
 import type { Decision, DecisionAction } from '../core/types.js';
+import type { FileCheckRequest } from '../verification/file-check.js';
 import { capabilityFromWire, reasoningFromWire } from '../routing/tiers.js';
 
 export const ALLOWED_ACTIONS: readonly DecisionAction[] = ['delegate', 'verify', 'done', 'blocked'];
@@ -55,6 +56,7 @@ export function parseDecision(raw: string): ParseResult {
     action: action as DecisionAction,
     acceptanceCriteria: [],
     verificationCommands: [],
+    fileChecks: [],
   };
 
   const criteria = readStringArray(obj.acceptanceCriteria, 'acceptanceCriteria');
@@ -64,6 +66,10 @@ export function parseDecision(raw: string): ParseResult {
   const commands = readStringArray(obj.verificationCommands, 'verificationCommands');
   if (commands.error) return fail(commands.error, raw);
   decision.verificationCommands = commands.value;
+
+  const checks = readFileChecks(obj.fileChecks);
+  if (checks.error) return fail(checks.error, raw);
+  decision.fileChecks = checks.value;
 
   const files = readStringArray(obj.relevantFiles, 'relevantFiles');
   if (files.error) return fail(files.error, raw);
@@ -102,8 +108,19 @@ export function parseDecision(raw: string): ParseResult {
     decision.reason = reason;
   }
 
-  if (action === 'verify' && decision.verificationCommands.length === 0) {
-    return fail('"verify" requires at least one entry in "verificationCommands".', raw);
+  // `verify` needs something to verify *with*. A registered command or a file
+  // check both count: a workspace with no registered verifications can still
+  // prove a file's contents, and refusing `verify` there was half of what made
+  // such a workspace unable to finish anything.
+  if (
+    action === 'verify' &&
+    decision.verificationCommands.length === 0 &&
+    decision.fileChecks.length === 0
+  ) {
+    return fail(
+      '"verify" requires at least one entry in "verificationCommands" or "fileChecks".',
+      raw,
+    );
   }
 
   // Advisory, so lenient: a well-formed object is taken, anything else is
@@ -228,4 +245,83 @@ function findBalancedObject(text: string): string | null {
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}\n...[truncated]`;
+}
+
+/**
+ * Reads `fileChecks` into typed requests, rejecting anything it does not
+ * recognise.
+ *
+ * Deliberately strict. This is the one place where a model's output becomes a
+ * thing the application acts on, and the safety of the whole mechanism rests
+ * on it staying **data**: a path and some expected bytes. An unknown key is
+ * refused rather than ignored, so a future field cannot be smuggled past a
+ * version that does not understand it.
+ *
+ * Nothing here is ever interpolated into a command line. The path is resolved
+ * against the workspace root and bounds-checked by `runFileCheck`; this
+ * function's job is only to refuse a shape that is not a file check.
+ */
+function readFileChecks(value: unknown): { value: FileCheckRequest[]; error?: string } {
+  if (value === undefined || value === null) return { value: [] };
+  if (!Array.isArray(value)) return { value: [], error: '"fileChecks" must be an array.' };
+  if (value.length > 20) return { value: [], error: '"fileChecks" may hold at most 20 entries.' };
+
+  const known = new Set([
+    'path',
+    'mustExist',
+    'expectBytesHex',
+    'expectText',
+    'expectSizeBytes',
+    'forbidBom',
+    'forbidTrailingNewline',
+    'criteria',
+  ]);
+  const out: FileCheckRequest[] = [];
+  for (const [index, entry] of value.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { value: [], error: `"fileChecks[${index}]" must be an object.` };
+    }
+    const row = entry as Record<string, unknown>;
+    for (const key of Object.keys(row)) {
+      if (!known.has(key)) {
+        return {
+          value: [],
+          error: `"fileChecks[${index}].${key}" is not a field of a file check.`,
+        };
+      }
+    }
+    if (typeof row.path !== 'string' || row.path.trim().length === 0) {
+      return { value: [], error: `"fileChecks[${index}].path" must be a non-empty string.` };
+    }
+    const request: Record<string, unknown> = { path: row.path.trim() };
+    for (const key of ['mustExist', 'forbidBom', 'forbidTrailingNewline'] as const) {
+      if (row[key] !== undefined) {
+        if (typeof row[key] !== 'boolean') {
+          return { value: [], error: `"fileChecks[${index}].${key}" must be a boolean.` };
+        }
+        request[key] = row[key];
+      }
+    }
+    for (const key of ['expectBytesHex', 'expectText'] as const) {
+      if (row[key] !== undefined) {
+        if (typeof row[key] !== 'string') {
+          return { value: [], error: `"fileChecks[${index}].${key}" must be a string.` };
+        }
+        request[key] = row[key];
+      }
+    }
+    if (row.expectSizeBytes !== undefined) {
+      if (typeof row.expectSizeBytes !== 'number' || !Number.isInteger(row.expectSizeBytes)) {
+        return { value: [], error: `"fileChecks[${index}].expectSizeBytes" must be an integer.` };
+      }
+      request.expectSizeBytes = row.expectSizeBytes;
+    }
+    if (row.criteria !== undefined) {
+      const criteria = readStringArray(row.criteria, `fileChecks[${index}].criteria`);
+      if (criteria.error) return { value: [], error: criteria.error };
+      request.criteria = criteria.value;
+    }
+    out.push(request as unknown as FileCheckRequest);
+  }
+  return { value: out };
 }

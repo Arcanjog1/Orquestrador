@@ -153,7 +153,7 @@ test('the final report covers every section the spec asks for', () => {
       startedAt: state.createdAt,
       decisionRepairAttempts: 0,
       notes: [],
-      decision: { action: 'delegate', task: 'fix it', acceptanceCriteria: [], verificationCommands: [] },
+      decision: { action: 'delegate', task: 'fix it', acceptanceCriteria: [], verificationCommands: [], fileChecks: [] },
       worker: {
         agent: 'mock-claude',
         profile: 'personal',

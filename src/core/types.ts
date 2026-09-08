@@ -113,6 +113,7 @@ export interface AcceptanceCriterion {
   note?: string;
 }
 
+import type { FileCheckRequest, FileCheckResult } from '../verification/file-check.js';
 import type { CapabilityTier, ReasoningTier, WorkerRequirements } from '../routing/tiers.js';
 
 /** A decision returned by the orchestrator agent, after validation. */
@@ -124,6 +125,19 @@ export interface Decision {
   acceptanceCriteria: string[];
   /** Commands the orchestrator wants run independently after the worker. */
   verificationCommands: string[];
+  /**
+   * Files the application should read and compare for itself.
+   *
+   * A *typed comparison*, never a command: the main process opens the path,
+   * reads the bytes and compares them. It exists so a workspace with no
+   * registered verification can still prove "this file contains exactly these
+   * bytes" - which is most of what a small task is - without anybody first
+   * registering a shell command for it.
+   *
+   * Each entry names the acceptance criteria it proves, so a result settles
+   * what it actually demonstrates and nothing else.
+   */
+  fileChecks: FileCheckRequest[];
   /** Optional human-readable rationale. Never model reasoning; a one-liner. */
   summary?: string;
   /** Present (and required) when `action === 'blocked'`. */
@@ -459,6 +473,8 @@ export interface IterationRecord {
   verification?: CommandResult[];
   /** Populated when the iteration proposed `done` and the gate rejected it. */
   doneRejection?: DoneGateResult;
+  /** Files the application read and compared for itself in this iteration. */
+  fileChecks?: readonly FileCheckResult[];
   notes: string[];
 }
 
@@ -505,6 +521,8 @@ export interface DoneGateResult {
   failures: string[];
   checkedAt: string;
   verification: CommandResult[];
+  /** Files the gate re-read for itself, when the run asked for any. */
+  fileChecks?: readonly FileCheckResult[];
 }
 
 /** A worker slot. The MVP runs `workers[0]`; the array keeps spec 23 open. */

@@ -68,6 +68,12 @@ import type { EventBus } from '../events.js';
 import { AgentMessageBus } from '../../../../../src/bus/agent-message-bus.js';
 import type { AgentMessageType, PublishInput } from '../../../../../src/bus/message-types.js';
 import { describeActivity } from '../../../../../src/agents/activity-monitor.js';
+import {
+  describeFileCheck,
+  runFileChecks,
+  type FileCheckRequest,
+  type FileCheckResult,
+} from '../../../../../src/verification/file-check.js';
 import { renderContext, selectContext } from '../../../../../src/context/project-context.js';
 import type { ContextEntry } from '../../../../../src/context/project-context.js';
 import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
@@ -715,6 +721,15 @@ export class OrchestrationService {
     const iterations: IterationRecord[] = [];
     /** Every command actually resolved from an id, deduplicated. */
     const resolvedCommands = new Set<string>();
+    /**
+     * Every file check the run asked for, deduplicated by its request.
+     *
+     * The gate re-runs all of them, exactly as it re-runs every command: a
+     * file that was right in iteration 2 may have been overwritten in
+     * iteration 3, and certifying the earlier read would be certifying a
+     * memory rather than the workspace.
+     */
+    const requestedFileChecks = new Map<string, FileCheckRequest>();
     let feedback: string | null = null;
 
     // Routing state for this run: what each worker's CLI can take (read once
@@ -737,6 +752,8 @@ export class OrchestrationService {
     // The short path is offered once per run. A second attempt would be the
     // loop arguing with a gate that already said no.
     let fastPathTried = false;
+    /** Consecutive iterations that asked for unknown ids and proved nothing. */
+    let barrenVerifyRounds = 0;
     // What was said in this conversation before this run, so a follow-up
     // ("continue", "now also do X") is read against what came before it.
     const history = this.conversationBefore(sessionId, runId);
@@ -1079,17 +1096,114 @@ export class OrchestrationService {
         });
       }
 
+      // 4a. The checks the application performs by reading, not by running.
+      //
+      // A registered verification is a command a person approved once. A file
+      // check is a *typed comparison* the main process does itself: open the
+      // path, read the bytes, compare. Nothing here reaches a shell, and the
+      // rule that only registered verifications may execute commands is
+      // untouched - this executes none.
+      //
+      // It exists because a workspace with no registered verification could
+      // not finish *anything*: with no command to run, every criterion the
+      // supervisor stated was marked failed, and a failed criterion blocks the
+      // gate for ever. A six-byte file was created correctly and the run still
+      // died at the iteration limit.
+      const fileChecks =
+        environment?.kind === 'local' && decision.fileChecks.length > 0
+          ? await runFileChecks(cwd, decision.fileChecks)
+          : [];
+      for (const request of decision.fileChecks) {
+        requestedFileChecks.set(JSON.stringify(request), request);
+      }
+      if (fileChecks.length > 0) {
+        record.fileChecks = fileChecks;
+        const passedChecks = fileChecks.filter((check) => check.passed).length;
+        this.step(
+          runId,
+          iteration,
+          'file-check',
+          passedChecks === fileChecks.length ? 'passed' : 'failed',
+          fileChecks.map(describeFileCheck).join('; ').slice(0, 500),
+        );
+        for (const check of fileChecks) {
+          this.database.runs.recordVerification({
+            runId,
+            iteration,
+            definitionId: null,
+            // Recorded as what it is - a read, not a command line - so nobody
+            // reading the history later mistakes it for something that ran.
+            command: `[leitura direta] ${check.request.path}`,
+            exitCode: check.passed ? 0 : 1,
+            passed: check.passed,
+            refused: check.outcome === 'outside-workspace' ? check.problem : null,
+            durationMs: null,
+          });
+        }
+        this.record({
+          runId,
+          conversationId: sessionId,
+          iteration,
+          messageType: 'VERIFICATION_RESULT',
+          payload: { passed: passedChecks, total: fileChecks.length, kind: 'file-check' },
+          senderAgentId: null,
+          recipientAgentId: ORCHESTRATOR_AGENT,
+          correlationId: runCorrelation,
+        });
+      }
+
       // Evidence, not assertion, is what marks a criterion satisfied.
-      const allPassed =
-        verification.length > 0 && verification.every(commandPassed) && unknownIds.length === 0;
+      //
+      // Two changes here, and the second is the bug that deadlocked the run.
+      //
+      // A file check settles the criteria it *names*, and only those: binding
+      // a result to what it actually proves is the difference between evidence
+      // and a blanket assertion.
+      for (const check of fileChecks) {
+        for (const criterion of check.request.criteria ?? []) {
+          ledger.markByText(
+            criterion,
+            check.passed ? 'satisfied' : 'failed',
+            iteration,
+            check.problem ?? describeFileCheck(check),
+          );
+        }
+      }
+
+      // A registered command keeps the meaning it always had: it proves the
+      // criteria of the decision that asked for it, as a set.
+      //
+      // A file check deliberately does **not** join that blanket. It settles
+      // the criteria it names and nothing else - the difference between "the
+      // application read this file and it holds these bytes" and "a file
+      // exists, so everything must be fine". A check that names no criteria
+      // is recorded and settles nothing, which is the honest reading of it.
+      const commandsRan = verification.length > 0;
+      const commandsAllPassed =
+        commandsRan && verification.every(commandPassed) && unknownIds.length === 0;
       for (const criterion of decision.acceptanceCriteria) {
+        // Already decided by something that actually looked at it.
+        if (settledByFileCheck(fileChecks, criterion)) continue;
+        // And a criterion nothing checked is **unknown**, not failed. Marking
+        // it failed said "the evidence is against you" when the truth was
+        // "nobody looked" - and since the gate treats failed as final, a
+        // workspace with no registered verification could never finish
+        // anything at all, however correct the work was.
+        if (!commandsRan) continue;
         ledger.markByText(
           criterion,
-          allPassed ? 'satisfied' : 'failed',
+          commandsAllPassed ? 'satisfied' : 'failed',
           iteration,
           verificationNote(verification),
         );
       }
+
+      /** Every proof that actually ran this iteration came back clean. */
+      const allPassed =
+        (commandsRan || fileChecks.length > 0) &&
+        verification.every(commandPassed) &&
+        fileChecks.every((check) => check.passed) &&
+        unknownIds.length === 0;
 
       // 4b. The short path for a small, finished task.
       //
@@ -1139,6 +1253,8 @@ export class OrchestrationService {
           evidence: fresh,
           verifier: verifier!,
           allowNoChanges: this.options.allowNoChanges ?? false,
+          fileChecks: [...requestedFileChecks.values()],
+          workspaceRoot: cwd,
         });
         this.step(
           runId,
@@ -1183,6 +1299,8 @@ export class OrchestrationService {
           evidence: fresh,
           verifier: verifier!,
           allowNoChanges: this.options.allowNoChanges ?? false,
+          fileChecks: [...requestedFileChecks.values()],
+          workspaceRoot: cwd,
         });
         record.doneRejection = gate.passed ? undefined : gate;
         this.step(runId, iteration, 'done-gate', gate.passed ? 'passed' : 'rejected', gate.failures.join('; ').slice(0, 500));
@@ -1199,7 +1317,43 @@ export class OrchestrationService {
         continue;
       }
 
-      // 6. Otherwise, feed the results back and go round again.
+      // 6. Otherwise, feed the results back and go round again - unless going
+      //    round again could not possibly help.
+      //
+      //    An iteration that asked for a verification id nobody registered,
+      //    proved nothing, and stated criteria it cannot settle is a loop with
+      //    no exit: the same request will be refused the same way. Stopping
+      //    here with a concrete reason is better than spending the iteration
+      //    budget discovering it, and far better than escalating the model -
+      //    no model can register a verification.
+      const provedNothingWithUnknownIds =
+        unknownIds.length > 0 &&
+        verification.length === 0 &&
+        fileChecks.length === 0 &&
+        ledger.pending().length > 0;
+      // The *second* time in a row, not the first. The first refusal is
+      // information the orchestrator has not seen yet: it is told which ids do
+      // not exist and that file checks need no registration, and it deserves
+      // the chance to ask for one. Asking again for ids that still do not
+      // exist, having proved nothing, is the loop with no exit.
+      barrenVerifyRounds = provedNothingWithUnknownIds ? barrenVerifyRounds + 1 : 0;
+      if (barrenVerifyRounds >= 2) {
+        const reason =
+          `A execução pediu duas vezes seguidas verificações que não existem neste ` +
+          `projeto (${unknownIds.join(', ')}) e não produziu nenhuma prova. ` +
+          'Cadastre a verificação em Configurações, ou peça uma verificação direta de ' +
+          'arquivo — o aplicativo lê o arquivo e compara os bytes sem precisar de cadastro. ' +
+          'Repetir a mesma delegação não mudaria nada, então parei aqui.';
+        this.database.runs.setStatus(runId, 'NEEDS_HUMAN', reason);
+        this.say(sessionId, runId, 'system', reason);
+        this.step(runId, iteration, 'verification', 'unavailable', reason, {
+          unknownIds: [...unknownIds],
+          pending: ledger.pending().map((criterion) => criterion.text),
+        });
+        this.progress(runId, sessionId, 'needs-human', reason, 'NEEDS_HUMAN');
+        return;
+      }
+
       feedback = this.buildFeedback(evidence, verification, unknownIds, record);
     }
 
@@ -1468,7 +1622,34 @@ export class OrchestrationService {
             'AVAILABLE VERIFICATIONS (request them by id, never by command line):',
             ...(catalogue.length > 0
               ? catalogue.map((row) => `  ${row.id} - ${row.label}`)
-              : ['  (none registered for this workspace)']),
+              : [
+                  '  (none registered for this workspace)',
+                  '  This is NOT a dead end. Use "fileChecks" below: the application reads the',
+                  '  file itself and compares it. Never ask for a verification id that is not',
+                  '  listed above - an unknown id is reported as a failure and never executed.',
+                ]),
+            '',
+            // The second kind of proof, and the one that makes a workspace
+            // with no registered command usable at all. Described in full
+            // because a supervisor that does not know a mechanism exists will
+            // not use it - which is exactly how a correct six-byte file ended
+            // a run at the iteration limit.
+            'DIRECT FILE CHECKS (always available, no registration needed):',
+            '  The application opens the path and compares the bytes itself. No shell runs.',
+            '  Use them to prove a file\'s contents. Each entry:',
+            '    {',
+            '      "path": "relative/to/the/project",',
+            '      "expectBytesHex": "70726F6E746F",   // exact bytes, or',
+            '      "expectText": "pronto",             // exact UTF-8 text',
+            '      "expectSizeBytes": 6,',
+            '      "forbidBom": true,',
+            '      "forbidTrailingNewline": true,',
+            '      "mustExist": true,',
+            '      "criteria": ["the acceptance criteria this check proves, verbatim"]',
+            '    }',
+            '  `criteria` matters: a check settles exactly the criteria it names. A criterion',
+            '  nothing checked stays unproven, and an unproven criterion blocks DONE.',
+            '  A path outside the project is refused, not read.',
             '',
           ]),
       'Answer with a single JSON object and nothing else:',
@@ -1477,6 +1658,7 @@ export class OrchestrationService {
       '  "task": "what the coding agent must do (required for delegate)",',
       '  "acceptanceCriteria": ["objective, checkable statements"],',
       '  "verificationCommands": ["verification ids from the list above"],',
+      '  "fileChecks": [{"path": "...", "expectText": "...", "criteria": ["..."]}],',
       '  "workerId": "which worker this delegation is for, from the team above",',
       '  "requiresTools": true | false,',
       '  "satisfiedCriteria": ["criteria your review found satisfied"],',
@@ -1778,7 +1960,24 @@ export class OrchestrationService {
         '',
         'REFUSED: these verification ids are not registered for this workspace and were',
         `not executed: ${unknownIds.join(', ')}`,
+        'Do not ask for them again. Use "fileChecks" to prove a file\'s contents instead:',
+        'the application reads the file itself and no registration is needed.',
       );
+    }
+
+    // What the application read for itself. Reported before the commands,
+    // because in a workspace with no registered verification this is the only
+    // proof there is - and a supervisor that cannot see it will keep asking
+    // for an id that does not exist.
+    const fileChecks = record?.fileChecks ?? [];
+    if (fileChecks.length > 0) {
+      lines.push('', 'FILE CHECKS (read by the application, no command was run):');
+      for (const check of fileChecks) {
+        lines.push(`  ${describeFileCheck(check)}`);
+        for (const criterion of check.request.criteria ?? []) {
+          lines.push(`    settles: "${criterion}"`);
+        }
+      }
     }
 
     if (verification.length > 0) {
@@ -2848,4 +3047,10 @@ export function toolPolicyPreamble(grants: readonly string[]): string {
     '  and the task will be delegated again once they do. Do not work around a refusal.',
   );
   return lines.join('\n');
+}
+
+/** True when a file check already decided this criterion, either way. */
+function settledByFileCheck(checks: readonly FileCheckResult[], criterion: string): boolean {
+  const wanted = criterion.trim();
+  return checks.some((check) => (check.request.criteria ?? []).some((c) => c.trim() === wanted));
 }
