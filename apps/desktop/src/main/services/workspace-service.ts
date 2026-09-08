@@ -344,48 +344,9 @@ export class WorkspaceService {
         }
       }
 
-      // **Every** workspace gets a project, not only a local folder.
-      //
-      // This changed when "Pastas" left the sidebar. While that section
-      // existed, a cloud or conversation workspace with no project was merely
-      // filed oddly - it still appeared, under Pastas. With one tree there is
-      // nowhere else to appear, so a workspace without a project would simply
-      // vanish from the interface, taking its conversations with it. Nothing
-      // is deleted by that, but a person cannot see the difference between
-      // "hidden" and "gone", and they should never have to.
-      let project = this.database.projects.findByWorkspace(workspace.id);
-      if (!project) {
-        const created = projects.create({
-          name: workspace.display_name,
-          workspaceId: workspace.id,
-        });
-        project = this.database.projects.require(created.id);
-        projectsCreated += 1;
-      }
-
-      // A cloud workspace already knows its repository. Copying that identity
-      // onto the project is what stops the same repository from becoming a
-      // second project the first time it is connected from the new dialog.
-      const repositoryUrl = workspace.repository_url ?? repositoryUrlOfFullName(workspace.repository_full_name);
-      const key = repositoryKey(repositoryUrl);
-      if (key.length > 0 && project.repository_key.length === 0) {
-        const clash = this.database.projects.findByRepositoryKey(key);
-        // Where two projects would claim one repository, neither is changed
-        // and both are kept: choosing between them is not a decision a
-        // start-up reconciliation gets to make quietly.
-        if (!clash) {
-          this.database.projects.setRepository(project.id, {
-            key,
-            url: repositoryUrl,
-            fullName: workspace.repository_full_name ?? displayFullName(repositoryUrl),
-            isPrivate: workspace.repository_private === null ? null : workspace.repository_private === 1,
-            // Not guessed. `workspaces.default_branch` is what git or the
-            // person recorded; where there is none, it stays unknown.
-            defaultBranch: workspace.default_branch ?? workspace.branch ?? null,
-          });
-          repositoriesLinked += 1;
-        }
-      }
+      const outcome = this.ensureProjectFor(workspace.id, projects);
+      if (outcome.projectCreated) projectsCreated += 1;
+      if (outcome.repositoryLinked) repositoriesLinked += 1;
     }
 
     return {
@@ -394,6 +355,72 @@ export class WorkspaceService {
       repositoriesLinked,
       duplicateFolders: this.database.workspaces.duplicateFolders(),
     };
+  }
+
+  /**
+   * Makes sure this workspace is reachable from the sidebar, and only that.
+   *
+   * **Every** workspace gets a project, not only a local folder. This changed
+   * when "Pastas" left the sidebar: while that section existed, a cloud or
+   * conversation workspace with no project was merely filed oddly - it still
+   * appeared, under Pastas. With one tree there is nowhere else to appear, so
+   * a workspace without a project would simply vanish from the interface,
+   * taking its conversations with it. Nothing is deleted by that, but a person
+   * cannot see the difference between "hidden" and "gone", and they should
+   * never have to.
+   *
+   * Called from two places, and it must be both: at start-up for everything
+   * that already exists, and the moment a workspace is created, because a
+   * folder cloned at eleven o'clock must not be invisible until the next
+   * restart.
+   *
+   * Idempotent. A workspace that already has a project keeps it, whatever it
+   * is named.
+   */
+  ensureProjectFor(
+    workspaceId: string,
+    projects: ProjectService,
+  ): { projectId: string; projectCreated: boolean; repositoryLinked: boolean } {
+    const workspace = this.database.workspaces.require(workspaceId);
+    let project = this.database.projects.findByWorkspace(workspace.id);
+    let projectCreated = false;
+    if (!project) {
+      const created = projects.create({
+        name: workspace.display_name,
+        workspaceId: workspace.id,
+      });
+      project = this.database.projects.require(created.id);
+      projectCreated = true;
+    }
+
+    // A cloud or cloned workspace already knows its repository. Copying that
+    // identity onto the project is what stops the same repository from
+    // becoming a second project the first time it is connected from the
+    // dialog.
+    let repositoryLinked = false;
+    const repositoryUrl =
+      workspace.repository_url ?? repositoryUrlOfFullName(workspace.repository_full_name);
+    const key = repositoryKey(repositoryUrl);
+    if (key.length > 0 && project.repository_key.length === 0) {
+      // Where two projects would claim one repository, neither is changed and
+      // both are kept: choosing between them is not a decision this gets to
+      // make quietly. `duplicateRepositories()` reports them instead.
+      if (!this.database.projects.findByRepositoryKey(key)) {
+        this.database.projects.setRepository(project.id, {
+          key,
+          url: repositoryUrl,
+          fullName: workspace.repository_full_name ?? displayFullName(repositoryUrl),
+          isPrivate:
+            workspace.repository_private === null ? null : workspace.repository_private === 1,
+          // Not guessed. `workspaces.default_branch` is what git or the person
+          // recorded; where there is none, it stays unknown.
+          defaultBranch: workspace.default_branch ?? workspace.branch ?? null,
+        });
+        repositoryLinked = true;
+      }
+    }
+
+    return { projectId: project.id, projectCreated, repositoryLinked };
   }
 
   /**

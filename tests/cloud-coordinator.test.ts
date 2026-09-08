@@ -45,6 +45,14 @@ function memoryDatabase(): Database {
  */
 function fakeProvisioner(
   script: (options: RunProcessOptions) => Partial<ProcessResult> = () => ({}),
+  /**
+   * Awaited before every process returns, when given.
+   *
+   * A test about *concurrency* needs a run that is still running. Without
+   * this, a fake process completes in the same tick it starts and the second
+   * request finds nothing in flight to be refused by.
+   */
+  hold?: Promise<void>,
 ): WorkspaceProvisioner & { provisioned: string[]; released: string[] } {
   const provisioned: string[] = [];
   const released: string[] = [];
@@ -56,6 +64,7 @@ function fakeProvisioner(
   };
   const processes: ProcessRunner = {
     async run(options: RunProcessOptions): Promise<ProcessResult> {
+      if (hold) await hold;
       return {
         outcome: 'completed',
         exitCode: 0,
@@ -897,9 +906,19 @@ test('one principal cannot start unbounded runs, and a retry is not refused for 
 
 test('the API answers a refused run with 429, not a 500', async () => {
   const database = memoryDatabase();
+  // The first run has to still be running when the second arrives, or there
+  // is nothing to refuse. With a provisioner that completes instantly this was
+  // a race: under load the first run could finish before the second request
+  // landed, the second was accepted, and the test failed intermittently while
+  // saying nothing about the limit it exists to check. `hold` keeps the first
+  // run inside its process until the assertions are done.
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = () => resolve();
+  });
   const coordinator = new Coordinator({
     database,
-    provisioner: fakeProvisioner(),
+    provisioner: fakeProvisioner(() => ({}), held),
     credentials: { openaiApiKey: 'sk-test' },
     maxConcurrentRuns: 1,
   });
@@ -927,6 +946,8 @@ test('the API answers a refused run with 429, not a 500', async () => {
       assert.match(body.error.message, /em andamento/);
     });
   } finally {
+    // Let the held run finish, or shutdown would wait on it.
+    release();
     await coordinator.shutdown();
     database.close();
   }

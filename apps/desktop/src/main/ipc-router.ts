@@ -17,6 +17,7 @@ import {
   type IpcMap,
   type IpcResult,
   type RequestChannel,
+  type WorkspaceView,
 } from '../shared/ipc-contract.js';
 import { IpcValidationError, REQUEST_VALIDATORS } from '../shared/validation.js';
 import { RecordNotFoundError } from './core.js';
@@ -48,6 +49,23 @@ export type Handler = (payload: unknown) => Promise<unknown> | unknown;
 
 export class IpcRouter {
   private readonly handlers = new Map<RequestChannel, Handler>();
+
+  /**
+   * Gives a freshly created workspace its project, and hands the workspace back.
+   *
+   * The sidebar has one tree now, and a project is the only thing in it. So a
+   * workspace created without one is not merely filed oddly - it is invisible,
+   * and a person cannot tell that apart from having lost it. Creating it here,
+   * on the way out of the handler, is what keeps a folder cloned at eleven
+   * o'clock from waiting for a restart to appear.
+   *
+   * The view is returned unchanged: this adds a row, it does not alter the
+   * workspace, and every existing caller keeps reading exactly what it read.
+   */
+  private withProject(workspace: WorkspaceView): WorkspaceView {
+    this.services.workspaces.ensureProjectFor(workspace.id, this.services.projects);
+    return workspace;
+  }
 
   constructor(
     private readonly services: AppServices,
@@ -193,11 +211,14 @@ export class IpcRouter {
     this.handlers.set('workspace.selectFolder', async () => ({
       path: await this.shell.selectFolder(),
     }));
+    // Every one of these creates a workspace, and every one of them must give
+    // it a project: with "Pastas" gone from the sidebar, a workspace without a
+    // project is a workspace nobody can see until the next restart.
     this.handlers.set('workspace.create', (p) =>
-      s.workspaces.create(p as { name: string; localPath: string; repositoryUrl?: string }),
+      this.withProject(s.workspaces.create(p as { name: string; localPath: string; repositoryUrl?: string })),
     );
     this.handlers.set('workspace.createCloud', (p) =>
-      s.workspaces.createCloud(p as IpcMap['workspace.createCloud']['request']),
+      this.withProject(s.workspaces.createCloud(p as IpcMap['workspace.createCloud']['request'])),
     );
     this.handlers.set('workspace.setBudget', (p) => {
       const input = p as IpcMap['workspace.setBudget']['request'];
@@ -208,7 +229,9 @@ export class IpcRouter {
       });
     });
     this.handlers.set('workspace.createConversation', (p) =>
-      s.workspaces.createConversation(p as IpcMap['workspace.createConversation']['request']),
+      this.withProject(
+        s.workspaces.createConversation(p as IpcMap['workspace.createConversation']['request']),
+      ),
     );
 
     // Connections. Note what is absent: there is no channel that returns a
@@ -268,8 +291,10 @@ export class IpcRouter {
         pullRequest: input.pullRequest,
       });
     });
-    this.handlers.set('workspace.clone', (p) =>
-      s.workspaces.clone(p as { repositoryUrl: string; parentPath: string; name: string }),
+    this.handlers.set('workspace.clone', async (p) =>
+      this.withProject(
+        await s.workspaces.clone(p as { repositoryUrl: string; parentPath: string; name: string }),
+      ),
     );
     this.handlers.set('workspace.setAgents', (p) => {
       const input = p as { workspaceId: string; orchestratorAgentId: string; workerAgentId: string };

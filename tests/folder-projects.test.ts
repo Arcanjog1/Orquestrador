@@ -453,12 +453,20 @@ test('a conversation project is never matched against a folder', async () => {
     const conversation = value<{ id: string }>(
       await fixture.router.handle('workspace.createConversation', { name: 'Só conversa' }),
     );
-    const report = fixture.services.workspaces.reconcileFolders(fixture.services.projects);
+    // It *does* get a project, and it gets it immediately - not at the next
+    // start-up. With "Pastas" gone from the sidebar, a workspace with no
+    // project is invisible, and invisible reads as deleted however carefully
+    // the rows are preserved. A project created five seconds ago must not
+    // wait for a restart to appear.
+    assert.ok(
+      fixture.services.database.projects.findByWorkspace(conversation.id),
+      'the project exists as soon as the workspace does',
+    );
 
-    // It *does* get a project: with "Pastas" gone from the sidebar, a
-    // workspace with no project would be invisible, and invisible reads as
-    // deleted however carefully the rows are preserved.
-    assert.equal(report.projectsCreated, 1);
+    // So reconciliation, which exists for installations that predate this,
+    // finds nothing left to do.
+    const report = fixture.services.workspaces.reconcileFolders(fixture.services.projects);
+    assert.equal(report.projectsCreated, 0);
     assert.deepEqual(report.duplicateFolders, []);
 
     // What it must never get is a folder identity. This is the assertion the

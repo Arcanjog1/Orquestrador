@@ -67,8 +67,17 @@ async function prepare() {
 test('projects are created, renamed and listed with their workspace and conversation count', async () => {
   const p = await prepare();
   try {
-    const empty = value<ProjectView[]>(await p.fixture.router.handle('project.list', null));
-    assert.deepEqual(empty, []);
+    // Creating a folder now creates its project, in the same call. With
+    // "Pastas" gone from the sidebar, a folder without a project would be a
+    // folder nobody can see - so the two folders this fixture made arrive
+    // already named after themselves.
+    const born = value<ProjectView[]>(await p.fixture.router.handle('project.list', null));
+    assert.deepEqual(born.map((x) => x.name).sort(), ['Orquestrador', 'Revit']);
+    assert.deepEqual(
+      born.map((x) => x.workspaceId).sort(),
+      [p.orquestrador.id, p.revit.id].sort(),
+      'each folder is its own project',
+    );
 
     const project = value<ProjectView>(
       await p.fixture.router.handle('project.create', { name: '  AI  Orchestrator ', workspaceId: p.orquestrador.id }),
@@ -92,7 +101,13 @@ test('projects are created, renamed and listed with their workspace and conversa
     );
 
     const list = value<ProjectView[]>(await p.fixture.router.handle('project.list', null));
-    assert.deepEqual(list.map((x) => x.name).sort(), ['Ideias', 'Orquestrador']);
+    // The two the folders were born with, plus the two made here. The first
+    // "Orquestrador" is the folder's own; `renamed` gave the second the same
+    // name, which is allowed - a name is a label, not an identity.
+    assert.deepEqual(
+      list.map((x) => x.name).sort(),
+      ['Ideias', 'Orquestrador', 'Orquestrador', 'Revit'],
+    );
   } finally {
     await p.cleanup();
   }
@@ -241,7 +256,11 @@ test('removing a project keeps its conversations, messages, runs, workspace and 
     assert.ok(runs.some((r) => r.id === sent.run.id), 'runs kept');
     const workspaces = value<WorkspaceView[]>(await p.fixture.router.handle('workspace.list', null));
     assert.ok(workspaces.some((w) => w.id === p.revit.id), 'the workspace is still listed');
-    assert.deepEqual(value<ProjectView[]>(await p.fixture.router.handle('project.list', null)), []);
+    // The removed project is gone from the list; the folders' own projects
+    // are not, because removing one project is not removing a folder.
+    const remaining = value<ProjectView[]>(await p.fixture.router.handle('project.list', null));
+    assert.equal(remaining.some((x) => x.id === project.id), false, 'the project is gone');
+    assert.deepEqual(remaining.map((x) => x.name).sort(), ['Orquestrador', 'Revit']);
     assert.match(failure(await p.fixture.router.handle('project.remove', { projectId: project.id })).message, /não existe mais/);
   } finally {
     await p.cleanup();
@@ -267,11 +286,15 @@ test('a project pointed at a removed workspace loses only the link; projects, as
     assert.equal(unlinked.workspaceId, null);
     value(await p.fixture.router.handle('project.setWorkspace', { projectId: project.id, workspaceId: p.revit.id }));
 
-    // The folder leaves the list: the project stays, without the link.
+    // The folder leaves the list: the project stays, without the link. Both
+    // projects that pointed at it lose only the link - the folder's own, made
+    // when the folder was created, and this one.
     value(await p.fixture.router.handle('workspace.remove', { workspaceId: p.revit.id }));
     const after = value<ProjectView[]>(await p.fixture.router.handle('project.list', null));
-    assert.equal(after[0]!.workspaceId, null);
-    assert.equal(after[0]!.name, 'Revit');
+    const revitProject = after.find((x) => x.id === project.id);
+    assert.ok(revitProject, 'the project survives the folder');
+    assert.equal(revitProject.workspaceId, null);
+    assert.equal(revitProject.name, 'Revit');
 
     // A restart: a second service graph reads the same database.
     await p.fixture.services.shutdown();
@@ -288,10 +311,18 @@ test('a project pointed at a removed workspace loses only the link; projects, as
       // "Orquestrador" folder now appears under a project of its own. That is
       // the point of the folder-is-the-project change: a folder in one list
       // with nothing in the other is the confusion it removes.
-      const forFolder = projects.find((project) => project.name === 'Orquestrador');
-      assert.ok(forFolder, 'a folder with no project gains one at start-up');
-      assert.equal(forFolder.workspaceId, p.orquestrador.id);
-      assert.equal(projects.length, 2, 'and nothing else was invented');
+      const forFolder = projects.find((entry) => entry.workspaceId === p.orquestrador.id);
+      assert.ok(forFolder, 'the folder is reachable through a project');
+      assert.equal(forFolder.name, 'Orquestrador');
+      // Nothing was invented: the two folders' own projects, plus the one
+      // this test created. The removed folder's project kept its row and
+      // lost only its link.
+      assert.equal(projects.length, 3);
+      assert.equal(
+        projects.filter((entry) => entry.workspaceId === null).length,
+        2,
+        'the two that pointed at the removed folder',
+      );
 
       const sessions = reopened.chat.listAllSessions();
       assert.equal(sessions.find((s) => s.id === session.id)?.projectId, project.id);
