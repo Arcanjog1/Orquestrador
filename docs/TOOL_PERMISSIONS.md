@@ -47,6 +47,39 @@ O aplicativo **leu isso corretamente** — a mensagem *"Ferramentas recusadas
 nesta execução: PowerShell, Bash."* é escrita por ele, a partir do campo do
 CLI. O que faltava era o que fazer em seguida.
 
+### O mecanismo provável, no seu caso específico
+
+Há uma linha na documentação que descreve com precisão incômoda o que você
+tentou fazer:
+
+> When the PowerShell tool is enabled, `acceptEdits` mode also auto-approves
+> `Set-Content`, `Add-Content`, `Clear-Content`, and `Remove-Item` on in-scope
+> paths […] **A positional argument that contains a quote character, such as
+> the apostrophe in `Set-Content .\notes.txt "It's done"`, still prompts even
+> on in-scope paths**, because Claude Code can't statically validate an
+> argument whose quoted and unquoted readings differ. Pass the content through
+> a named parameter such as `-Value` to avoid the prompt.
+>
+> — <https://code.claude.com/docs/en/permission-modes>
+
+Ou seja: `Set-Content .\hello.txt "pronto"` — a forma mais natural de escrever
+esse arquivo no PowerShell — **pede permissão mesmo estando na lista de
+auto-aprovadas**, por causa das aspas. E `Set-Content -Path .\hello.txt -Value
+"pronto"` não pediria.
+
+Isso explicaria os dois nomes recusados: o worker tentou o PowerShell com
+argumento posicional, foi barrado pelas aspas, tentou o Bash, e foi barrado
+porque `echo`/`printf` não estão na lista curta.
+
+**Não afirmo que foi isso.** Eu não tenho o transcrito da sua execução — só os
+nomes das ferramentas, que é o que o CLI reportou. É a hipótese que melhor
+encaixa nos fatos que você me deu, e o build novo a torna irrelevante: com
+`Write` liberado, o worker não passa por nenhuma dessas duas portas.
+
+Se você quiser confirmá-la mesmo assim, o arquivo de **Exportar diagnóstico**
+da próxima execução recusada agora traz o comando exato — que era justamente o
+que faltava para responder isto sem adivinhar.
+
 ### O que a causa **não** é
 
 Descartado com evidência, não por eliminação:
