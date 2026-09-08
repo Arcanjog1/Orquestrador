@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PanelRightOpen, Sparkles } from "lucide-react";
+import { PanelRightOpen, ShieldQuestion, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { AppSidebar } from "@/components/orch/AppSidebar";
 import { ProjectDialog } from "@/components/orch/ProjectDialog";
 import { ProjectContextDialog } from "@/components/orch/ProjectContextDialog";
+import { PermissionDialog } from "@/components/orch/PermissionDialog";
 import { TopContextBar } from "@/components/orch/TopContextBar";
 import { TimelineView } from "@/components/orch/Timeline";
 import {
@@ -49,6 +50,7 @@ import type {
   ChatSessionView,
   ProjectView,
   ProjectRemovalPlanView,
+  PermissionRequestView,
   RunActivityEvent,
   AgentMessageEvent,
   RunProgressEvent,
@@ -126,6 +128,11 @@ export function WorkspacePage({
   // paths that stay untouched.
   const [removalPlan, setRemovalPlan] = useState<ProjectRemovalPlanView | null>(null);
   const [contextProject, setContextProject] = useState<ProjectView | null>(null);
+  // Authorisation requests raised by the run on screen. Loaded from the main
+  // process rather than pushed, so reopening the app shows what is still
+  // waiting instead of losing it with the window.
+  const [permissions, setPermissions] = useState<readonly PermissionRequestView[]>([]);
+  const [permissionOpen, setPermissionOpen] = useState<PermissionRequestView | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   // A conversation to open once the page has switched to its folder.
   const pendingSession = useRef<string | null>(null);
@@ -150,6 +157,12 @@ export function WorkspacePage({
    * bound to the folder on screen. Reading it from the conversation first is
    * what makes the highlight follow what the person is actually looking at.
    */
+  /** Only what is still waiting: a decided request is history, not a task. */
+  const pendingPermissions = useMemo(
+    () => permissions.filter((request) => request.status === "pending"),
+    [permissions],
+  );
+
   const activeProjectId = useMemo(() => {
     const open = sessions.find((s) => s.id === sessionId);
     if (open?.projectId) return open.projectId;
@@ -332,6 +345,30 @@ export function WorkspacePage({
   useEffect(() => {
     void loadSessions();
   }, [loadSessions]);
+
+  /**
+   * What this run is still waiting to be authorised for.
+   *
+   * Read whenever the run changes and whenever it reports progress, because a
+   * refusal arrives at the end of an invocation - the moment the run stops.
+   */
+  const loadPermissions = useCallback(async () => {
+    if (!run) {
+      setPermissions([]);
+      return;
+    }
+    try {
+      setPermissions(await api.permission.forRun({ runId: run.id }));
+    } catch {
+      // A request list that cannot be read is not worth failing a screen over;
+      // the run's own state still says it needs a person.
+      setPermissions([]);
+    }
+  }, [run]);
+
+  useEffect(() => {
+    void loadPermissions();
+  }, [loadPermissions, stage]);
 
   const loadMessages = useCallback(async () => {
     if (!sessionId) {
@@ -948,6 +985,38 @@ export function WorkspacePage({
           )}
         </div>
 
+        {pendingPermissions.length > 0 && (
+          <div
+            className="mx-4 mb-2 rounded-lg border border-attention/40 bg-attention/5 px-3 py-2"
+            data-testid="permission-banner"
+          >
+            <div className="flex items-center gap-2 text-xs text-attention">
+              <ShieldQuestion className="size-4 shrink-0" />
+              <span className="min-w-0 flex-1">
+                {pendingPermissions.length === 1
+                  ? "O worker precisa de autorização para uma operação. Nada foi executado."
+                  : `O worker precisa de autorização para ${pendingPermissions.length} operações. Nada foi executado.`}
+              </span>
+            </div>
+            <div className="mt-2 space-y-1">
+              {pendingPermissions.map((request) => (
+                <button
+                  key={request.id}
+                  onClick={() => setPermissionOpen(request)}
+                  className="flex w-full items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5 text-left text-xs transition-colors hover:border-primary/40"
+                  data-testid={`permission-open-${request.id}`}
+                >
+                  <span className="font-mono text-[11px]">{request.toolName}</span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
+                    {request.command ?? "comando não informado"}
+                  </span>
+                  <span className="shrink-0 text-[10px] text-primary">Revisar</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <Composer
           state={runState}
           onSubmit={(text) => void send(text)}
@@ -1059,6 +1128,18 @@ export function WorkspacePage({
         onSaved={(project) => {
           toast(projectDialog?.project ? "Projeto salvo" : `Projeto "${project.name}" criado`);
           void loadSessions();
+        }}
+      />
+      <PermissionDialog
+        request={permissionOpen}
+        onOpenChange={(open) => !open && setPermissionOpen(null)}
+        onDecided={(decided) => {
+          toast(
+            decided.status === "approved"
+              ? `Autorizado: ${decided.approvedRule}. Envie a tarefa de novo para continuar — a sessão do Claude Code é retomada.`
+              : "Recusado. Nada foi autorizado e a execução continua parada.",
+          );
+          void loadPermissions();
         }}
       />
       <ProjectContextDialog

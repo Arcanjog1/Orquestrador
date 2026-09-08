@@ -16,6 +16,7 @@ import type {
   RunnerFactory,
 } from '../../apps/desktop/src/main/services/orchestration-service.js';
 import { IpcRouter, type ShellBridge } from '../../apps/desktop/src/main/ipc-router.js';
+import type { DeniedToolCall } from '../../src/core/types.js';
 import type { AppPaths } from '../../src/runtime/paths.js';
 import type { GitHubClientOptions } from '../../src/github/github-client.js';
 import type { SecretStore } from '../../apps/desktop/src/main/services/github-service.js';
@@ -185,16 +186,34 @@ export class ScriptedAgent implements AgentRunner {
    */
   sessionId: string | null = null;
 
+  /**
+   * Refusals this runner reports, as a provider that was denied a tool would.
+   *
+   * Set by a test that exercises the approval flow. Cleared by a test that
+   * wants the next attempt to succeed, which is how "approve, then it works"
+   * is expressed without a real CLI.
+   */
+  denyNext: readonly DeniedToolCall[] | null = null;
+
   async run(input: AgentInput): Promise<AgentResult> {
     this.calls.push(input);
     const step = this.script[Math.min(this.index, this.script.length - 1)];
     this.index += 1;
     const startedAt = new Date().toISOString();
     const stdout = typeof step === 'function' ? await step(input) : (step ?? '');
+    const denied = this.denyNext;
     return makeAgentResult({
       startedAt,
       stdout,
       ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+      ...(denied && denied.length > 0
+        ? {
+            exitCode: 1,
+            failure: 'tool-permission-denied' as const,
+            permissionDenials: denied.map((call) => call.toolName),
+            deniedCalls: denied,
+          }
+        : {}),
     });
   }
 

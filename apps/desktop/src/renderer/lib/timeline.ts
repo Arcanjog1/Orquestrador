@@ -102,6 +102,10 @@ const STAGE_STATE: Record<string, RunState> = {
   done: 'DONE',
   failed: 'FAILED',
   blocked: 'NEEDS_HUMAN',
+  'needs-human': 'NEEDS_HUMAN',
+  // Waiting on a specific authorisation, which is a different thing from
+  // waiting on a person in general: there is a dialog to open.
+  'awaiting-approval': 'NEEDS_HUMAN',
   cancelled: 'CANCELLED',
 };
 
@@ -117,6 +121,12 @@ export function runStateOf(run: RunView | null, liveStage: string | null): RunSt
     // The human gate. Without this it fell through to IDLE and the run looked
     // like it was simply waiting, rather than waiting for a person.
     case 'BLOCKED':
+    // `NEEDS_HUMAN` was missing from this switch, so a run stopped for a
+    // person - a refused tool, a budget reached, a credential to fix - read as
+    // IDLE: the one state that means "nothing is happening and nothing is
+    // wanted from you". It is the state most in need of being told apart, and
+    // it was the only one being silently swallowed.
+    case 'NEEDS_HUMAN':
       return 'NEEDS_HUMAN';
     case 'PENDING':
       return 'PLANNING';

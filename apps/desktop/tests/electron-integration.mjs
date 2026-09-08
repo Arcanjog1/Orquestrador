@@ -1603,6 +1603,94 @@ test('the project context is written, read and marked in the packaged interface'
   }
 });
 
+test('a permission request is answerable in the packaged interface, and grants only its scope', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-perm-'));
+  try {
+    const folder = await window.webContents.executeJavaScript(
+      `window.api.workspace.openProject(${JSON.stringify({ localPath: dir })})`,
+    );
+    const project = await window.webContents.executeJavaScript('window.api.project.list()').then(
+      (list) => list.find((p) => p.workspaceId === folder.workspace.id),
+    );
+    const session = await window.webContents.executeJavaScript(
+      `window.api.chat.createSession(${JSON.stringify({ workspaceId: folder.workspace.id, title: 'Precisa autorizar', projectId: project.id })})`,
+    );
+
+    // A run that stopped on a refused tool, and the request it raised. Written
+    // through the real main-process services, so the row is exactly the shape
+    // a real refusal produces - the renderer then reads it over the real
+    // bridge, which is what this case is for.
+    const run = services.database.runs.create({
+      id: `run-perm-${Date.now()}`,
+      sessionId: session.id,
+      workspaceId: folder.workspace.id,
+      objective: 'Crie hello.txt',
+      orchestratorAgentId: null,
+      maxIterations: 3,
+    });
+    services.database.runs.setStatus(run.id, 'NEEDS_HUMAN', 'Uma ferramenta foi recusada.');
+    services.database.permissions.createRequest({
+      id: `perm-${Date.now()}`,
+      runId: run.id,
+      sessionId: session.id,
+      workspaceId: folder.workspace.id,
+      toolName: 'Bash',
+      command: 'node check.mjs',
+      workingDirectory: dir,
+      reason: 'O Claude Code pediu para usar Bash e a execução não é interativa.',
+    });
+    const request = { runId: run.id };
+
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Precisa autorizar/, 15_000);
+
+    // The pending request is readable through the real bridge, with every
+    // field the dialog renders.
+    const pending = await window.webContents.executeJavaScript(
+      `window.api.permission.forRun(${JSON.stringify({ runId: request.runId })})`,
+    );
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].toolName, 'Bash');
+    assert.equal(pending[0].command, 'node check.mjs');
+    assert.equal(pending[0].status, 'pending');
+    assert.ok(
+      pending[0].scopes.some((s) => s.rule === 'Bash(node check.mjs)'),
+      'the exact command is on offer',
+    );
+    assert.equal(
+      pending[0].scopes.some((s) => s.rule === 'Bash'),
+      false,
+      'and a bare shell never is',
+    );
+
+    // A rule the request did not publish is refused by the main process.
+    const widened = await window.webContents
+      .executeJavaScript(
+        `window.api.permission.approve(${JSON.stringify({ requestId: pending[0].id, rule: 'Bash' })})`,
+      )
+      .then(() => null)
+      .catch((e) => String(e));
+    assert.ok(widened && /opções/.test(widened), `a widened rule is refused: ${widened}`);
+
+    const approved = await window.webContents.executeJavaScript(
+      `window.api.permission.approve(${JSON.stringify({ requestId: pending[0].id, rule: 'Bash(node check.mjs)' })})`,
+    );
+    assert.equal(approved.status, 'approved');
+    assert.equal(approved.approvedRule, 'Bash(node check.mjs)');
+
+    const grants = await window.webContents.executeJavaScript(
+      `window.api.permission.grants(${JSON.stringify({ workspaceId: folder.workspace.id })})`,
+    );
+    assert.deepEqual(grants.map((g) => g.rule), ['Bash(node check.mjs)']);
+  } finally {
+    removeTree(dir);
+  }
+});
+
 test('the team dialog adds a second worker, and refuses two workers on one connection', async () => {
   const window = await openWindow();
   const dir = mkdtempSync(join(tmpdir(), 'lao-electron-team2-'));

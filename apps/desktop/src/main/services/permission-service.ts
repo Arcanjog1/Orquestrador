@@ -205,7 +205,7 @@ export class PermissionService {
       workspaceName: typeof workspace?.display_name === 'string' ? workspace.display_name : null,
       iteration: record.iteration,
       agentId: record.agent_id,
-      agentName: typeof agent?.name === 'string' ? agent.name : null,
+      agentName: typeof agent?.display_name === 'string' ? agent.display_name : null,
       accountId: record.account_id,
       accountName: typeof account?.display_name === 'string' ? account.display_name : null,
       toolName: record.tool_name,
