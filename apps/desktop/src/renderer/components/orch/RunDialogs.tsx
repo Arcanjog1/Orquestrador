@@ -12,6 +12,7 @@ import { api, messageOf } from "@/lib/api";
 import { SectionLabel, StatBlock } from "./primitives";
 import { reasoningLabel, selectionModeLabel } from "@/lib/orchestrator-data";
 import type {
+  PermissionRequestView,
   RunDetailView,
   RunStepView,
   WorkspaceChangesView,
@@ -459,6 +460,24 @@ export function RunDetailDialog({
   const [exported, setExported] = useState<{ path: string; directory: string } | null>(null);
   const [exporting, setExporting] = useState(false);
   useEffect(() => setExported(null), [runId]);
+
+  // What this run asked a person to authorise, and how it ended. Read here
+  // rather than pushed, so reopening the dialog shows the current answer.
+  const [permissions, setPermissions] = useState<readonly PermissionRequestView[]>([]);
+  useEffect(() => {
+    if (!runId) {
+      setPermissions([]);
+      return;
+    }
+    let alive = true;
+    api.permission
+      .forRun({ runId })
+      .then((list) => alive && setPermissions(list))
+      .catch(() => alive && setPermissions([]));
+    return () => {
+      alive = false;
+    };
+  }, [runId]);
   // A step is worth showing when it carries diagnostics and did not simply
   // succeed. `changed` is the evidence step's success, and `degraded` is a
   // baseline that could not use git - which is exactly the case a person
@@ -533,6 +552,46 @@ export function RunDetailDialog({
             </div>
           )}
 
+          {permissions.length > 0 && (
+            <div data-testid="run-permissions">
+              <SectionLabel>Autorizações</SectionLabel>
+              <div className="mt-2 space-y-1.5">
+                {permissions.map((request) => (
+                  <div
+                    key={request.id}
+                    className="rounded-lg border border-border p-2.5 text-xs"
+                    data-testid={`run-permission-${request.id}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "shrink-0 rounded px-1 text-[10px] uppercase",
+                          PERMISSION_TONE[request.status],
+                        )}
+                      >
+                        {PERMISSION_LABEL[request.status]}
+                      </span>
+                      <span className="font-mono">{request.toolName}</span>
+                    </div>
+                    <p className="mt-1 font-mono text-[11px] break-all text-muted-foreground">
+                      {request.command ?? "comando não informado"}
+                    </p>
+                    {request.status === "approved" && request.approvedRule && (
+                      <p className="mt-1 text-[10px] text-success">
+                        Autorizado apenas: <span className="font-mono">{request.approvedRule}</span>
+                      </p>
+                    )}
+                    {request.status === "denied" && (
+                      <p className="mt-1 text-[10px] text-muted-foreground">
+                        Você recusou. Nada foi autorizado e nada foi executado.
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {failing.length > 0 && (
             <div>
               <SectionLabel>Diagnóstico</SectionLabel>
@@ -543,7 +602,23 @@ export function RunDetailDialog({
                     <div className="text-xs font-semibold text-danger">
                       {PHASE_LABEL[step.phase] ?? step.phase} · {step.status} · iteração {step.iteration}
                     </div>
-                    {step.summary && <p className="mt-1 text-sm text-foreground/90">{step.summary}</p>}
+                    {step.summary && (
+                      <>
+                        {/* What this text is, said before it is shown.
+                            A `worker` step's summary is the *task that was
+                            sent*, not what came back - and printed bare under
+                            "Diagnóstico" it reads as the worker's own answer,
+                            which is the one thing it must never be mistaken
+                            for. What the worker actually produced is on its
+                            invocation, below. */}
+                        {step.phase === "worker" && (
+                          <div className="mt-1 text-[10px] tracking-[0.1em] text-muted-foreground uppercase">
+                            Tarefa enviada ao worker — não é a resposta dele
+                          </div>
+                        )}
+                        <p className="mt-1 text-sm text-foreground/90">{step.summary}</p>
+                      </>
+                    )}
                     {data && (
                       <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[auto_1fr]">
                         {Object.entries(data).map(([key, value]) => (
@@ -706,3 +781,25 @@ export function RunDetailDialog({
     </Dialog>
   );
 }
+
+/**
+ * The four states an authorisation can be in, named rather than coloured.
+ *
+ * "Aguardando você" and "Você recusou" are opposite situations that a single
+ * NEEDS_HUMAN run status cannot tell apart, and telling them apart is what
+ * section 5 is about: one of them wants something from the person and the
+ * other is a decision they already made.
+ */
+const PERMISSION_LABEL: Record<PermissionRequestView["status"], string> = {
+  pending: "aguardando você",
+  approved: "autorizado",
+  denied: "você recusou",
+  superseded: "substituído",
+};
+
+const PERMISSION_TONE: Record<PermissionRequestView["status"], string> = {
+  pending: "bg-attention/15 text-attention",
+  approved: "bg-success/15 text-success",
+  denied: "bg-muted text-muted-foreground",
+  superseded: "bg-muted text-muted-foreground",
+};

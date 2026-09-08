@@ -518,7 +518,14 @@ export class IpcRouter {
       const detail = s.orchestration.detail((p as { runId: string }).runId);
       // The application's own artifacts folder: no picker, nothing for the
       // person to choose before they can see why their run failed.
-      return writeDiagnostics(detail, s.paths.artifacts);
+      // The authorisations go in too: "which tool was refused and what did I
+      // answer" is exactly the question an exported diagnosis is opened for.
+      return writeDiagnostics(
+        detail,
+        s.paths.artifacts,
+        new Date(),
+        s.permissions.forRun((p as { runId: string }).runId),
+      );
     });
     this.handlers.set('run.cancel', async (p) => {
       const runId = (p as { runId: string }).runId;

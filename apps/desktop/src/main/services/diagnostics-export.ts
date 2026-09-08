@@ -26,7 +26,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { redact } from '../core.js';
-import type { RunDetailView } from '../../shared/ipc-contract.js';
+import type { PermissionRequestView, RunDetailView } from '../../shared/ipc-contract.js';
 
 /** A field the tool did not report. Said, never hidden and never invented. */
 const UNKNOWN = 'não informado';
@@ -42,7 +42,16 @@ function say(value: string | number | null | undefined): string {
  * Markdown, because it has to be readable in a chat window, in an issue, and
  * in Notepad — which is where it will actually be opened.
  */
-export function renderDiagnostics(detail: RunDetailView, generatedAt = new Date()): string {
+export function renderDiagnostics(
+  detail: RunDetailView,
+  generatedAt = new Date(),
+  /**
+   * What this run asked a person to authorise. Optional so every existing
+   * caller keeps working; absent means none were asked, which is the truth
+   * for a run that never hit a refused tool.
+   */
+  permissions: readonly PermissionRequestView[] = [],
+): string {
   const lines: string[] = [];
   const run = detail.run;
 
@@ -150,6 +159,25 @@ export function renderDiagnostics(detail: RunDetailView, generatedAt = new Date(
   }
   lines.push('');
 
+  // The authorisations this run asked for. In the export because the run this
+  // work exists for is one somebody would export: "which tool was refused, and
+  // what did I answer" is the question, and it must not need the app open.
+  lines.push('## Autorizações');
+  lines.push('');
+  if (permissions.length === 0) {
+    lines.push('_Nenhuma autorização foi pedida nesta execução._');
+  } else {
+    lines.push('| estado | ferramenta | comando | escopo autorizado |');
+    lines.push('|---|---|---|---|');
+    for (const request of permissions) {
+      lines.push(
+        `| ${request.status} | ${say(request.toolName)} | ${say(request.command)} | ` +
+          `${say(request.approvedRule)} |`,
+      );
+    }
+  }
+  lines.push('');
+
   lines.push('## Verificações');
   lines.push('');
   if (detail.verifications.length === 0) lines.push('_Nenhuma verificação foi executada._');
@@ -189,6 +217,7 @@ export function writeDiagnostics(
   detail: RunDetailView,
   artifactsRoot: string,
   now = new Date(),
+  permissions: readonly PermissionRequestView[] = [],
 ): { path: string; directory: string } {
   const directory = join(artifactsRoot, 'diagnostics');
   mkdirSync(directory, { recursive: true });
@@ -196,7 +225,7 @@ export function writeDiagnostics(
   // the timestamp keeps two exports of the same run apart.
   const stamp = now.toISOString().replace(/[:.]/g, '-');
   const path = join(directory, `diagnostico-${detail.run.id}-${stamp}.md`);
-  writeFileSync(path, renderDiagnostics(detail, now), 'utf8');
+  writeFileSync(path, renderDiagnostics(detail, now, permissions), 'utf8');
   return { path, directory };
 }
 
