@@ -32,6 +32,7 @@ import {
   writeDiagnostics,
 } from '../apps/desktop/src/main/services/diagnostics-export.js';
 import type { RunDetailView } from '../apps/desktop/src/shared/ipc-contract.js';
+import { isMechanicalFailure } from '../src/routing/task-assessment.js';
 
 /* ================================================================== *
  * The record keeps what the tool said
@@ -314,4 +315,40 @@ test('a run with nothing recorded still exports a readable file', () => {
   assert.match(report, /Nenhuma invocação foi registrada/);
   assert.match(report, /Nenhuma verificação foi executada/);
   assert.ok(report.length > 200);
+});
+
+/* ================================================================== *
+ * No blind escalation
+ * ================================================================== */
+
+test('a failure the tool itself reported never buys a stronger model', () => {
+  // The reflex behind a run that climbed to STRONG/HIGH and stopped anyway.
+  // `error_during_execution` means something threw and `error_max_turns` means
+  // the run ran out of turns; no model unthrows an exception, and paying for a
+  // bigger one is spending money on a wall.
+  assert.equal(
+    isMechanicalFailure({
+      outcome: 'completed',
+      exitCode: 1,
+      stdout: '',
+      stderr: 'A execução do Claude Code terminou em erro (error_during_execution).',
+      failure: 'provider-error',
+    }),
+    true,
+  );
+});
+
+test('a real shortfall of reasoning still escalates', () => {
+  // The rule must not become "never escalate". A worker that ran cleanly and
+  // simply did not achieve the goal is exactly the case a stronger model can
+  // help with, and it stays escalatable.
+  assert.equal(
+    isMechanicalFailure({
+      outcome: 'completed',
+      exitCode: 0,
+      stdout: 'tentei mas não consegui resolver o problema',
+      stderr: '',
+    }),
+    false,
+  );
 });

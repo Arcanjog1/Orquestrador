@@ -177,6 +177,18 @@ const MECHANICAL_FAILURES: ReadonlySet<string> = new Set([
   // stronger model on silence is the exact reflex the previous session removed
   // for refused permissions, and it is wrong here for the same reason.
   'no-activity',
+  // The tool itself reported a failure - `error_during_execution` because
+  // something threw, `error_max_turns` because the run ran out of turns. Both
+  // are the runtime failing, not the model reasoning badly, and neither is
+  // fixed by paying for a stronger one. This was the reflex behind a run that
+  // climbed to STRONG/HIGH and stopped anyway: the escalation cost money and
+  // could not have helped, because no model unthrows an exception.
+  //
+  // The classification is coarse, so this is a coarse rule. What makes it
+  // safe rather than lossy is `failureDetail`: the tool's own subtype is
+  // recorded and shown, so a person sees which failure it was even though the
+  // router treats them alike.
+  'provider-error',
 ]);
 
 /**
