@@ -1382,15 +1382,27 @@ test('the same folder opened twice is one project, and survives a restart', asyn
 test('one repository is one project, whichever way its address is written', async () => {
   const window = await openWindow();
 
-  // Bookkeeping only: no network is reached here, because the project is
-  // created before the metadata is fetched and the fetch failing is allowed.
+  // Bookkeeping first: the project exists before any metadata is fetched, so
+  // a network failure costs the branch name and not the project.
+  //
+  // `created` is deliberately not asserted here. An earlier case in this suite
+  // made a cloud project for this same repository, and every case shares one
+  // application data root - so connecting it finds that project rather than
+  // making a second, which is the whole point and is asserted below. A test
+  // that demanded a clean slate would be testing the suite's ordering.
   const connected = await window.webContents.executeJavaScript(
     `window.api.project.connectRepository(${JSON.stringify({ url: 'https://github.com/Arcanjog1/Orquestrador' })})`,
   );
-  assert.equal(connected.created, true);
   assert.equal(connected.project.repositoryFullName, 'Arcanjog1/Orquestrador');
 
-  // Four other spellings of the same repository. Each must open the first.
+  // Exactly one project claims this repository, whichever way it got there.
+  const claiming = await window.webContents.executeJavaScript('window.api.project.list()').then(
+    (list) => list.filter((p) => p.repositoryFullName === 'Arcanjog1/Orquestrador'),
+  );
+  assert.equal(claiming.length, 1, 'one repository, one project, across both creation paths');
+  assert.equal(claiming[0].id, connected.project.id);
+
+  // Five other spellings of the same repository. Each must open the same one.
   for (const spelling of [
     'https://github.com/Arcanjog1/Orquestrador.git',
     'git@github.com:Arcanjog1/Orquestrador.git',

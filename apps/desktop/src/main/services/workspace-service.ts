@@ -412,9 +412,17 @@ export class WorkspaceService {
           fullName: workspace.repository_full_name ?? displayFullName(repositoryUrl),
           isPrivate:
             workspace.repository_private === null ? null : workspace.repository_private === 1,
-          // Not guessed. `workspaces.default_branch` is what git or the person
-          // recorded; where there is none, it stays unknown.
-          defaultBranch: workspace.default_branch ?? workspace.branch ?? null,
+          // `default_branch` only, never `branch`.
+          //
+          // They are different facts and conflating them is exactly the guess
+          // this project forbids: `branch` is the branch a cloud run was told
+          // to start from - a person picked it from a list - while
+          // `default_branch` is what the repository's default actually is.
+          // Copying the first into the second made a project whose default
+          // branch read `main` because somebody chose to work on main, and a
+          // test caught it saying so. Where there is no recorded default, it
+          // stays unknown until GitHub is asked.
+          defaultBranch: workspace.default_branch ?? null,
         });
         repositoryLinked = true;
       }
@@ -554,7 +562,13 @@ export class WorkspaceService {
       repositoryPrivate: input.repositoryPrivate ?? null,
       branch,
       repositoryUrl: `https://github.com/${repository}`,
-      defaultBranch: branch,
+      // `default_branch` is deliberately not set from `branch`. They are two
+      // different facts: `branch` is where this cloud project's work starts,
+      // chosen by a person from a list, and `default_branch` is what the
+      // repository's default actually is. Writing the first into the second
+      // made a project whose "default branch" was whatever branch somebody
+      // picked - and prefilled a pull request's base with the branch it was
+      // opened *from*. It stays unknown until GitHub is asked.
       cloudEndpoint: input.endpoint ?? null,
     });
     return this.toView(record);
@@ -1002,8 +1016,12 @@ export class WorkspaceService {
       },
       repositoryUrl: record.repository_url,
       defaultBranch: record.default_branch,
-      // Filled in by `listWithBranches`; a plain view does not touch the disk.
-      branch: null,
+      // For a local project this is filled in by `listWithBranches`, which
+      // reads the working copy; a plain view does not touch the disk. For a
+      // cloud project there is no disk here to read, and the branch its work
+      // starts from is simply a recorded fact - so it is reported, rather than
+      // the interface showing "—" for something it knows.
+      branch: (record.environment ?? 'local') === 'cloud' ? record.branch : null,
       orchestratorAgentId: record.orchestrator_agent_id,
       workerAgentId: record.worker_agent_id,
       team: {
