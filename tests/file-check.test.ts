@@ -24,6 +24,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -226,6 +227,52 @@ test('a directory, an oversized file and a malformed request each say what they 
       const result = await runFileCheck(s.dir, request);
       assert.equal(result.outcome, 'invalid-request', why);
       assert.equal(result.sizeBytes, null);
+    }
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('a file that cannot be read is a read error - not missing, and never a pass', async () => {
+  const s = scratch();
+  try {
+    // A regular file used as a directory. The path is *there*; it simply
+    // cannot be read, which is a different fact from the file not existing -
+    // and the difference matters, because "missing" tells the supervisor to
+    // create the file while "read error" tells it something is wrong with the
+    // path. POSIX answers ENOTDIR here; Windows answers ENOENT for the same
+    // shape, so the exact outcome is asserted per platform and the part both
+    // must agree on - refused, nothing read - is asserted for both.
+    writeFileSync(join(s.dir, 'a.txt'), PRONTO);
+    const throughAFile = await runFileCheck(s.dir, {
+      path: 'a.txt/child.txt',
+      expectText: PRONTO,
+    });
+    assert.equal(throughAFile.passed, false);
+    assert.equal(throughAFile.sha256, null, 'nothing was read');
+    if (process.platform === 'win32') {
+      assert.ok(['read-error', 'missing'].includes(throughAFile.outcome), throughAFile.outcome);
+    } else {
+      assert.equal(throughAFile.outcome, 'read-error');
+      assert.match(throughAFile.problem ?? '', /ENOTDIR/);
+    }
+
+    // The case a real workspace actually hits: the file is there, stat works,
+    // and opening it is refused. Root ignores the mode bits and Windows does
+    // not have them, so this asserts nothing where it cannot be produced -
+    // it runs for real on the Linux CI runner, which is not root.
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      const locked = join(s.dir, 'locked.txt');
+      writeFileSync(locked, PRONTO);
+      chmodSync(locked, 0o000);
+      const result = await runFileCheck(s.dir, { path: 'locked.txt', expectText: PRONTO });
+      chmodSync(locked, 0o600);
+      assert.equal(result.passed, false);
+      assert.equal(result.outcome, 'read-error');
+      assert.match(result.problem ?? '', /EACCES/);
+      assert.equal(result.sha256, null, 'no hash of bytes that were never read');
+      assert.equal(result.sizeBytes, PRONTO.length, 'stat succeeded; the read did not');
+      assert.match(describeFileCheck(result), /locked\.txt/);
     }
   } finally {
     s.cleanup();
@@ -637,6 +684,44 @@ test('asking twice for ids that do not exist stops with a concrete reason', asyn
     assert.ok(step, 'the record names the dead end');
     assert.match(step!.detail ?? '', /inventada/);
     assert.match(step!.detail ?? '', /hello\.txt/);
+  } finally {
+    await prepared.cleanup();
+  }
+});
+
+test('every round says which criteria still lack proof, and unproven is not failed', async () => {
+  const askUnknown = JSON.stringify({
+    action: 'verify',
+    acceptanceCriteria: [CRITERION],
+    verificationCommands: ['inventada'],
+    fileChecks: [],
+    summary: 'x',
+  });
+  const prepared = await runWith({
+    orchestratorScript: [askUnknown, delegate],
+    workerScript: [
+      (input: AgentInput) => {
+        writeFileSync(join(input.workingDirectory, 'hello.txt'), Buffer.from(PRONTO_HEX, 'hex'));
+        return 'criado';
+      },
+    ],
+    maxIterations: 4,
+  });
+  try {
+    // Round two is told, in the prompt, exactly what is still outstanding.
+    // Before this the supervisor could only find out by proposing `done` and
+    // having the gate refuse it - a wasted round trip, and the reason a run
+    // could burn its whole budget rediscovering the same thing.
+    const second = prepared.orchestrator.calls[1]!.prompt;
+    assert.match(second, /CRITERIA STILL WITHOUT PROOF/);
+    assert.match(second, /\[unproven\] "hello\.txt contém exatamente os bytes/);
+    assert.doesNotMatch(
+      second,
+      /\[failed  \] "hello\.txt/,
+      'nobody looked is not the same as the evidence says no',
+    );
+    assert.match(second, /Never with an id that is not on that list\./);
+    assert.equal(prepared.run.status, 'DONE');
   } finally {
     await prepared.cleanup();
   }

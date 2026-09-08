@@ -1354,7 +1354,7 @@ export class OrchestrationService {
         return;
       }
 
-      feedback = this.buildFeedback(evidence, verification, unknownIds, record);
+      feedback = this.buildFeedback(evidence, verification, unknownIds, record, ledger);
     }
 
     this.database.runs.setStatus(runId, 'FAILED', `Limite de ${maxIterations} iterações atingido.`);
@@ -1902,6 +1902,7 @@ export class OrchestrationService {
     verification: readonly CommandResult[],
     unknownIds: readonly string[],
     record?: IterationRecord,
+    ledger?: AcceptanceCriteriaLedger,
   ): string {
     const lines: string[] = [];
     // What the worker ran as, so the orchestrator's next request is informed
@@ -1993,6 +1994,42 @@ export class OrchestrationService {
         lines.push(`  ${verdict}: ${result.command}`);
         const output = (result.stderr || result.stdout).trim();
         if (verdict !== 'PASS' && output) lines.push(indent(output.slice(0, 2000)));
+      }
+    }
+
+    // What is still missing, said out loud, every round.
+    //
+    // The gate already lists unproven criteria - but only after `done` has
+    // been refused, which is one wasted round trip at best and, in the run
+    // that started this, four. The supervisor cannot see the ledger, so
+    // without this block "what do I still have to prove?" is a guess, and a
+    // guess is what produced a `verify` for an id that does not exist.
+    //
+    // The two states are kept apart on purpose. `unproven` means nobody
+    // looked; `failed` means something looked and said no. Collapsing them is
+    // the exact defect that made a correct file unfinishable.
+    if (ledger && ledger.size > 0) {
+      const pending = ledger.pending();
+      if (pending.length === 0) {
+        lines.push(
+          '',
+          'CRITERIA: all ' + ledger.size + ' proven by the checks above. Nothing is outstanding,',
+          'so a further delegation would repeat work that is already done.',
+        );
+      } else {
+        lines.push('', 'CRITERIA STILL WITHOUT PROOF (each one blocks "done"):');
+        for (const criterion of pending) {
+          const state = criterion.status === 'failed' ? 'failed  ' : 'unproven';
+          lines.push(
+            `  [${state}] "${criterion.text}"` +
+              (criterion.status === 'failed' && criterion.note ? ` - ${criterion.note}` : ''),
+          );
+        }
+        lines.push(
+          '  unproven = nothing has checked it yet. failed = something checked it and it did not hold.',
+          '  Prove each one with a "fileChecks" entry that names it in "criteria", or with a',
+          '  verification id from the list you were given. Never with an id that is not on that list.',
+        );
       }
     }
     return lines.join('\n');

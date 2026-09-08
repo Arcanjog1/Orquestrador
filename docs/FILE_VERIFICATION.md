@@ -113,6 +113,29 @@ nenhum modelo cadastra uma verificação.
 
 A primeira recusa não para nada: é informação que o supervisor ainda não viu.
 
+### O que ainda falta provar, dito em toda rodada
+
+Listar o que **está disponível** só resolve metade. A outra metade é o que
+ainda **carece de prova**, e antes disso o supervisor só descobria propondo
+`done` e sendo recusado pelo gate — uma ida e volta desperdiçada por rodada.
+
+Agora o retorno de cada iteração traz:
+
+```
+CRITERIA STILL WITHOUT PROOF (each one blocks "done"):
+  [unproven] "hello.txt contém exatamente os bytes 70 72 6F 6E 74 6F"
+  unproven = nothing has checked it yet. failed = something checked it and it did not hold.
+  Prove each one with a "fileChecks" entry that names it in "criteria", or with a
+  verification id from the list you were given. Never with an id that is not on that list.
+```
+
+Os dois estados continuam separados de propósito: `unproven` é *ninguém
+olhou*, `failed` é *alguém olhou e não bate*. Juntar os dois foi exatamente o
+defeito que tornava um arquivo correto inconcluível.
+
+Quando não sobra nada, o bloco diz isso — e diz por quê: uma nova delegação
+repetiria trabalho já feito.
+
 ## 5. Resultado
 
 O mesmo cenário, com o supervisor usando o mecanismo:
@@ -129,8 +152,10 @@ Num workspace **sem nenhuma verificação cadastrada**.
 ## 6. O que ainda depende do Windows
 
 Tudo acima foi exercitado neste ambiente Linux, com git real, sistema de
-arquivos real e o laço real — 20 testes cobrindo os desfechos, os limites e o
-laço inteiro.
+arquivos real e o laço real — 22 testes cobrindo os desfechos, os limites e o
+laço inteiro. A falha de leitura é exercitada de duas formas: um arquivo usado
+como pasta (`ENOTDIR`) e um arquivo sem permissão de leitura (`EACCES`) — este
+último só significa alguma coisa fora do root, e é assim que roda na CI Linux.
 
 **Não executei o teste no seu Windows.** O que muda lá: separadores de
 caminho, resolução de symlink e o comportamento de `realpath` em junctions. O
