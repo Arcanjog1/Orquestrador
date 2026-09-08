@@ -10,9 +10,9 @@ Estado ao fim da quarta sessão: a arquitetura de comunicação, inspirada no Bu
 | Branch desta sessão | `claude/ai-orchestrator-buzz-arch-vblrau` |
 | HEAD do início | `2e06ae5` (ponta de `claude/ai-orchestrator-reorientacao-ytlkw0`) |
 | Branch padrão real | `claude/new-session-3am7mo` — **não é `main`, e `main` não existe** |
-| Instalador | [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f) — `AI-Orchestrator-Setup.exe`, publicado com a CI verde |
-| CI | [run 88](https://github.com/Arcanjog1/Orquestrador/actions/runs/34167861954) — Windows e Linux **verdes** |
-| Instalador anterior | [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — intacto; a tag é por commit |
+| Instalador | [`desktop-dev-61c622e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-61c622e) — `AI-Orchestrator-Setup.exe`, publicado com a CI verde |
+| CI | [run 92](https://github.com/Arcanjog1/Orquestrador/actions/runs/34173404811) — Windows e Linux **verdes** |
+| Instaladores anteriores | [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f) e [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — intactos; a tag é por commit |
 
 Sem reset, sem merge, sem force-push, sem apagar branch. Nenhuma release
 anterior foi sobrescrita: a tag é por commit. A branch desta sessão
@@ -87,9 +87,11 @@ Não havia probe de `--version` em lugar nenhum.
 
 ## O roteiro de reteste (único)
 
-1. instale
-   [`desktop-dev-<sha>`](https://github.com/Arcanjog1/Orquestrador/releases)
-   mais recente desta branch, por cima;
+1. instale por cima o
+   [`desktop-dev-61c622e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-61c622e)
+   — `AI-Orchestrator-Setup.exe`, publicado pela
+   [run 92](https://github.com/Arcanjog1/Orquestrador/actions/runs/34173404811)
+   com a CI verde. É este build que traz a exportação de diagnóstico;
 2. abra o mesmo projeto e repita o **mesmo objetivo** que falhou;
 3. quando terminar (bem ou mal), abra **Detalhes**;
 4. clique em **Exportar diagnóstico** e depois em **Abrir pasta**;
@@ -504,7 +506,7 @@ Não existem contas Codex/Claude legítimas no CI, e este ambiente não tem
 Windows. O roteiro:
 
 1. baixar o `AI-Orchestrator-Setup.exe` de
-   [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f)
+   [`desktop-dev-61c622e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-61c622e)
    e instalar por cima (o SmartScreen avisa: o build não é assinado);
 2. abrir o aplicativo — a base é migrada no lugar, nada é reautenticado;
 3. Configurações → Contas: confirmar Codex e Claude conectados;
