@@ -68,6 +68,8 @@ import type { EventBus } from '../events.js';
 import { AgentMessageBus } from '../../../../../src/bus/agent-message-bus.js';
 import type { AgentMessageType, PublishInput } from '../../../../../src/bus/message-types.js';
 import { describeActivity } from '../../../../../src/agents/activity-monitor.js';
+import { renderContext, selectContext } from '../../../../../src/context/project-context.js';
+import type { ContextEntry } from '../../../../../src/context/project-context.js';
 import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
 import { toMessageView, toRunDetailView, toRunView } from './views.js';
 import { BudgetLedger, isAgentProvider } from '../core.js';
@@ -459,6 +461,20 @@ export class OrchestrationService {
         this.active.delete(run.id);
         this.runners.delete(run.id);
         this.phaseClock.delete(run.id);
+        // The project's standing note about its own state, written once, from
+        // the one place every path out of the loop passes through - so a run
+        // that failed leaves a record saying it failed, rather than the
+        // project's last note being a success from three runs ago.
+        const finished = this.database.runs.find(run.id);
+        if (finished) {
+          this.recordProjectState({
+            workspaceId: run.workspace_id,
+            runId: run.id,
+            objective: finished.objective,
+            status: finished.status,
+            summary: finished.termination_reason ?? 'sem resumo',
+          });
+        }
         // The run's ending, on the record, from the one place every path out
         // of the loop passes through. Hooking each `setStatus` instead would
         // mean eleven call sites and a twelfth one day that forgets.
@@ -1477,6 +1493,15 @@ export class OrchestrationService {
       'previous attempt made no progress, ask for more than last time.',
     ];
 
+    // What the *project* knows, as opposed to what this conversation said.
+    //
+    // A selection, never the pile: rules and the project's own objective always
+    // travel, and the rest competes on relevance to this objective. Every
+    // entry carries where it came from, and the block says plainly that none
+    // of it is evidence. See src/context/project-context.ts.
+    const projectContext = this.projectContextFor(input.workspace.id, input.objective);
+    if (projectContext) lines.push('', projectContext);
+
     if (input.history) {
       lines.push(
         '',
@@ -1488,6 +1513,77 @@ export class OrchestrationService {
       lines.push('', 'RESULT OF THE PREVIOUS ITERATION:', input.feedback);
     }
     return lines.join('\n');
+  }
+
+  /**
+   * The project's standing knowledge, selected for this objective.
+   *
+   * Null when the workspace has no project or the project has written nothing,
+   * which is the normal state of a project that was made five minutes ago -
+   * and an empty section would be a heading promising something and delivering
+   * nothing.
+   */
+  private projectContextFor(workspaceId: string, objective: string): string | null {
+    try {
+      const project = this.database.projects.findByWorkspace(workspaceId);
+      if (!project) return null;
+      const rows = this.database.projectContext.list(project.id);
+      if (rows.length === 0) return null;
+      const selection = selectContext(
+        rows.map((row) => ({
+          id: row.id,
+          kind: contextKindOf(row.kind),
+          title: row.title,
+          body: row.body,
+          sourceRef: row.source_ref,
+          pinned: row.pinned === 1,
+          updatedAt: row.updated_at,
+        })),
+        objective,
+      );
+      const rendered = renderContext(selection);
+      return rendered.length > 0 ? rendered : null;
+    } catch {
+      // Context is an improvement to a prompt, never a precondition for one.
+      // A run must not fail because a note could not be read.
+      return null;
+    }
+  }
+
+  /**
+   * Writes the run's outcome back onto the project, as a claim with a source.
+   *
+   * Keyed by title so a project accumulates one current state rather than one
+   * paragraph per run, and stamped with the run id so the claim can be checked
+   * against the run's own evidence. It is written **after** the DoneGate has
+   * decided, never before, and nothing reads it back as proof.
+   */
+  private recordProjectState(input: {
+    workspaceId: string;
+    runId: string;
+    objective: string;
+    status: string;
+    summary: string;
+  }): void {
+    try {
+      const project = this.database.projects.findByWorkspace(input.workspaceId);
+      if (!project) return;
+      this.database.projectContext.upsertByTitle({
+        id: newId('ctx'),
+        projectId: project.id,
+        kind: 'state',
+        title: 'Última execução',
+        body: [
+          `Objetivo: ${redact(input.objective).slice(0, 400)}`,
+          `Resultado: ${input.status}`,
+          `Resumo: ${redact(input.summary).slice(0, 600)}`,
+        ].join('\n'),
+        sourceRef: `run:${input.runId}`,
+      });
+    } catch {
+      // Same reason as above: bookkeeping must not be able to fail a run that
+      // already finished.
+    }
   }
 
   private buildFeedback(
@@ -2570,4 +2666,19 @@ function describeError(error: unknown): string {
     if (typeof message === 'string') return message;
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A stored kind string back to the union, defaulting to the neutral one. */
+function contextKindOf(kind: string): ContextEntry['kind'] {
+  switch (kind) {
+    case 'objective':
+    case 'decision':
+    case 'architecture':
+    case 'rule':
+    case 'state':
+    case 'evidence':
+      return kind;
+    default:
+      return 'state';
+  }
 }

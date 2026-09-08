@@ -146,7 +146,19 @@ export function TopContextBar({
     <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border bg-chrome px-4">
       {/* Where this project's work runs. Not decorative: a person about to send
           a task needs to know whether it will touch their own disk. */}
-      <Chip data-testid="environment-chip">
+      <Chip
+        data-testid="environment-chip"
+        // One word is not enough to act on. The tooltip says the consequence:
+        // whether sending this task can change a file on this computer, and
+        // whether closing the application ends it.
+        title={
+          isCloud
+            ? "Nuvem: a execução acontece no coordenador conectado e continua com o aplicativo fechado. Nenhum arquivo deste computador é alterado."
+            : isConversation
+              ? "Conversa: os agentes analisam, planejam e revisam. Nenhum arquivo é alterado, em lugar nenhum. Associe uma pasta para alterar código."
+              : `Local: o Codex e o Claude Code rodam neste computador e alteram arquivos em ${workspace?.localPath || "esta pasta"}. Fechar o aplicativo encerra a execução.`
+        }
+      >
         {isCloud ? (
           <Cloud className="size-3" />
         ) : isConversation ? (

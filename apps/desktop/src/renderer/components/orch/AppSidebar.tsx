@@ -13,6 +13,7 @@ import {
   History,
   MessagesSquare,
   MoreHorizontal,
+  NotebookPen,
   Pencil,
   Plug,
   Plus,
@@ -52,8 +53,10 @@ export interface ProjectActions {
   create: () => void;
   open: (project: ProjectView) => void;
   rename: (project: ProjectView) => void;
-  /** The project's own settings: folder, repository, team, context. */
+  /** The project's own settings: name, repository, folder. */
   settings: (project: ProjectView) => void;
+  /** What the agents are told about this project. */
+  context: (project: ProjectView) => void;
   archive: (project: ProjectView, archived: boolean) => void;
   remove: (project: ProjectView) => void;
   /** A conversation born inside the project. */
@@ -402,6 +405,9 @@ export function AppSidebar({
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => projectActions.settings(project)} data-testid={`settings-project-${project.id}`}>
                   <Settings className="size-3.5" /> Configurações
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => projectActions.context(project)} data-testid={`context-project-${project.id}`}>
+                  <NotebookPen className="size-3.5" /> Contexto do projeto
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={() => projectActions.archive(project, !project.archivedAt)}

@@ -3,6 +3,7 @@ import { PanelRightOpen, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { AppSidebar } from "@/components/orch/AppSidebar";
 import { ProjectDialog } from "@/components/orch/ProjectDialog";
+import { ProjectContextDialog } from "@/components/orch/ProjectContextDialog";
 import { TopContextBar } from "@/components/orch/TopContextBar";
 import { TimelineView } from "@/components/orch/Timeline";
 import {
@@ -124,6 +125,7 @@ export function WorkspacePage({
   // renderer guesses it. The dialog can then say the real counts and the real
   // paths that stay untouched.
   const [removalPlan, setRemovalPlan] = useState<ProjectRemovalPlanView | null>(null);
+  const [contextProject, setContextProject] = useState<ProjectView | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   // A conversation to open once the page has switched to its folder.
   const pendingSession = useRef<string | null>(null);
@@ -843,6 +845,7 @@ export function WorkspacePage({
           open: (project) => void openProject(project),
           rename: (project) => setProjectDialog({ project }),
           settings: (project) => setProjectDialog({ project }),
+          context: (project) => setContextProject(project),
           archive: (project, archived) => void archiveProject(project, archived),
           remove: (project) => void askToRemoveProject(project),
           newSession: (project) => void newTask(project),
@@ -1057,6 +1060,10 @@ export function WorkspacePage({
           toast(projectDialog?.project ? "Projeto salvo" : `Projeto "${project.name}" criado`);
           void loadSessions();
         }}
+      />
+      <ProjectContextDialog
+        project={contextProject}
+        onOpenChange={(open) => !open && setContextProject(null)}
       />
       <ConfirmDialog
         open={removalPlan !== null}
