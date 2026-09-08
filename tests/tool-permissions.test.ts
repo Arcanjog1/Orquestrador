@@ -526,3 +526,75 @@ test('grants survive a restart, and can be withdrawn', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/* ---- the real CLI's own words ----------------------------------------- */
+
+/**
+ * A `permission_denials` entry exactly as Claude Code 2.1.263 emitted it.
+ *
+ * Captured from a real run in this repository, not written from the docs:
+ *
+ *   claude --print --permission-mode acceptEdits \
+ *     --allowedTools Read Write Edit Glob Grep \
+ *     --output-format stream-json --verbose \
+ *     "Execute o comando de shell: node -e ... Use Bash. Nao use Write."
+ *
+ * The shape is not part of any published contract, so this fixture is what
+ * stops the reader from drifting away from it unnoticed.
+ */
+const REAL_DENIAL = {
+  tool_name: 'Bash',
+  tool_use_id: 'toolu_015GDcCy2Xi2Kr9w6cxMPQVX',
+  tool_input: {
+    command: 'node -e "require(\'fs\').writeFileSync(\'hello.txt\',\'pronto\')"',
+    description: "Create hello.txt with content 'pronto' via node",
+  },
+};
+
+test("the real CLI's denial shape is read, field for field", async () => {
+  const { readDeniedCalls } = await import(
+    '../apps/desktop/src/main/adapters/claude-adapter.js'
+  );
+  const [call] = readDeniedCalls([REAL_DENIAL]);
+
+  assert.ok(call);
+  assert.equal(call.toolName, 'Bash');
+  assert.equal(call.toolUseId, 'toolu_015GDcCy2Xi2Kr9w6cxMPQVX');
+  assert.equal(call.command, REAL_DENIAL.tool_input.command);
+  // The agent's own reason for wanting the command. The command says what;
+  // this says why, and an approval dialog needs both.
+  assert.equal(call.description, "Create hello.txt with content 'pronto' via node");
+  assert.match(call.arguments ?? '', /writeFileSync/);
+});
+
+test('the description reaches the request, in the worker’s own words', async () => {
+  const prepared = await prepare({
+    orchestratorScript: [delegate, done],
+    workerScript: ['não consegui'],
+    maxIterations: 2,
+  });
+  prepared.worker.denyNext = [
+    {
+      toolName: 'Bash',
+      toolUseId: REAL_DENIAL.tool_use_id,
+      command: REAL_DENIAL.tool_input.command,
+      description: REAL_DENIAL.tool_input.description,
+    },
+  ];
+  try {
+    const sent = value<{ run: { id: string } }>(
+      await prepared.fixture.router.handle('chat.sendMessage', {
+        sessionId: prepared.sessionId,
+        text: 'Crie hello.txt',
+      }),
+    );
+    await prepared.fixture.services.orchestration.waitFor(sent.run.id);
+    const [request] = value<PermissionRequestView[]>(
+      await prepared.fixture.router.handle('permission.forRun', { runId: sent.run.id }),
+    );
+    assert.match(request!.reason, /O worker disse: "Create hello\.txt with content 'pronto' via node"/);
+    assert.match(request!.reason, /não é interativa/);
+  } finally {
+    await prepared.cleanup();
+  }
+});

@@ -1680,9 +1680,17 @@ export class OrchestrationService {
           command: call.command ?? null,
           arguments: call.arguments ?? null,
           workingDirectory: input.workingDirectory,
-          reason:
+          reason: [
+            call.description
+              ? // The agent's own words for what it was trying to do. It says
+                // *why*, which the command alone never does.
+                `O worker disse: "${call.description}".`
+              : null,
             `O Claude Code pediu para usar ${call.toolName} e a execução não é interativa, ` +
-            'então o pedido foi recusado automaticamente. Nada foi executado.',
+              'então o pedido foi recusado automaticamente. Nada foi executado.',
+          ]
+            .filter((part): part is string => part !== null)
+            .join(' '),
         });
         created.push({ id: record.id, toolName: record.tool_name });
       }

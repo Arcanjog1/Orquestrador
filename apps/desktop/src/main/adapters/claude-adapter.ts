@@ -28,6 +28,7 @@ import { makeAgentResult, redact, resolveFixedEffort } from '../core.js';
 import { ActivityMonitor } from '../../../../../src/agents/activity-monitor.js';
 import type { InvocationUsage, ProviderFailureKind, WorkerRuntimeCapabilities } from '../core.js';
 import {
+  declaredFlag,
   describeProbe,
   modelAliases,
   optionValues,
@@ -350,8 +351,13 @@ export class ClaudeCodeAdapter implements AgentRunner {
     // outside these tools - a shell command still needs its own approval - and
     // `--allowedTools` never widens the tool *set*, only what runs without a
     // prompt (`--tools` is the flag that would restrict availability).
-    if (capabilities.flags.has('--allowedTools') || capabilities.flags.has('--allowed-tools')) {
-      const flag = capabilities.flags.has('--allowedTools') ? '--allowedTools' : '--allowed-tools';
+    //
+    // The lookup goes through `declaredFlag` because `parseHelp` folds every
+    // flag to lower case: `flags.has('--allowedTools')` is always false, and
+    // writing it that way would have made this whole fix silently inert.
+    const allowedToolsFlag = declaredFlag(capabilities, '--allowedTools', '--allowed-tools');
+    if (allowedToolsFlag) {
+      const flag = allowedToolsFlag;
       const rules = [...FILE_TOOLS, ...(this.options.allowedTools?.() ?? [])];
       // De-duplicated and bounded: a grant list that grew without limit would
       // eventually build a command line the shell refuses.
@@ -605,11 +611,24 @@ function readDenials(value: unknown): string[] {
 /**
  * The refused calls, with whatever detail the provider attached to them.
  *
- * The exact shape of a `permission_denials` entry is not published, so this
- * reads defensively: a bare string is a tool name; an object is searched for
- * the names the CLI and the SDK use (`tool_name`/`name`, `tool_use_id`/`id`,
- * `tool_input`/`input`). Anything it does not find stays absent, and the
- * interface says "não informado" rather than showing something invented.
+ * The shape is **verified against the real CLI**, not guessed. Claude Code
+ * 2.1.263 emits exactly this for a refused Bash call:
+ *
+ * ```json
+ * {
+ *   "tool_name": "Bash",
+ *   "tool_use_id": "toolu_015GDcCy2Xi2Kr9w6cxMPQVX",
+ *   "tool_input": {
+ *     "command": "node -e \"...\"",
+ *     "description": "Create hello.txt with content 'pronto' via node"
+ *   }
+ * }
+ * ```
+ *
+ * It is still read defensively - the shape is not part of any published
+ * contract and can change between releases - so the alternative spellings are
+ * kept, a bare string is accepted as a tool name, and anything not found stays
+ * absent so the interface can say "não informado" instead of inventing it.
  *
  * The input is read **only here**, and only for a call that was refused. The
  * activity monitor still never reads tool inputs: those belong to work in
@@ -650,12 +669,17 @@ function readDeniedCall(entry: unknown): DeniedToolCall | null {
   // thing a person most needs to see, promoted out of the argument blob.
   const command = str(fields.command) ?? str(fields.file_path) ?? str(row.command);
 
+  // The agent's own explanation of the call. The command says what; this says
+  // why, and it is what turns an approval dialog from a puzzle into a question.
+  const description = str(fields.description) ?? str(row.description);
+
   return {
     toolName: name.slice(0, 80),
     ...(str(row.tool_use_id) ?? str(row.id)
       ? { toolUseId: (str(row.tool_use_id) ?? str(row.id))!.slice(0, 120) }
       : {}),
     ...(command ? { command: redact(command).slice(0, 2000) } : {}),
+    ...(description ? { description: redact(description).slice(0, 500) } : {}),
     ...(Object.keys(fields).length > 0
       ? { arguments: redact(JSON.stringify(fields)).slice(0, 4000) }
       : {}),

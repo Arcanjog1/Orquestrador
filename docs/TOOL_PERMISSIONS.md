@@ -148,16 +148,98 @@ Nada é retentado automaticamente. Uma aprovação por si só não inicia execu�
 nenhuma — é o que impede uma operação não idempotente de ser repetida por trás
 de você.
 
-## 5. O que ainda depende do seu Windows
+## 5. Verificado com o CLI real
 
-O caminho foi exercitado com o CLI **simulado**: um runner que devolve
-`permission_denials` exatamente como o envelope documentado, mais 8 testes de
-serviço e 1 na interface empacotada. Isso prova o fluxo do aplicativo.
+Não ficou em teoria. Havia um `claude` real neste ambiente — **2.1.263**, Linux
+— e o caminho foi executado três vezes de verdade.
 
-**Não prova** que o seu `claude.EXE` 2.1.252 aceita `--allowedTools` com esses
-nomes na sua máquina — o adapter só envia a flag quando o `--help` daquele
-binário a declara, mas isso é uma verificação, não uma execução. Um teste com
-CLI real no Windows continua pendente, e o roteiro é o da seção 3.
+### Teste 1 — escrever o arquivo, com as ferramentas de arquivo liberadas
+
+```
+claude --print --permission-mode acceptEdits \
+  --allowedTools Read Write Edit Glob Grep \
+  --output-format json \
+  "Crie um arquivo hello.txt neste diretorio contendo exatamente pronto…"
+```
+
+Resultado:
+
+```
+is_error           : false
+subtype            : success
+permission_denials : []
+duration           : 5,1 s
+```
+
+E o arquivo:
+
+```
+$ od -An -tx1 hello.txt
+ 70 72 6f 6e 74 6f
+$ wc -c hello.txt
+6
+```
+
+**São exatamente os seis bytes do seu teste** — `70 72 6F 6E 74 6F` — criados
+sem nenhum shell e sem nenhum pedido de autorização.
+
+### Teste 2 — forçar o shell
+
+Mesma configuração, mas mandando usar Bash e proibindo `Write`:
+
+```
+tools used         : ['Bash']
+permission_denials : [{
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_015GDcCy2Xi2Kr9w6cxMPQVX",
+  "tool_input": {
+    "command": "node -e \"require('fs').writeFileSync('hello.txt','pronto')\"",
+    "description": "Create hello.txt with content 'pronto' via node"
+  }
+}]
+```
+
+E o `hello.txt` **não foi criado**. É a recusa documentada acontecendo, com o
+comando exato dentro dela.
+
+Três coisas que este teste provou e que antes eram suposição:
+
+1. **A forma do `permission_denials` é essa** — `tool_name`, `tool_use_id`,
+   `tool_input.command`. O leitor do adapter já lia exatamente esses campos;
+   agora isso está verificado contra o binário, não deduzido da documentação.
+   O teste `tests/tool-permissions.test.ts` fixa essa amostra literal.
+2. **Existe um campo `description`** que eu não conhecia: a explicação do
+   próprio worker para o comando — *"Create hello.txt with content 'pronto' via
+   node"*. O comando diz **o quê**; isso diz **por quê**, e é a linha mais útil
+   do diálogo. Passou a aparecer no campo *Motivo*.
+3. **O evento `permission_denied` também vem no stream**, com
+   `decision_reason: "This command requires approval"`.
+
+E uma armadilha que só apareceu porque o binário estava aqui: o `parseHelp`
+converte toda flag para minúsculas, então `flags.has('--allowedTools')` é
+**sempre falso**. Escrito daquele jeito, o conserto inteiro seria inerte e
+silencioso. Agora a busca passa por `declaredFlag`, que compara sem diferenciar
+maiúsculas e devolve a grafia documentada — e há um teste que fixa a armadilha.
+
+### O que estes testes não provam
+
+Rodaram em **Linux, com o CLI 2.1.263**. Você tem **Windows, com o 2.1.252**.
+As duas diferenças importam:
+
+- o PowerShell é uma ferramenta só do Windows, e a lista que o `acceptEdits`
+  libera nele é diferente da do Bash;
+- 2.1.252 é anterior; o adapter só envia `--allowedTools` se o `--help`
+  **daquele** binário declarar a flag, e essa verificação acontece na sua
+  máquina, não aqui.
+
+## 6. O que ainda depende do seu Windows
+
+O fluxo do aplicativo está coberto por 10 testes de serviço e 1 na interface
+empacotada, e o comportamento do CLI está verificado no Linux (seção 5).
+
+O que continua **não comprovado** é a sua combinação: **Windows + 2.1.252 +
+PowerShell**. Um teste com o CLI real no Windows continua pendente, e o
+roteiro é o da seção 3.
 
 Se, com este build, o `hello.txt` passar a ser criado **sem** nenhum pedido de
 autorização, a causa está confirmada na sua máquina: o worker deixou de

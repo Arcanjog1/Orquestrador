@@ -189,6 +189,34 @@ export function describeProbe(probe: CliProbe): string {
  * indented on its own and followed by a description, which is how both CLIs (and
  * essentially every clap/commander program) lay out their command lists.
  */
+/**
+ * Whether a help page declares any of these flags, whatever their casing.
+ *
+ * `parseHelp` lower-cases every flag it finds, so `flags.has('--allowedTools')`
+ * is **always false** - a trap that cost a real debugging session. Claude
+ * Code's help prints both spellings on one line:
+ *
+ * ```
+ *   --allowedTools, --allowed-tools <tools...>
+ * ```
+ *
+ * and the set ends up holding `--allowedtools` and `--allowed-tools`, neither
+ * of which is what a caller would naturally type. Every flag lookup should go
+ * through here rather than through `flags.has` directly.
+ *
+ * Returns the spelling **as the caller asked for it**, so the argument sent is
+ * the documented one rather than the folded form.
+ */
+export function declaredFlag(
+  capabilities: Pick<CliCapabilities, 'flags'>,
+  ...names: readonly string[]
+): string | null {
+  for (const name of names) {
+    if (capabilities.flags.has(name.toLowerCase())) return name;
+  }
+  return null;
+}
+
 export function parseHelp(help: string): Omit<CliCapabilities, 'probe'> {
   const flags = new Set<string>();
   for (const match of help.matchAll(/(--[a-z0-9][a-z0-9-]*)/gi)) {

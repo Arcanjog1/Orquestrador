@@ -98,6 +98,9 @@ export function PermissionDialog({
               <Row label="Argumentos" value={request.arguments} mono wrap />
               <Row label="Pasta de trabalho" value={request.workingDirectory} mono wrap />
               <Row label="Projeto" value={request.workspaceName} />
+              {/* The worker's own words for what it wanted, when it sent them,
+                  are folded into `reason` by the main process. The command
+                  says what; this says why. */}
               <Row label="Motivo" value={request.reason} wrap />
             </dl>
 

@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { parseHelp } from '../apps/desktop/src/main/adapters/cli-capabilities.js';
+import { declaredFlag, parseHelp } from '../apps/desktop/src/main/adapters/cli-capabilities.js';
 import { CodexAdapter, CodexCapabilityError } from '../apps/desktop/src/main/adapters/codex-adapter.js';
 import { ClaudeCodeAdapter, ClaudeCapabilityError } from '../apps/desktop/src/main/adapters/claude-adapter.js';
 import type { ProcessManager, RunProcessOptions, ProcessResult } from '../src/process/process-manager.js';
@@ -106,6 +106,15 @@ Options:
   -p, --print                       Print response and exit
       --permission-mode <mode>      Permission mode
       --version                     Output the version number
+`;
+
+/**
+ * The line Claude Code 2.1.263 really prints for the allow-list flag.
+ *
+ * Copied from the binary, both spellings on one line, because that layout is
+ * exactly what the flag lookup has to survive.
+ */
+const CLAUDE_HELP_ALLOWED_TOOLS = `${CLAUDE_HELP}  --allowedTools, --allowed-tools <tools...>  Tools that run without prompting
 `;
 
 test('parseHelp finds long flags and subcommands, and is not fooled by option lines', () => {
@@ -1615,4 +1624,73 @@ test('a successful run carries no failure text', async () => {
   assert.equal(result.stdout, 'pronto');
   // The version is still read, because it is worth knowing on a good run too.
   assert.equal(result.version, '2.1.263 (Claude Code)');
+});
+
+test('the allow-list flag is found whichever way the help spells it', async () => {
+  // `parseHelp` folds every flag to lower case, so `flags.has('--allowedTools')`
+  // is always false. Written that way, the whole file-tools fix would have been
+  // silently inert - the adapter would have sent nothing and said nothing.
+  const parsed = parseHelp(CLAUDE_HELP_ALLOWED_TOOLS);
+  assert.equal(parsed.flags.has('--allowedTools'), false, 'the trap, pinned');
+  assert.equal(declaredFlag(parsed, '--allowedTools', '--allowed-tools'), '--allowedTools');
+  assert.equal(declaredFlag(parseHelp(CLAUDE_HELP), '--allowedTools', '--allowed-tools'), null);
+  assert.equal(declaredFlag(parsed, '--nope'), null);
+});
+
+test('a build that declares the allow-list flag is sent the file tools, and no shell', async () => {
+  const { manager, calls } = fakeProcessManager({ '--help': CLAUDE_HELP_ALLOWED_TOOLS });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+    allowedTools: () => ['Bash(node check.mjs)'],
+  });
+
+  await adapter.run({
+    prompt: 'crie hello.txt',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  const args = calls.at(-1)!.args ?? [];
+  const at = args.indexOf('--allowedTools');
+  assert.ok(at >= 0, `expected the documented spelling, got ${args.join(' ')}`);
+  for (const tool of ['Read', 'Write', 'Edit', 'Glob', 'Grep']) {
+    assert.ok(args.includes(tool), `${tool} runs without prompting`);
+  }
+  // The approved grant travels too, and only because somebody approved it.
+  assert.ok(args.includes('Bash(node check.mjs)'));
+  // What is never sent: a bare shell. A command needs its own approval.
+  assert.equal(args.includes('Bash'), false, 'a bare shell is never pre-approved');
+  assert.equal(args.includes('PowerShell'), false);
+  // And the mode is still the documented one - this adds to it, it does not
+  // replace it, and nothing here reaches bypassPermissions.
+  assert.ok(args.includes('--permission-mode') && args.includes('acceptEdits'));
+  assert.equal(args.includes('--dangerously-skip-permissions'), false);
+  assert.equal(args.includes('bypassPermissions'), false);
+});
+
+test('a build whose help does not declare the flag is sent no allow-list at all', async () => {
+  const { manager, calls } = fakeProcessManager({ '--help': CLAUDE_HELP });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+    allowedTools: () => ['Bash(node check.mjs)'],
+  });
+
+  await adapter.run({
+    prompt: 'crie hello.txt',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  const args = calls.at(-1)!.args ?? [];
+  assert.equal(args.includes('--allowedTools'), false, 'a flag the help does not list is not sent');
+  assert.equal(args.includes('--allowed-tools'), false);
+  assert.equal(args.includes('Write'), false, 'and nothing is smuggled in without it');
 });

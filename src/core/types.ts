@@ -530,4 +530,13 @@ export interface DeniedToolCall {
   readonly command?: string;
   /** The remaining arguments, as JSON text. Redacted and capped by the caller. */
   readonly arguments?: string;
+  /**
+   * The agent's own one-line description of what it was trying to do.
+   *
+   * Claude Code sends this alongside a Bash command - "Create hello.txt with
+   * content 'pronto' via node" - and it is the single most useful line in an
+   * approval dialog: the command says *what*, this says *why*. Absent when the
+   * provider did not send one.
+   */
+  readonly description?: string;
 }
