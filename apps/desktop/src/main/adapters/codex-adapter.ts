@@ -149,6 +149,14 @@ export class CodexAdapter implements AgentRunner {
       // A supervisor stopped for saying nothing is its own diagnosis, and no
       // stronger model unsticks it - the same rule as on the worker side.
       const stalled = result.trace?.idleTimedOut === true;
+      // The supervisor's own account, same rule as the worker's: a specific
+      // cause must not arrive as silence or as a generic word.
+      const failureDetail = stalled
+        ? `no output for ${Math.round(idleTimeoutMs / 1000)}s`
+        : result.outcome !== 'completed' || result.exitCode !== 0
+          ? `outcome=${result.outcome}, exit=${result.exitCode ?? 'null'}` +
+            (result.signal ? `, signal=${result.signal}` : '')
+          : null;
       return makeAgentResult({
         startedAt,
         outcome: result.outcome,
@@ -168,6 +176,7 @@ export class CodexAdapter implements AgentRunner {
         executable,
         applied: plan.applied,
         activity: monitor.snapshot(),
+        ...(failureDetail ? { failureDetail } : {}),
         ...(stalled ? { failure: 'no-activity' as const } : {}),
         ...(result.error ? { error: result.error } : {}),
       });

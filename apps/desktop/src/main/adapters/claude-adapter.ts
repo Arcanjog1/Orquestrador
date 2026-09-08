@@ -63,6 +63,8 @@ export class ClaudeCodeAdapter implements AgentRunner {
   readonly label = 'Claude Code';
 
   private capabilities: CliCapabilities | null = null;
+  /** `undefined` = not asked yet; `null` = asked and the tool did not say. */
+  private version: string | null | undefined = undefined;
   private readonly controllers = new Set<AbortController>();
 
   constructor(private readonly options: ClaudeAdapterOptions) {}
@@ -93,6 +95,10 @@ export class ClaudeCodeAdapter implements AgentRunner {
       idleTimeoutMs,
       ...(input.onActivity ? { onChange: input.onActivity } : {}),
     });
+
+    // Read before the invocation, so the run itself is the last thing spawned
+    // and the probe is paid for once per adapter rather than once per turn.
+    const version = await this.versionOf(executable, input.workingDirectory);
 
     try {
       const result = await this.options.processManager.run({
@@ -141,6 +147,18 @@ export class ClaudeCodeAdapter implements AgentRunner {
           ? classifyEnvelope(envelope)
           : null;
       const denials = envelope?.permissionDenials ?? [];
+      // What the CLI said, and which build said it. Both are read here rather
+      // than reconstructed later, because after this function returns the
+      // process is gone and nothing can be asked again.
+      const failureDetail = stalled
+        ? `no output for ${Math.round(idleTimeoutMs / 1000)}s`
+        : envelope
+          ? describeEnvelopeFailure(envelope)
+          : result.outcome !== 'completed' || result.exitCode !== 0
+            ? // No envelope at all: the stream never produced a result line.
+              // That is itself the diagnosis, and it used to arrive as silence.
+              `sem envelope legível (outcome=${result.outcome}, exit=${result.exitCode ?? 'null'})`
+            : null;
       const stderr = [result.stderr, describeDenials(denials), envelope?.errorSummary ?? '', stallSummary(stalled, idleTimeoutMs, monitor)]
         .filter((part) => part.trim().length > 0)
         .join('\n');
@@ -163,6 +181,11 @@ export class ClaudeCodeAdapter implements AgentRunner {
         ...(envelope?.sessionId ? { sessionId: envelope.sessionId } : {}),
         ...(envelope?.usage ? { usage: envelope.usage } : {}),
         ...(failure ? { failure } : {}),
+        // The tool's own words, kept next to our classification rather than
+        // replaced by it. This is the field that turns "erro do provider" into
+        // something a person can act on.
+        ...(failureDetail ? { failureDetail } : {}),
+        ...(version ? { version } : {}),
         ...(denials.length > 0 ? { permissionDenials: denials } : {}),
         activity: monitor.snapshot(),
         ...(result.error ? { error: result.error } : {}),
@@ -329,6 +352,35 @@ export class ClaudeCodeAdapter implements AgentRunner {
     return { args, applied, jsonOutput, streaming };
   }
 
+  /**
+   * The installed build's version, read once and remembered.
+   *
+   * Read from `--version`, which every build has. Cached for the life of the
+   * adapter because a new adapter is built per run, so a changed binary is
+   * re-read anyway.
+   *
+   * Returns null rather than throwing or guessing. A version this application
+   * could not obtain is "não informado" on screen, which is a true statement;
+   * a fabricated one would send somebody chasing the wrong release notes.
+   */
+  private async versionOf(executable: string, cwd: string): Promise<string | null> {
+    if (this.version !== undefined) return this.version;
+    try {
+      const probe = await this.options.processManager.run({
+        command: executable,
+        args: ['--version'],
+        cwd,
+        env: this.options.buildEnvironment(),
+        timeoutMs: 15_000,
+      });
+      const line = probe.stdout.trim().split(/\r?\n/)[0]?.trim() ?? '';
+      this.version = line.length > 0 && probe.exitCode === 0 ? line.slice(0, 120) : null;
+    } catch {
+      this.version = null;
+    }
+    return this.version;
+  }
+
   /** True when the installed build can continue a session by id. */
   async supportsResume(cwd = process.cwd()): Promise<boolean> {
     const executable = await this.options.resolveExecutable();
@@ -374,8 +426,35 @@ function classifyEnvelope(envelope: ClaudeEnvelope): ProviderFailureKind | null 
     // saying so beats handing the orchestrator an empty string.
     return envelope.text.trim().length === 0 ? 'empty-response' : null;
   }
-  if (envelope.subtype === 'error_max_turns') return 'provider-error';
+  // Everything else is `provider-error`, and that is deliberate: the loop
+  // branches on a handful of kinds, and inventing one per CLI subtype would
+  // make the routing table guess at meanings the tool never promised.
+  //
+  // What is NOT acceptable is losing the subtype on the way. The previous
+  // version had two branches that returned the same value, so
+  // `error_during_execution` and `error_max_turns` — different problems with
+  // different fixes — both reached the screen as "erro do provider" and
+  // nothing else. `describeEnvelopeFailure` below keeps the tool's own words.
   return 'provider-error';
+}
+
+/**
+ * The CLI's own account of the failure, in the words it used.
+ *
+ * Deliberately not translated and not interpreted: `error_max_turns` means the
+ * run hit its turn limit and `error_during_execution` means something threw,
+ * and a person debugging needs to know which. Guessing a friendlier cause from
+ * a subtype we do not control is how a specific problem becomes a wrong one.
+ */
+export function describeEnvelopeFailure(envelope: ClaudeEnvelope): string | null {
+  if (!envelope.isError && envelope.permissionDenials.length === 0) return null;
+  const parts: string[] = [];
+  if (envelope.subtype) parts.push(`subtype=${envelope.subtype}`);
+  if (envelope.permissionDenials.length > 0) {
+    parts.push(`permission_denials=${envelope.permissionDenials.join(',')}`);
+  }
+  if (envelope.isError) parts.push('is_error=true');
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 function describeDenials(denials: readonly string[]): string {

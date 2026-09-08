@@ -180,6 +180,18 @@ export function toRunDetailView(
       providerId: str(row.provider_id),
       connectionKind: str(row.connection_kind),
       workerId: str(row.worker_id),
+      // The diagnosis. Already redacted on the way in; `str` keeps a null
+      // null, so a field the tool never reported stays "não informado".
+      failureDetail: str(row.failure_detail),
+      stderrExcerpt: row.stderr_excerpt === null ? null : redact(String(row.stderr_excerpt)),
+      executable: str(row.executable),
+      cliVersion: str(row.cli_version),
+      signal: str(row.signal),
+      lastActivityAt: str(row.last_activity_at),
+      idleTimeoutMs: num(row.idle_timeout_ms),
+      currentTool: str(row.current_tool),
+      workingDirectory: str(row.working_directory),
+      finishedAt: str(row.finished_at),
       billing: str(row.billing),
       // Nulls stay null all the way to the screen: a provider that reported
       // nothing must not read as an invocation that consumed nothing.

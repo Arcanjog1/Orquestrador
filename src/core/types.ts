@@ -251,6 +251,28 @@ export interface AgentResult {
   /** True when stdout/stderr were truncated because of the capture cap. */
   truncated: boolean;
   /**
+   * The tool's own words for why it failed, when it gave any.
+   *
+   * `failure` is this application's classification, and it is coarse on
+   * purpose - the loop branches on a handful of kinds. This is the raw thing
+   * underneath it: `error_during_execution`, `error_max_turns`, an exit
+   * message, whatever the CLI actually said.
+   *
+   * It exists because the classification was swallowing the cause. Every
+   * envelope reporting an error became `provider-error`, which renders as
+   * "erro do provider" - true, useless, and indistinguishable from a dozen
+   * different real problems. The classification decides what the loop does;
+   * this decides what a person reads.
+   */
+  failureDetail?: string;
+  /**
+   * The version of the tool that ran, as it reported it.
+   *
+   * Absent when the tool could not be asked. Never guessed: "não informado" is
+   * a real answer and a fabricated version number is not.
+   */
+  version?: string;
+  /**
    * What the agent was observed doing, and when it last did anything.
    *
    * Present only for adapters that can see inside a turn. Absent is a real

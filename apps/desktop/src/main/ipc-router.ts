@@ -22,6 +22,7 @@ import { IpcValidationError, REQUEST_VALIDATORS } from '../shared/validation.js'
 import { RecordNotFoundError } from './core.js';
 import type { AppServices } from './services/app-services.js';
 import { toMessageView } from './services/views.js';
+import { writeDiagnostics } from './services/diagnostics-export.js';
 
 /** Capabilities the router needs that only the shell can provide. */
 export interface ShellBridge {
@@ -413,6 +414,12 @@ export class IpcRouter {
       s.orchestration.listForWorkspace((p as { workspaceId: string }).workspaceId),
     );
     this.handlers.set('run.detail', (p) => s.orchestration.detail((p as { runId: string }).runId));
+    this.handlers.set('run.exportDiagnostics', (p) => {
+      const detail = s.orchestration.detail((p as { runId: string }).runId);
+      // The application's own artifacts folder: no picker, nothing for the
+      // person to choose before they can see why their run failed.
+      return writeDiagnostics(detail, s.paths.artifacts);
+    });
     this.handlers.set('run.cancel', async (p) => {
       const runId = (p as { runId: string }).runId;
       // A cloud run is not executing here, so cancelling it locally would stop

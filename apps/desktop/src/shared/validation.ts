@@ -398,6 +398,7 @@ export const REQUEST_VALIDATORS: {
   // A URL, not a path: bounded, and the reader refuses anything that is not a
   // GitHub repository before a single request is made.
   'repository.analyse': obj({ url: str({ min: 1, max: 500 }) }),
+  'run.exportDiagnostics': obj({ runId: id }),
 
   'workspace.list': noArgs,
   'workspace.selectFolder': noArgs,

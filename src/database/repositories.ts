@@ -8,6 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { SqlDriver, SqlRow, SqlValue } from './driver.js';
+import { redact } from '../security/secret-redactor.js';
 
 /** Ids are `<prefix>-<hex>`: readable in logs, and safe as a folder name. */
 export function newId(prefix: string): string {
@@ -1259,12 +1260,33 @@ export class RunRepository extends Repository {
     } | null;
     /** The classified provider failure, when there was one. */
     failureKind?: string | null;
+    /**
+     * The diagnosis, as the tool gave it.
+     *
+     * All of this was already computed and then discarded here. Absent stays
+     * absent: a field the tool did not report is stored null and rendered
+     * "não informado", never invented.
+     */
+    diagnostics?: {
+      /** The tool's own words: `subtype=error_max_turns`, an exit line, … */
+      failureDetail?: string | null;
+      /** Redacted and capped before storage. */
+      stderrExcerpt?: string | null;
+      executable?: string | null;
+      version?: string | null;
+      signal?: string | null;
+      lastActivityAt?: string | null;
+      idleTimeoutMs?: number | null;
+      currentTool?: string | null;
+      workingDirectory?: string | null;
+    } | null;
   }): string {
     const id = newId('inv');
     const routing = input.routing ?? null;
     const usage = input.usage ?? null;
+    const diagnostics = input.diagnostics ?? null;
     this.db.run(
-      'INSERT INTO agent_invocations (id, run_id, iteration, agent_id, account_id, role, task, outcome, exit_code, duration_ms, started_at, finished_at, requested_capability, requested_reasoning, resolved_model, resolved_reasoning, selection_mode, selection_reason, fallback_used, provider_id, connection_kind, worker_id, billing, input_tokens, output_tokens, total_tokens, cost_usd, failure_kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO agent_invocations (id, run_id, iteration, agent_id, account_id, role, task, outcome, exit_code, duration_ms, started_at, finished_at, requested_capability, requested_reasoning, resolved_model, resolved_reasoning, selection_mode, selection_reason, fallback_used, provider_id, connection_kind, worker_id, billing, input_tokens, output_tokens, total_tokens, cost_usd, failure_kind, failure_detail, stderr_excerpt, executable, cli_version, signal, last_activity_at, idle_timeout_ms, current_tool, working_directory) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [
         id,
         input.runId,
@@ -1294,6 +1316,17 @@ export class RunRepository extends Repository {
         usage?.totalTokens ?? null,
         usage?.costUsd ?? null,
         input.failureKind ?? null,
+        diagnostics?.failureDetail ?? null,
+        // Redacted like every other stored diagnostic, and capped: this is a
+        // field a person reads on a screen, not a log file.
+        diagnostics?.stderrExcerpt ? redact(diagnostics.stderrExcerpt).slice(0, 4000) : null,
+        diagnostics?.executable ?? null,
+        diagnostics?.version ?? null,
+        diagnostics?.signal ?? null,
+        diagnostics?.lastActivityAt ?? null,
+        diagnostics?.idleTimeoutMs ?? null,
+        diagnostics?.currentTool ?? null,
+        diagnostics?.workingDirectory ?? null,
       ] as SqlValue[],
     );
     this.addConsumption(input.runId, usage);

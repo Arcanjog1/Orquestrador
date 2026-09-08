@@ -699,6 +699,37 @@ ALTER TABLE workspaces ADD COLUMN path_key TEXT NOT NULL DEFAULT '';
 CREATE INDEX idx_workspaces_path_key ON workspaces(path_key);
 `,
   },
+  {
+    id: 13,
+    name: 'invocation-diagnostics',
+    sql: `
+-- The diagnosis of one invocation, kept where the invocation is.
+--
+-- Everything below was already captured in \`AgentResult\` and then dropped at
+-- this boundary: the row recorded outcome, exit code and a classified failure
+-- kind, and nothing else. So a run could end with "provider-error, exit 1" and
+-- the person had no way to learn what the CLI actually said, which build said
+-- it, or when it last did anything - the information existed and was thrown
+-- away one function short of being useful.
+--
+-- Redacted before it is written. \`stderr_excerpt\` goes through the same
+-- redactor as every other stored diagnostic, and is capped: this is a field a
+-- person reads, not a log file.
+ALTER TABLE agent_invocations ADD COLUMN failure_detail TEXT;
+ALTER TABLE agent_invocations ADD COLUMN stderr_excerpt TEXT;
+ALTER TABLE agent_invocations ADD COLUMN executable TEXT;
+ALTER TABLE agent_invocations ADD COLUMN cli_version TEXT;
+ALTER TABLE agent_invocations ADD COLUMN signal TEXT;
+-- Liveness at the moment the invocation ended, so "it just stopped" has a
+-- timestamp rather than being an absence.
+ALTER TABLE agent_invocations ADD COLUMN last_activity_at TEXT;
+ALTER TABLE agent_invocations ADD COLUMN idle_timeout_ms INTEGER;
+ALTER TABLE agent_invocations ADD COLUMN current_tool TEXT;
+-- The working directory the process really ran in. Already shown on a step;
+-- kept here too because the invocation is what a person opens.
+ALTER TABLE agent_invocations ADD COLUMN working_directory TEXT;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

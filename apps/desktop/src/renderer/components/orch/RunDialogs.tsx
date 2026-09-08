@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import {
   Dialog,
@@ -454,6 +454,11 @@ export function RunDetailDialog({
   onOpenChange: (v: boolean) => void;
 }) {
   const { detail, error } = useRunDetail(runId);
+  // Where the last export went, so the person can open the folder rather than
+  // be told a path they would have to type somewhere.
+  const [exported, setExported] = useState<{ path: string; directory: string } | null>(null);
+  const [exporting, setExporting] = useState(false);
+  useEffect(() => setExported(null), [runId]);
   // A step is worth showing when it carries diagnostics and did not simply
   // succeed. `changed` is the evidence step's success, and `degraded` is a
   // baseline that could not use git - which is exactly the case a person
@@ -476,6 +481,48 @@ export function RunDetailDialog({
         <div className="max-h-[70vh] space-y-4 overflow-y-auto" data-testid="run-detail-body">
           {error && <p className="text-sm text-danger">{error}</p>}
           {!detail && !error && <Loader2 className="size-4 animate-spin text-muted-foreground" />}
+          {/* The export.
+              Offered whenever there is a record at all, not only on failure:
+              a run that "worked" but produced nothing is exactly the case
+              somebody needs to send to another person. The application writes
+              the file into a folder it owns - no PowerShell, no picker. */}
+          {detail && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                data-testid="export-diagnostics"
+                disabled={exporting}
+                onClick={() => {
+                  if (!runId) return;
+                  setExporting(true);
+                  void api.run
+                    .exportDiagnostics({ runId })
+                    .then(setExported)
+                    .catch((e: unknown) => setExported({ path: messageOf(e), directory: "" }))
+                    .finally(() => setExporting(false));
+                }}
+                className="rounded-md border border-border bg-surface-raised px-2 py-1 text-xs transition-colors hover:bg-accent disabled:opacity-60"
+              >
+                {exporting ? "Gerando…" : "Exportar diagnóstico"}
+              </button>
+              {exported?.directory && (
+                <button
+                  type="button"
+                  data-testid="open-diagnostics-folder"
+                  onClick={() => void api.app.openExternal({ url: `file://${exported.directory}` })}
+                  className="rounded-md border border-border px-2 py-1 text-xs transition-colors hover:bg-accent"
+                >
+                  Abrir pasta
+                </button>
+              )}
+              {exported && (
+                <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground" title={exported.path}>
+                  {exported.path}
+                </span>
+              )}
+            </div>
+          )}
+
           {detail?.run.summary && (
             <div className="rounded-lg border border-border bg-surface-raised p-3">
               <SectionLabel>Resultado</SectionLabel>
@@ -575,7 +622,59 @@ export function RunDetailDialog({
                     {inv.failureKind && (
                       <p className="mt-0.5 text-danger" data-testid="invocation-failure">
                         Falha: {failureLabel(inv.failureKind)}
+                        {/* The tool's own words, next to our classification.
+                            "erro do provider" is true and useless on its own;
+                            `subtype=error_max_turns` is what a person can act
+                            on. This is the field whose absence made a failed
+                            run unexplainable. */}
+                        {inv.failureDetail ? (
+                          <span className="font-mono text-[11px]"> · {inv.failureDetail}</span>
+                        ) : null}
                       </p>
+                    )}
+                    {/* Everything the tool reported about how it ran. A field
+                        it did not report says "não informado" rather than
+                        being hidden, because "we never asked" and "it did not
+                        answer" are different facts and both are worth seeing. */}
+                    {(inv.failureKind || inv.stderrExcerpt) && (
+                      <dl
+                        className="mt-1 grid gap-x-3 gap-y-0.5 text-[11px] sm:grid-cols-[auto_1fr]"
+                        data-testid="invocation-diagnostics"
+                      >
+                        {(
+                          [
+                            ['Executável', inv.executable],
+                            ['Versão do CLI', inv.cliVersion],
+                            ['Pasta de trabalho', inv.workingDirectory],
+                            ['Sinal', inv.signal],
+                            ['Última atividade', inv.lastActivityAt],
+                            ['Ferramenta', inv.currentTool],
+                            [
+                              'Limite de silêncio',
+                              inv.idleTimeoutMs === null
+                                ? null
+                                : `${Math.round(inv.idleTimeoutMs / 1000)}s`,
+                            ],
+                            ['Início', inv.startedAt],
+                            ['Fim', inv.finishedAt],
+                          ] as ReadonlyArray<readonly [string, string | null]>
+                        ).map(([label, value]) => (
+                          <Fragment key={label}>
+                            <dt className="text-muted-foreground">{label}</dt>
+                            <dd className={cn("truncate font-mono", value === null && "text-muted-foreground/60")}>
+                              {value ?? "não informado"}
+                            </dd>
+                          </Fragment>
+                        ))}
+                      </dl>
+                    )}
+                    {inv.stderrExcerpt && (
+                      <pre
+                        className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-raised p-2 font-mono text-[11px] text-foreground/80"
+                        data-testid="invocation-stderr"
+                      >
+                        {inv.stderrExcerpt}
+                      </pre>
                     )}
                     <p className="mt-0.5 text-muted-foreground" data-testid="invocation-usage">
                       {usageLine(inv)}

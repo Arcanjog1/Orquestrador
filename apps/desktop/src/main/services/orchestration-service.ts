@@ -1138,6 +1138,19 @@ export class OrchestrationService {
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         startedAt,
+        // Same diagnosis as the worker's. A supervisor that fails without
+        // explanation is the same blank screen as a worker that does.
+        diagnostics: {
+          failureDetail: result.failureDetail ?? null,
+          stderrExcerpt: result.stderr || null,
+          executable: result.executable ?? null,
+          version: result.version ?? null,
+          signal: result.signal ?? null,
+          lastActivityAt: result.activity?.lastActivityAt ?? null,
+          idleTimeoutMs: result.activity?.idleTimeoutMs ?? null,
+          currentTool: result.activity?.currentTool ?? null,
+          workingDirectory: cwd,
+        },
         // The orchestrator's model and level are the person's fixed choice;
         // what is recorded is what the adapter really sent, after checking
         // the level against the installed build.
@@ -1686,6 +1699,23 @@ export class OrchestrationService {
         durationMs: result.durationMs,
         startedAt,
         routing: recorded,
+        // The diagnosis, kept with the invocation a person opens.
+        //
+        // All of this was computed and then dropped here, which is why a
+        // failed run could show "provider-error, exit 1" and nothing that
+        // said what the CLI reported, which build ran, or when it last did
+        // anything. Absent fields stay absent and render "não informado".
+        diagnostics: {
+          failureDetail: result.failureDetail ?? null,
+          stderrExcerpt: result.stderr || null,
+          executable: result.executable ?? null,
+          version: result.version ?? null,
+          signal: result.signal ?? null,
+          lastActivityAt: result.activity?.lastActivityAt ?? null,
+          idleTimeoutMs: result.activity?.idleTimeoutMs ?? null,
+          currentTool: result.activity?.currentTool ?? null,
+          workingDirectory: cwd,
+        },
       });
       // Close the delegation, and publish what came back.
       //

@@ -54,6 +54,7 @@ export const REQUEST_CHANNELS = [
   'agents.status',
 
   'repository.analyse',
+  'run.exportDiagnostics',
 
   'workspace.list',
   'workspace.selectFolder',
@@ -592,6 +593,25 @@ export interface RunInvocationView {
   readonly connectionKind: string | null;
   /** Which team member this was, by the id the orchestrator delegates with. */
   readonly workerId: string | null;
+  /**
+   * The diagnosis, as the tool gave it.
+   *
+   * Every field may be null, and null means **the tool did not report it** —
+   * rendered "não informado", never guessed. These exist because all of it was
+   * captured and then dropped: a failed run could show "provider-error, exit
+   * 1" with no way to learn what the CLI actually said or which build said it.
+   */
+  readonly failureDetail: string | null;
+  readonly stderrExcerpt: string | null;
+  readonly executable: string | null;
+  readonly cliVersion: string | null;
+  readonly signal: string | null;
+  readonly lastActivityAt: string | null;
+  readonly idleTimeoutMs: number | null;
+  readonly currentTool: string | null;
+  readonly workingDirectory: string | null;
+  /** When the invocation ended. Null while it is still going. */
+  readonly finishedAt: string | null;
   /** `subscription` or `api-metered`. Null when nothing said. */
   readonly billing: string | null;
   /**
@@ -918,6 +938,18 @@ export interface IpcMap {
    * scope is asked for. A public repository needs no login.
    */
   'repository.analyse': { request: { url: string }; response: RepositoryAnalysisView };
+
+  /**
+   * Writes the run's diagnosis to a file and says where.
+   *
+   * The application writes it, into a folder it owns. Asking somebody to run
+   * PowerShell to find out why their desktop application failed is not a
+   * diagnostic story - it is a dead end, and it was the only one on offer.
+   */
+  'run.exportDiagnostics': {
+    request: { runId: string };
+    response: { path: string; directory: string };
+  };
 
   'workspace.list': { request: void; response: readonly WorkspaceView[] };
   'workspace.selectFolder': { request: void; response: { path: string | null } };

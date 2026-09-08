@@ -1422,3 +1422,169 @@ test('a healthy supervisor turn is untouched, and its transcript still feeds liv
   )!;
   assert.equal(typeof exec.onStdout, 'function');
 });
+
+/* ------------------------------------------------------------------ *
+ * The cause survives, instead of becoming "provider-error"
+ * ------------------------------------------------------------------ */
+
+/** A Claude that answers a version probe and then a scripted run. */
+function claudeWith(
+  streamOrEnvelope: string,
+  options: { version?: string; runOverrides?: Partial<ProcessResult> } = {},
+) {
+  const { manager, calls } = fakeProcessManager({
+    '--help': CLAUDE_HELP_STREAMING,
+    '--version': options.version ?? '2.1.263 (Claude Code)',
+  });
+  const wrapped = {
+    ...manager,
+    async run(o: RunProcessOptions): Promise<ProcessResult> {
+      const result = await manager.run(o);
+      const args = o.args ?? [];
+      if (!args.includes('stream-json')) return result;
+      return { ...result, stdout: streamOrEnvelope, ...(options.runOverrides ?? {}) };
+    },
+  } as ProcessManager;
+  return { manager: wrapped, calls };
+}
+
+test('an envelope error keeps the subtype instead of collapsing into one word', async () => {
+  // The exact shape behind the report: exit 0 from the process, an envelope
+  // that says it failed, and a subtype naming which failure it was.
+  const stream = streamOf({
+    subtype: 'error_during_execution',
+    is_error: true,
+    result: '',
+    session_id: 'sess-1',
+  });
+  const { manager } = claudeWith(stream);
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+  const result = await adapter.run({
+    prompt: 'analise e escreva RELATORIO.md',
+    workingDirectory: '/work',
+    timeoutMs: 600_000,
+    runId: 'run-1',
+    iteration: 2,
+  });
+
+  assert.equal(result.failure, 'provider-error');
+  // The classification is coarse on purpose; the cause is not lost with it.
+  // This is the field whose absence made a failed run unexplainable.
+  assert.ok(result.failureDetail, 'the CLI said something and it must survive');
+  assert.match(result.failureDetail, /error_during_execution/);
+  assert.match(result.failureDetail, /is_error=true/);
+  // And the build that produced it.
+  assert.equal(result.version, '2.1.263 (Claude Code)');
+});
+
+test('two different envelope failures no longer arrive identical', async () => {
+  const build = async (subtype: string) => {
+    const { manager } = claudeWith(streamOf({ subtype, is_error: true, result: '' }));
+    const adapter = new ClaudeCodeAdapter({
+      processManager: manager,
+      resolveExecutable: async () => '/managed/claude.exe',
+      buildEnvironment: () => ({}),
+    });
+    return adapter.run({
+      prompt: 'x',
+      workingDirectory: '/work',
+      timeoutMs: 600_000,
+      runId: 'run-1',
+      iteration: 1,
+    });
+  };
+
+  const during = await build('error_during_execution');
+  const turns = await build('error_max_turns');
+
+  // Both are `provider-error` - that is the loop's vocabulary and it is fine.
+  assert.equal(during.failure, turns.failure);
+  // But a person can now tell them apart, which is the whole point: one means
+  // something threw, the other means the run ran out of turns, and they have
+  // opposite fixes.
+  assert.notEqual(during.failureDetail, turns.failureDetail);
+  assert.match(during.failureDetail!, /error_during_execution/);
+  assert.match(turns.failureDetail!, /error_max_turns/);
+});
+
+test('a stream that never produced a result line says exactly that', async () => {
+  // The incomplete-stream case: events arrived, no `result` ever did. There is
+  // no envelope to classify, and the absence used to arrive as silence.
+  const partial = JSON.stringify({ type: 'system', subtype: 'init' });
+  const { manager } = claudeWith(partial, {
+    runOverrides: { outcome: 'completed', exitCode: 1 } as Partial<ProcessResult>,
+  });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+  const result = await adapter.run({
+    prompt: 'x',
+    workingDirectory: '/work',
+    timeoutMs: 600_000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  assert.match(result.failureDetail ?? '', /sem envelope leg[íi]vel/);
+  assert.match(result.failureDetail ?? '', /exit=1/);
+});
+
+test('a version the tool will not report is null, not a guess', async () => {
+  const { manager } = fakeProcessManager({ '--help': CLAUDE_HELP_STREAMING });
+  // `--version` answers with an empty string: the probe ran and said nothing.
+  const wrapped = {
+    ...manager,
+    async run(o: RunProcessOptions): Promise<ProcessResult> {
+      const result = await manager.run(o);
+      if ((o.args ?? []).includes('--version')) return { ...result, stdout: '', exitCode: 1 };
+      if ((o.args ?? []).includes('stream-json')) {
+        return { ...result, stdout: streamOf({ subtype: 'success', is_error: false, result: 'ok' }) };
+      }
+      return result;
+    },
+  } as ProcessManager;
+
+  const adapter = new ClaudeCodeAdapter({
+    processManager: wrapped,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+  const result = await adapter.run({
+    prompt: 'x',
+    workingDirectory: '/work',
+    timeoutMs: 600_000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  assert.equal(result.version, undefined, 'a version nobody could read is absent, never invented');
+  // And a successful run carries no failure detail at all.
+  assert.equal(result.failureDetail, undefined);
+});
+
+test('a successful run carries no failure text', async () => {
+  const { manager } = claudeWith(streamOf({ subtype: 'success', is_error: false, result: 'pronto' }));
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+  });
+  const result = await adapter.run({
+    prompt: 'x',
+    workingDirectory: '/work',
+    timeoutMs: 600_000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+  assert.equal(result.failure, undefined);
+  assert.equal(result.failureDetail, undefined);
+  assert.equal(result.stdout, 'pronto');
+  // The version is still read, because it is worth knowing on a good run too.
+  assert.equal(result.version, '2.1.263 (Claude Code)');
+});
