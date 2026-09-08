@@ -649,3 +649,38 @@ test('a session recorded for another folder is not offered for this one', async 
     b.cleanup();
   }
 });
+
+test('a folder whose name is longer than a project allows still opens', async () => {
+  // Found reviewing the diff, not by a failure: opening such a folder created
+  // the workspace and then threw creating its project, because the suggested
+  // name was longer than the 120 characters a project accepts. The result was
+  // a hard error on a legitimate act *and* a workspace with no project - which,
+  // since "Pastas" left the sidebar, is a workspace nobody can see.
+  const fixture = createDesktopFixture();
+  const parent = mkdtempSync(join(tmpdir(), 'lao-long-name-'));
+  const leaf = 'p'.repeat(200);
+  const dir = join(parent, leaf);
+  mkdirSync(dir, { recursive: true });
+  try {
+    const opened = value<{ workspace: { id: string; name: string }; projectId: string; created: boolean }>(
+      await fixture.router.handle('workspace.openProject', { localPath: dir }),
+    );
+    assert.equal(opened.created, true);
+
+    const project = fixture.services.projects.list().find((p) => p.id === opened.projectId);
+    assert.ok(project, 'the folder got its project');
+    assert.ok(project.name.length <= 120, `the name fits (${project.name.length})`);
+    assert.ok(project.name.startsWith('ppp'), 'and is still recognisably the folder');
+    assert.ok(project.name.endsWith('…'), 'and says it was shortened');
+
+    // Opening it again is still one project, not a second attempt.
+    const again = value<{ created: boolean; projectId: string }>(
+      await fixture.router.handle('workspace.openProject', { localPath: dir }),
+    );
+    assert.equal(again.created, false);
+    assert.equal(again.projectId, opened.projectId);
+  } finally {
+    await fixture.cleanup();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});

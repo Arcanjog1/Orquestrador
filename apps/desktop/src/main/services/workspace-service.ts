@@ -299,7 +299,10 @@ export class WorkspaceService {
       localPath: resolved,
       pathKey: key,
     });
-    const project = projects.create({ name: record.display_name, workspaceId: record.id });
+    const project = projects.create({
+      name: clampName(record.display_name),
+      workspaceId: record.id,
+    });
     return { workspace: this.toView(record), projectId: project.id, created: true };
   }
 
@@ -386,7 +389,12 @@ export class WorkspaceService {
     let projectCreated = false;
     if (!project) {
       const created = projects.create({
-        name: workspace.display_name,
+        // Clamped, not passed through. A workspace row can hold a name longer
+        // than a project accepts - one written by an older version, or a
+        // folder with a very long leaf - and letting `create` refuse it would
+        // leave a workspace with no project, which since "Pastas" left the
+        // sidebar means a workspace nobody can see.
+        name: clampName(workspace.display_name),
         workspaceId: workspace.id,
       });
       project = this.database.projects.require(created.id);
@@ -444,7 +452,7 @@ export class WorkspaceService {
   ): string {
     const bound = this.database.projects.findByWorkspace(workspaceId);
     if (bound) return bound.id;
-    return projects.create({ name: fallbackName, workspaceId }).id;
+    return projects.create({ name: clampName(fallbackName), workspaceId }).id;
   }
 
   /**
@@ -1189,4 +1197,18 @@ function positiveOrNull(value: unknown): number | null {
 function repositoryUrlOfFullName(fullName: string | null): string | null {
   if (!fullName || fullName.trim().length === 0) return null;
   return `https://github.com/${fullName.trim()}`;
+}
+
+/**
+ * A workspace's name, shortened to what a project will accept.
+ *
+ * The two limits are the same number, so this normally does nothing. It
+ * matters for the case where they are not: a folder whose leaf is longer than
+ * 120 characters, or a row written before the limit existed. Refusing there
+ * would mean refusing to open somebody's folder over the length of its name.
+ */
+function clampName(name: string): string {
+  const trimmed = name.replace(/\s+/g, ' ').trim();
+  if (trimmed.length === 0) return 'Projeto';
+  return trimmed.length <= 120 ? trimmed : `${trimmed.slice(0, 119)}…`;
 }

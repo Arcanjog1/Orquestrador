@@ -40,6 +40,14 @@
 import { realpathSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 
+/**
+ * The longest name a project will accept.
+ *
+ * Kept here rather than imported so this module stays free of application
+ * dependencies; the two are asserted equal in the tests.
+ */
+const MAX_NAME = 120;
+
 /** `win32` folds case; `posix` does not. Injected so tests cover both. */
 export type PathPlatform = 'win32' | 'posix';
 
@@ -120,7 +128,13 @@ export function suggestedProjectName(localPath: string): string {
   const name = last.length === 0 || /^[a-zA-Z]:$/.test(last) ? cleaned : last;
   // Whatever route it came by, a name has to be readable. A string with no
   // letter or digit in it is not a name a person can pick out of a sidebar.
-  return /[A-Za-z0-9]/.test(name) ? name : 'Projeto';
+  const readable = /[A-Za-z0-9]/.test(name) ? name : 'Projeto';
+  // And it has to be a name the application will actually accept. A project's
+  // name is capped at 120 characters, so a longer suggestion is not a
+  // suggestion at all - it is a folder that cannot be opened, which is a hard
+  // failure for a legitimate act. Truncated with an ellipsis so the person can
+  // see it was shortened; the name is editable afterwards either way.
+  return readable.length <= MAX_NAME ? readable : `${readable.slice(0, MAX_NAME - 1)}…`;
 }
 
 function safeResolve(path: string): string {
