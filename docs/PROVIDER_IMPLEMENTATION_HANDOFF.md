@@ -20,6 +20,14 @@ saiu de `2e06ae5`, que é a ponta real do trabalho — a branch padrão do
 repositório estava onze commits atrás e teria descartado tudo desde a fase
 Electron.
 
+## Referências externas
+
+Catálogo de projetos externos para pesquisa e inspiração:
+[`EXTERNAL_REFERENCES.md`](EXTERNAL_REFERENCES.md). **Consulta seletiva** —
+abrir só a referência relevante à tarefa em curso, sem clonar, instalar ou
+executar nada, registrando fonte e commit consultados. Nada ali está adotado, e
+backend, adapters, bus e DoneGate existentes são preservados.
+
 ---
 
 # Sexta sessão — por que a causa não aparecia
