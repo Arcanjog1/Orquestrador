@@ -124,6 +124,11 @@ async function prepare(options: {
   const orchestrator = new ScriptedAgent('mock-codex', 'Codex', options.orchestratorScript);
   const capabilityReads: Array<string | null> = [];
   const fixture = createDesktopFixture({
+    // Every test here is about how routing changes *between* turns, so each
+    // run has to reach its later turns. The short path to the DoneGate would
+    // end the run at the first success, which is exactly the turn before the
+    // behaviour under test.
+    fastPath: false,
     createRunners: async (workspace): Promise<RunnerPair> => {
       const agent = workspace.worker_agent_id
         ? fixture.services.database.agents.find(workspace.worker_agent_id)

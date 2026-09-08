@@ -156,6 +156,16 @@ export interface OrchestrationOptions {
   /** Accepts a run that changed no file. Off by default: see the DONE gate. */
   allowNoChanges?: boolean;
   /**
+   * The short path for a small, finished task. On by default.
+   *
+   * When the application's own evidence and its own verifications already
+   * prove a delegation's acceptance criteria, the loop asks the DoneGate
+   * directly instead of paying for an orchestrator round trip to agree.
+   * Setting this to `false` restores the long path, which is useful for a test
+   * that wants to exercise the orchestrator's review.
+   */
+  fastPath?: boolean;
+  /**
    * Resolves the git executable evidence is collected with. The application
    * passes its managed Git so a machine with no git on PATH still gets
    * evidence; when it cannot be resolved, `git` from PATH is tried.
@@ -448,6 +458,7 @@ export class OrchestrationService {
       .finally(() => {
         this.active.delete(run.id);
         this.runners.delete(run.id);
+        this.phaseClock.delete(run.id);
         // The run's ending, on the record, from the one place every path out
         // of the loop passes through. Hooking each `setStatus` instead would
         // mean eleven call sites and a twelfth one day that forgets.
@@ -559,6 +570,10 @@ export class OrchestrationService {
     // hangs off this exchange, which is what lets the timeline show a run as
     // one conversation rather than a pile of unrelated calls.
     const runCorrelation = `cor-run-${runId}`;
+    // The clock starts here, at the top of the run, so the first step's
+    // duration is real. Seeded lazily it would be null, and the startup
+    // segment - the one nobody could see - would stay unmeasured.
+    this.phaseClock.set(runId, Date.now());
     this.record({
       runId,
       conversationId: sessionId,
@@ -602,6 +617,16 @@ export class OrchestrationService {
     this.runners.set(runId, runners);
     const team = teamOf(runners);
     const budget = new BudgetLedger(runners.budget ?? this.options.budget ?? {});
+    // Getting to here - resolving the environment, provisioning it, building
+    // the runners - is real time that no step recorded, so it could not be
+    // seen and could not be shortened. Now it is one measured segment.
+    this.step(
+      runId,
+      0,
+      'startup',
+      environment ? environment.kind : 'conversation',
+      `${team.length} agente(s) prontos`,
+    );
 
     const gitCommand = conversation
       ? undefined
@@ -685,12 +710,16 @@ export class OrchestrationService {
         slot.routing ? await slot.routing.capabilities().catch(() => NO_CAPABILITIES) : NO_CAPABILITIES,
       );
     }
+    this.step(runId, 0, 'capabilities', 'read', `${capabilitiesOf.size} worker(s) consultados`);
     const attempts: PreviousAttempt[] = [];
     const unavailableModels: string[] = [];
     /** The last answer a worker gave, which is what a conversation run ends with. */
     let lastWorkerAnswer = '';
     let previousTree = treeKey(baseline.statusShort, baseline.unstagedDiff + baseline.stagedDiff);
     let warnedOrchestratorLevel = false;
+    // The short path is offered once per run. A second attempt would be the
+    // loop arguing with a gate that already said no.
+    let fastPathTried = false;
     // What was said in this conversation before this run, so a follow-up
     // ("continue", "now also do X") is read against what came before it.
     const history = this.conversationBefore(sessionId, runId);
@@ -1014,6 +1043,86 @@ export class OrchestrationService {
           iteration,
           verificationNote(verification),
         );
+      }
+
+      // 4b. The short path for a small, finished task.
+      //
+      // Measured, not guessed: creating a six-byte file cost **three** CLI
+      // invocations (plan, work, review) and ran the verification command
+      // **three** times. The third invocation is an orchestrator round trip
+      // whose only job is to say `done` about work the *application* has
+      // already proved: it collected the evidence itself and ran the
+      // verifications itself, and both agreed.
+      //
+      // So when all of this holds, the loop asks the gate directly:
+      //
+      //  - the worker just ran and did not fail;
+      //  - the application's own evidence shows the tree changed;
+      //  - the orchestrator asked for verifications, every id resolved, and
+      //    every one of them passed;
+      //  - every acceptance criterion of this decision is satisfied.
+      //
+      // Nothing is weakened by this. The DoneGate is untouched, still
+      // independent, and still re-runs every verification from scratch against
+      // freshly collected evidence - it is the authority here exactly as it is
+      // on the long path. What is skipped is asking a model to agree with a
+      // result the application can already see. If the gate rejects, the run
+      // continues normally with the rejection as feedback, so the short path
+      // can never turn a failure into a success; it can only cost one wasted
+      // gate evaluation, once per run.
+      const fastPathEligible =
+        this.options.fastPath !== false &&
+        !fastPathTried &&
+        decision.action === 'delegate' &&
+        record.worker !== undefined &&
+        !record.worker.failure &&
+        evidence.changedSinceBaseline &&
+        allPassed &&
+        decision.acceptanceCriteria.length > 0 &&
+        ledger.allSatisfied(decision.acceptanceCriteria);
+
+      if (fastPathEligible) {
+        fastPathTried = true;
+        this.progress(runId, sessionId, 'review', 'Validação independente...', 'RUNNING');
+        const fresh = await collector.collectEvidence(baseline);
+        const gate = await evaluateDone({
+          ledger,
+          verificationCommands: [...resolvedCommands],
+          iterations,
+          baseline,
+          evidence: fresh,
+          verifier: verifier!,
+          allowNoChanges: this.options.allowNoChanges ?? false,
+        });
+        this.step(
+          runId,
+          iteration,
+          'done-gate',
+          gate.passed ? 'passed' : 'rejected',
+          gate.passed
+            ? 'caminho rápido: evidência e verificações já provavam a tarefa'
+            : gate.failures.join('; ').slice(0, 500),
+        );
+        if (gate.passed) {
+          record.doneRejection = undefined;
+          this.database.runs.setStatus(runId, 'DONE', 'Validação independente aprovada.');
+          this.say(
+            sessionId,
+            runId,
+            'system',
+            'Tarefa concluída e verificada. O orquestrador não precisou de outra rodada: ' +
+              'as verificações que o aplicativo executou já cobriam os critérios.',
+          );
+          this.sayCost(sessionId, runId, budget);
+          this.progress(runId, sessionId, 'done', 'Tarefa concluída.', 'DONE');
+          return;
+        }
+        // The gate said no. Nothing is lost: the run goes on exactly as it
+        // would have, with the gate's reasons as the orchestrator's feedback.
+        record.doneRejection = gate;
+        feedback = formatDoneRejection(gate);
+        this.say(sessionId, runId, 'system', 'A validação final não passou; o orquestrador vai revisar.');
+        continue;
       }
 
       // 5. `done` is a request. The gate decides.
@@ -2032,6 +2141,15 @@ export class OrchestrationService {
     this.progress(runId, sessionId, 'cancelled', 'Cancelado.', 'CANCELLED');
   }
 
+  /**
+   * Where the time went in each run, so it can be measured rather than guessed.
+   *
+   * Keyed by run id; each entry is the moment the previous step finished.
+   * Every step's duration is the gap since then, so the durations of a run add
+   * up to the run and no segment can hide between two of them.
+   */
+  private readonly phaseClock = new Map<string, number>();
+
   private step(
     runId: string,
     iteration: number,
@@ -2040,6 +2158,9 @@ export class OrchestrationService {
     summary: string,
     detail?: Record<string, unknown>,
   ): void {
+    const finishedAt = Date.now();
+    const startedAt = this.phaseClock.get(runId);
+    this.phaseClock.set(runId, finishedAt);
     this.database.runs.addStep({
       runId,
       iteration,
@@ -2048,6 +2169,9 @@ export class OrchestrationService {
       summary: redact(summary).slice(0, 1000),
       // Diagnostics are stored redacted: a CLI's stderr can echo a header.
       detail: detail ? redact(JSON.stringify(detail)) : null,
+      // The first step of a run has no predecessor, so it has no duration.
+      // Reporting zero there would put a real segment at zero milliseconds.
+      durationMs: startedAt === undefined ? null : finishedAt - startedAt,
     });
   }
 

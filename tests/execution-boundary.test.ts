@@ -158,6 +158,9 @@ test('a run in a non-local environment never touches the local path or the local
     createRunners: async () => ({ orchestrator, worker, workerAccountId: null }),
     environments: async () => environment,
     maxIterations: 4,
+    // The proof here is that a *second* delegation also stays inside the remote
+    // environment. The short path would end the run after the first one.
+    fastPath: false,
   });
 
   try {

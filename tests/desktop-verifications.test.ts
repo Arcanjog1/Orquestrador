@@ -781,6 +781,9 @@ test('a two-stage command typed into the interface drives a second iteration', a
     },
   ]);
   const fixture = createDesktopFixture({
+    // The second iteration is the subject. The short path would finish the
+    // run on the first, before the second stage of the command ever runs.
+    fastPath: false,
     createRunners: async () => ({ orchestrator, worker, workerAccountId: null }),
   });
 

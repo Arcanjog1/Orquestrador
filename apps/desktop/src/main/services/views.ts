@@ -158,6 +158,7 @@ export function toRunDetailView(
       summary: step.summary === null ? null : redact(step.summary),
       detail: step.detail === null ? null : redact(step.detail),
       startedAt: step.started_at,
+      durationMs: step.duration_ms ?? null,
     })),
     invocations: invocations.map((row) => ({
       id: str(row.id) ?? '',

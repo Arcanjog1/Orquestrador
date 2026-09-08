@@ -824,6 +824,25 @@ CREATE TABLE project_context (
 CREATE INDEX idx_project_context_project ON project_context(project_id, kind, updated_at DESC);
 `,
   },
+  {
+    id: 15,
+    name: 'step-timing',
+    sql: `
+-- How long each phase of a run actually took.
+--
+-- The complaint is that creating a six-byte file takes too long, and the
+-- honest first answer was that nobody could say where the time went: the loop
+-- recorded *that* it planned, delegated, collected evidence and verified, and
+-- nothing about how long any of it took. Optimising against that would have
+-- been optimising against a guess.
+--
+-- One integer per step, measured from the end of the previous step, so the
+-- durations of a run add up to the run. NULL for a step recorded before this
+-- column existed, and for the first step of a run, which has no predecessor
+-- to measure from.
+ALTER TABLE run_steps ADD COLUMN duration_ms INTEGER;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

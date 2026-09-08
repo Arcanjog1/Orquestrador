@@ -642,6 +642,14 @@ export interface RunStepView {
   /** Redacted JSON diagnostics (outcome, exit code, excerpts), or null. */
   readonly detail: string | null;
   readonly startedAt: string;
+  /**
+   * How long this phase took, measured from the end of the previous one.
+   *
+   * Null for the first step of a run and for anything recorded before this
+   * existed. The durations of a run add up to the run, which is what makes
+   * "onde está o tempo?" a question with an answer.
+   */
+  readonly durationMs: number | null;
 }
 
 export interface RunInvocationView {

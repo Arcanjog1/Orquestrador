@@ -249,6 +249,10 @@ export class AppServices {
         return directory;
       },
       ...(explicit.allowNoChanges !== undefined ? { allowNoChanges: explicit.allowNoChanges } : {}),
+      // The short path to the DoneGate. This builder names every option it
+      // forwards, so one it does not name is silently dropped - which has now
+      // happened to three of them, and is why each addition gets a line here.
+      ...(explicit.fastPath !== undefined ? { fastPath: explicit.fastPath } : {}),
       // Where runs execute. Absent means this computer, which is the default
       // for every workspace that has a folder on it.
       ...(explicit.environments ? { environments: explicit.environments } : {}),

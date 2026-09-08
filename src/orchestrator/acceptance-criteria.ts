@@ -85,6 +85,24 @@ export class AcceptanceCriteriaLedger {
     return [...this.criteria.values()].map((c) => ({ ...c }));
   }
 
+  /**
+   * True when every one of these texts is a criterion this ledger holds and
+   * has settled as satisfied.
+   *
+   * A text the ledger does not know is **not** satisfied — an unknown
+   * criterion is the case where the caller and the ledger disagree about what
+   * was asked, and answering "yes" there would be the one answer that cannot
+   * be checked.
+   */
+  allSatisfied(texts: readonly string[]): boolean {
+    if (texts.length === 0) return false;
+    return texts.every((text) => {
+      const trimmed = text.trim();
+      if (!trimmed) return false;
+      return this.criteria.get(criterionId(trimmed))?.status === 'satisfied';
+    });
+  }
+
   pending(): AcceptanceCriterion[] {
     return this.all().filter((c) => c.status !== 'satisfied');
   }

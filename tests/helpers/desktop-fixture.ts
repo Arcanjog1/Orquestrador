@@ -50,6 +50,11 @@ export interface DesktopFixtureOptions {
   environments?: EnvironmentFactory;
   selectFolder?: () => Promise<string | null>;
   maxIterations?: number;
+  /**
+   * Turns off the short path to the DoneGate, so a test can exercise the
+   * orchestrator's own review round.
+   */
+  fastPath?: boolean;
   allowNoChanges?: boolean;
   /** Where the GitHub client talks; tests run a local fake. */
   github?: GitHubClientOptions;
@@ -101,6 +106,7 @@ export function createDesktopFixture(options: DesktopFixtureOptions = {}): Deskt
     },
     orchestration: {
       ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {}),
+      ...(options.fastPath !== undefined ? { fastPath: options.fastPath } : {}),
       ...(options.allowNoChanges !== undefined ? { allowNoChanges: options.allowNoChanges } : {}),
       ...(options.environments ? { environments: options.environments } : {}),
       ...(options.orchestration ?? {}),

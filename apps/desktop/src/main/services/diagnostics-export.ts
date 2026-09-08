@@ -106,10 +106,42 @@ export function renderDiagnostics(detail: RunDetailView, generatedAt = new Date(
     }
   }
 
+  // Where the time went, largest first. This section is the answer to "por que
+  // uma tarefa pequena demora tanto?" - and it is measurement, not a theory:
+  // each number is the wall clock between two recorded steps.
+  lines.push('## Onde o tempo foi');
+  lines.push('');
+  const byPhase = new Map<string, { ms: number; count: number }>();
+  let measured = 0;
+  for (const step of detail.steps) {
+    if (step.durationMs === null) continue;
+    const entry = byPhase.get(step.phase) ?? { ms: 0, count: 0 };
+    entry.ms += step.durationMs;
+    entry.count += 1;
+    byPhase.set(step.phase, entry);
+    measured += step.durationMs;
+  }
+  if (byPhase.size === 0) {
+    lines.push(`_Sem medição: esta execução é anterior à contagem por etapa._`);
+  } else {
+    lines.push('| fase | tempo | vezes | % do medido |');
+    lines.push('|---|---|---|---|');
+    const rows = [...byPhase.entries()].sort((a, b) => b[1].ms - a[1].ms);
+    for (const [phase, entry] of rows) {
+      const share = measured > 0 ? Math.round((entry.ms / measured) * 100) : 0;
+      lines.push(`| ${phase} | ${formatMs(entry.ms)} | ${entry.count} | ${share}% |`);
+    }
+    lines.push(`| **total medido** | **${formatMs(measured)}** | | |`);
+  }
+  lines.push('');
+
   lines.push('## Etapas');
   lines.push('');
   for (const step of detail.steps) {
-    lines.push(`- **it. ${step.iteration} · ${step.phase} · ${step.status}** — ${say(step.summary)}`);
+    const took = step.durationMs === null ? '' : ` _(${formatMs(step.durationMs)})_`;
+    lines.push(
+      `- **it. ${step.iteration} · ${step.phase} · ${step.status}**${took} — ${say(step.summary)}`,
+    );
     if (step.detail) {
       lines.push('  ```');
       for (const line of step.detail.split('\n')) lines.push(`  ${line}`);
@@ -166,4 +198,13 @@ export function writeDiagnostics(
   const path = join(directory, `diagnostico-${detail.run.id}-${stamp}.md`);
   writeFileSync(path, renderDiagnostics(detail, now), 'utf8');
   return { path, directory };
+}
+
+/** Milliseconds as something a person reads: `1,4 s`, `2 min 06 s`, `840 ms`. */
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1).replace('.', ',')} s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes} min ${String(seconds).padStart(2, '0')} s`;
 }

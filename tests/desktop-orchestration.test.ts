@@ -67,6 +67,12 @@ async function prepare(options: {
   repository?: () => GitFixture;
   /** The verification to register instead of the default in-workspace check. */
   verification?: { id: string; label: string; command: string };
+  /**
+   * Off when the test's subject *is* the orchestrator's review round: the
+   * short path skips it precisely when the application already has proof, so
+   * a test of the long path has to ask for the long path.
+   */
+  fastPath?: boolean;
 }): Promise<Prepared & { orchestrator: ScriptedAgent; worker: ScriptedAgent | HangingAgent }> {
   const repo = options.repository ? options.repository() : scratchRepository();
   const orchestrator = new ScriptedAgent('mock-codex', 'Codex', options.orchestratorScript);
@@ -76,6 +82,7 @@ async function prepare(options: {
   const fixture = createDesktopFixture({
     createRunners: async () => ({ orchestrator, worker, workerAccountId: null }),
     ...(options.maxIterations !== undefined ? { maxIterations: options.maxIterations } : {}),
+    ...(options.fastPath !== undefined ? { fastPath: options.fastPath } : {}),
   });
 
   const workspace = value<{ id: string }>(
@@ -336,6 +343,9 @@ test('a run can be cancelled, and the agents are told to stop', async () => {
 
 test('the interface is fed live progress, in words a person can read', async () => {
   const prepared = await prepare({
+    // The long path on purpose: this test is about the whole vocabulary, and
+    // "Codex revisando..." only appears when Codex actually reviews.
+    fastPath: false,
     orchestratorScript: [delegate('Crie hello.txt'), done()],
     workerScript: [
       (input: AgentInput) => {
@@ -742,6 +752,11 @@ test('the loop composes the second worker prompt from its own review of the firs
         return done();
       },
     ],
+    // The subject here is the *review*: turn two must be composed from what
+    // turn one produced. The short path would end the run after turn two, so
+    // the third turn - which proves the passing result is reported back too -
+    // would never happen.
+    fastPath: false,
     workerScript: [
       // The worker obeys its instruction rather than a counter: the first says
       // nothing about content, the second carries the exact string to write.
@@ -903,6 +918,9 @@ test('a finished two-iteration run survives closing and reopening the applicatio
         return wanted ? 'corrigido' : 'criado';
       },
     ],
+    // The long path: what survives a restart here is the trace of a run with
+    // three orchestrator turns, and the short path would only produce two.
+    fastPath: false,
   });
 
   const { fixture, repo, sessionId } = prepared;

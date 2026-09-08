@@ -1336,6 +1336,8 @@ export interface RunStepRecord extends SqlRow {
   detail: string | null;
   started_at: string;
   finished_at: string | null;
+  /** How long this phase took. NULL for a step recorded before this existed. */
+  duration_ms: number | null;
 }
 
 export class RunRepository extends Repository {
@@ -1461,9 +1463,12 @@ export class RunRepository extends Repository {
     status: string;
     summary?: string | null;
     detail?: string | null;
+    /** How long this phase took, measured from the end of the previous step. */
+    durationMs?: number | null;
   }): number {
     const result = this.db.run(
-      'INSERT INTO run_steps (run_id, iteration, phase, status, summary, detail, started_at, finished_at) VALUES (?,?,?,?,?,?,?,?)',
+      `INSERT INTO run_steps (run_id, iteration, phase, status, summary, detail, started_at, finished_at, duration_ms)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
       [
         input.runId,
         input.iteration,
@@ -1473,6 +1478,7 @@ export class RunRepository extends Repository {
         input.detail ?? null,
         now(),
         now(),
+        input.durationMs ?? null,
       ],
     );
     return Number(result.lastInsertRowid);
