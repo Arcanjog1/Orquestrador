@@ -22,6 +22,99 @@ Electron.
 
 ---
 
+# Sexta sessão — por que a causa não aparecia
+
+HEAD de início: `929ef45`.
+
+## O que **não** foi possível fazer
+
+**O banco da execução real não está disponível neste ambiente.** A run
+aconteceu no Windows do usuário, em
+`C:\Users\twitc\Desktop\Orquestrador-claude-new-session-3am7mo`, e o
+`orchestrator.db` vive no AppData daquela máquina. Este ambiente é Linux; os
+únicos `orchestrator.db` encontrados aqui são fixtures dos próprios testes.
+
+Portanto: **ROOT CAUSE NÃO CONFIRMADO.** Nenhum log foi inventado.
+
+## O que foi possível: encontrar onde o diagnóstico se perdia
+
+Lendo o código — não os logs — apareceram **três defeitos em série**, cada um
+descartando parte de um diagnóstico que já tinha sido calculado.
+
+### 1. A classificação engolia a causa
+
+`classifyEnvelope` tinha **dois ramos devolvendo o mesmo valor**:
+
+```ts
+if (envelope.subtype === 'error_max_turns') return 'provider-error';
+return 'provider-error';
+```
+
+Então `error_during_execution` (algo lançou exceção) e `error_max_turns` (o run
+acabou os turnos) — problemas diferentes, com correções opostas — chegavam
+idênticos à tela como *"erro do provider"*. O `subtype`, que é a declaração do
+próprio CLI sobre o que houve, era jogado fora.
+
+### 2. A persistência descartava o resto
+
+`agent_invocations` **não tinha coluna** para stderr, executável, versão,
+sinal, última atividade ou diretório de trabalho. Tudo isso era computado,
+colocado num `AgentResult`, e **perdido nesta fronteira** — a uma função de
+distância de ser útil.
+
+### 3. A versão do CLI nunca era lida
+
+Não havia probe de `--version` em lugar nenhum.
+
+## As correções
+
+- `failureDetail` carrega as palavras do próprio CLI ao lado da classificação.
+  A classificação continua grossa de propósito (o laço ramifica em poucas
+  espécies); o que muda é que a causa viaja junto.
+- Migração 13: `failure_detail`, `stderr_excerpt`, `executable`, `cli_version`,
+  `signal`, `last_activity_at`, `idle_timeout_ms`, `current_tool`,
+  `working_directory`. Redigidos e limitados. Vale para worker **e**
+  supervisor.
+- `--version` lido uma vez por adapter, **antes** da invocação. Uma versão que
+  a ferramenta não informa fica ausente e aparece como *"não informado"* —
+  nunca inventada.
+- **Exportação de diagnóstico**: o aplicativo escreve o arquivo numa pasta que
+  ele mesmo possui e oferece abrir. Sem PowerShell, sem seletor. Sem
+  credencial, sem token, sem prompt completo; passa pelo redator duas vezes.
+- **Sem escalada cega**: `provider-error` passou a ser mecânico. Era isto que
+  levava a run a STRONG/HIGH e parava assim mesmo — nenhum modelo desfaz uma
+  exceção.
+
+## O roteiro de reteste (único)
+
+1. instale
+   [`desktop-dev-<sha>`](https://github.com/Arcanjog1/Orquestrador/releases)
+   mais recente desta branch, por cima;
+2. abra o mesmo projeto e repita o **mesmo objetivo** que falhou;
+3. quando terminar (bem ou mal), abra **Detalhes**;
+4. clique em **Exportar diagnóstico** e depois em **Abrir pasta**;
+5. mande o arquivo `.md`.
+
+Esse arquivo tem: a causa classificada **e** o texto do CLI, exitCode, sinal,
+executável, versão, pasta, modelo e raciocínio aplicados, início, fim, última
+atividade, ferramenta em execução, limite de silêncio, o stderr redigido, as
+etapas e as verificações. O que a ferramenta não informou aparece como *"não
+informado"*.
+
+## Testes
+
+| Suíte | Resultado |
+|---|---|
+| Root (`npm test`) | **633 passando**, 2 pulados (eram 617) |
+| Electron | **28 passando** |
+| Typecheck (4 projetos) | limpo |
+
+Novos: `tests/failure-diagnostics.test.ts` (11) e 5 casos em
+`desktop-adapters` — envelope com erro, stream incompleto, falha antes do
+spawn, versão indisponível, execução bem-sucedida.
+
+---
+
 # Quinta sessão — a pasta é o projeto, e ler o GitHub
 
 Documentos novos: `docs/CLAUDE_CODE_SESSIONS.md` (CLI × Desktop, com as
