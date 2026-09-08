@@ -10,9 +10,9 @@ Estado ao fim da quarta sessão: a arquitetura de comunicação, inspirada no Bu
 | Branch desta sessão | `claude/ai-orchestrator-buzz-arch-vblrau` |
 | HEAD do início | `2e06ae5` (ponta de `claude/ai-orchestrator-reorientacao-ytlkw0`) |
 | Branch padrão real | `claude/new-session-3am7mo` — **não é `main`, e `main` não existe** |
-| Instalador | [`desktop-dev-f6d3c96`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-f6d3c96) — `AI-Orchestrator-Setup.exe`, 117 906 613 bytes, `sha256:6305898004668dc7da8bcb7dbacd45d93241bc2384231240226be1b78fe550b4`, publicado com a CI verde |
-| CI | [run 114](https://github.com/Arcanjog1/Orquestrador/actions/runs/34275652794) — Windows e Linux **verdes** |
-| Instaladores anteriores | [`desktop-dev-ff70680`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-ff70680), [`desktop-dev-8391fdb`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8391fdb), [`desktop-dev-1650c9c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-1650c9c), [`desktop-dev-32a94a1`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-32a94a1), [`desktop-dev-645566c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-645566c), [`desktop-dev-8f08867`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8f08867), [`desktop-dev-61c622e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-61c622e), [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f) e [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — intactos; a tag é por commit |
+| Instalador | [`desktop-dev-c0f224c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-c0f224c) — `AI-Orchestrator-Setup.exe`, 117 916 314 bytes, `sha256:3b587869f525a64bc13053e97fa7044893e433c513b30503186ccfd66536e5d2`, publicado com a CI verde |
+| CI | [run 118](https://github.com/Arcanjog1/Orquestrador/actions/runs/34284763505) — Windows e Linux **verdes** |
+| Instaladores anteriores | [`desktop-dev-f6d3c96`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-f6d3c96), [`desktop-dev-ff70680`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-ff70680), [`desktop-dev-8391fdb`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8391fdb), [`desktop-dev-1650c9c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-1650c9c), [`desktop-dev-32a94a1`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-32a94a1), [`desktop-dev-645566c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-645566c), [`desktop-dev-8f08867`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8f08867), [`desktop-dev-61c622e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-61c622e), [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f) e [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — intactos; a tag é por commit |
 
 Sem reset, sem merge, sem force-push, sem apagar branch. Nenhuma release
 anterior foi sobrescrita: a tag é por commit. A branch desta sessão
@@ -96,9 +96,9 @@ Não havia probe de `--version` em lugar nenhum.
 ## O roteiro de reteste (único)
 
 1. instale por cima o
-   [`desktop-dev-f6d3c96`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-f6d3c96)
+   [`desktop-dev-c0f224c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-c0f224c)
    — `AI-Orchestrator-Setup.exe`, publicado pela
-   [run 114](https://github.com/Arcanjog1/Orquestrador/actions/runs/34275652794)
+   [run 118](https://github.com/Arcanjog1/Orquestrador/actions/runs/34284763505)
    com a CI verde. Traz a exportação de diagnóstico, a sidebar unificada, o
    caminho rápido das tarefas pequenas, o pedido de autorização de ferramenta
    e a verificação direta de arquivos
@@ -517,7 +517,7 @@ Não existem contas Codex/Claude legítimas no CI, e este ambiente não tem
 Windows. O roteiro:
 
 1. baixar o `AI-Orchestrator-Setup.exe` de
-   [`desktop-dev-f6d3c96`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-f6d3c96)
+   [`desktop-dev-c0f224c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-c0f224c)
    e instalar por cima (o SmartScreen avisa: o build não é assinado);
 2. abrir o aplicativo — a base é migrada no lugar, nada é reautenticado;
 3. Configurações → Contas: confirmar Codex e Claude conectados;
