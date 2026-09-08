@@ -576,3 +576,159 @@ test('a database written before connections and run kinds upgrades, keeping ever
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a database from before the project became the entity upgrades with every row intact', () => {
+  // Migrations 14 and 15 are the ones this request adds. What they must never
+  // do is what section 8 forbids in so many words: "Não apague nem recrie o
+  // banco do usuário […] preservando: projetos, workspaces, conversas,
+  // mensagens, runs, invocations, evidências, contas, configurações."
+  //
+  // So a database is built at version 13 - the state a person upgrading from
+  // the previous installer is actually in - with one row of each of those
+  // nine things, and every one of them is read back afterwards.
+  const dir = mkdtempSync(join(tmpdir(), 'lao-db-upgrade14-'));
+  try {
+    const file = join(dir, 'data', 'old.db');
+    const older = new NodeSqliteDriver(file);
+    older.exec(
+      'CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)',
+    );
+    for (const migration of MIGRATIONS.filter((m) => m.id <= 13)) {
+      older.exec(migration.sql);
+      older.run('INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)', [
+        migration.id,
+        migration.name,
+        '2026-01-01T00:00:00.000Z',
+      ]);
+    }
+    const t = '2026-01-01T00:00:00.000Z';
+    older.run(
+      "INSERT INTO workspaces (id, display_name, local_path, created_at, updated_at) VALUES ('ws-1','Pasta Antiga','/w',?,?)",
+      [t, t],
+    );
+    older.run(
+      "INSERT INTO projects (id, name, workspace_id, created_at, updated_at) VALUES ('proj-1','Projeto Antigo','ws-1',?,?)",
+      [t, t],
+    );
+    older.run(
+      "INSERT INTO chat_sessions (id, workspace_id, project_id, title, created_at, updated_at) VALUES ('chat-1','ws-1','proj-1','Conversa antiga',?,?)",
+      [t, t],
+    );
+    older.run(
+      "INSERT INTO messages (id, session_id, kind, author, body, created_at) VALUES ('msg-1','chat-1','text','user','olá',?)",
+      [t],
+    );
+    older.run(
+      "INSERT INTO providers (id, display_name, created_at) VALUES ('anthropic','Anthropic',?)",
+      [t],
+    );
+    older.run(
+      `INSERT INTO accounts (id, provider_id, display_name, profile_directory, auth_state, created_at)
+       VALUES ('acc-1','anthropic','Claude Trabalho','/profiles/acc-1','connected',?)`,
+      [t],
+    );
+    older.run(
+      `INSERT INTO runs (id, session_id, workspace_id, objective, status, iteration, max_iterations, started_at)
+       VALUES ('run-1','chat-1','ws-1','criar hello.txt','DONE',2,8,?)`,
+      [t],
+    );
+    older.run(
+      `INSERT INTO agent_invocations (run_id, iteration, role, outcome, started_at, failure_detail, cli_version)
+       VALUES ('run-1',1,'CODING_WORKER','completed',?,'subtype=ok','2.1.263')`,
+      [t],
+    );
+    older.run(
+      `INSERT INTO verification_results (run_id, iteration, command, exit_code, passed, duration_ms, created_at)
+       VALUES ('run-1',1,'node check.mjs',0,1,120,?)`,
+      [t],
+    );
+    older.run("INSERT INTO settings (key, value, updated_at) VALUES ('execution.maxIterations','7',?)", [t]);
+    older.close();
+
+    const upgraded = new Database({ filePath: file });
+    try {
+      assert.equal(upgraded.schemaVersion, SCHEMA_VERSION);
+
+      // 1. workspaces
+      assert.equal(upgraded.workspaces.require('ws-1').display_name, 'Pasta Antiga');
+      // 2. projects - and the new columns read as what an old row already meant
+      const project = upgraded.projects.require('proj-1');
+      assert.equal(project.name, 'Projeto Antigo');
+      assert.equal(project.archived_at, null, 'an old project is not archived');
+      assert.equal(project.repository_key, '', 'and has no repository');
+      assert.equal(project.default_branch, null, 'and no invented default branch');
+      assert.equal(project.source, 'folder', 'it was created next to a folder, so it is one');
+      // 3. conversations, still filed under it
+      assert.equal(upgraded.chat.requireSession('chat-1').project_id, 'proj-1');
+      // 4. messages
+      assert.equal(upgraded.chat.countMessages('chat-1'), 1);
+      // 5. runs
+      assert.equal(upgraded.runs.require('run-1').status, 'DONE');
+      assert.equal(upgraded.runs.require('run-1').iteration, 2);
+      // 6. invocations, with the diagnostics migration 13 added still there
+      const invocations = upgraded.runs.invocations('run-1') as Array<Record<string, unknown>>;
+      assert.equal(invocations.length, 1);
+      assert.equal(invocations[0]!.failure_detail, 'subtype=ok');
+      assert.equal(invocations[0]!.cli_version, '2.1.263');
+      // 7. verification results
+      assert.equal(upgraded.runs.verifications('run-1').length, 1);
+      // 8. accounts
+      assert.equal(upgraded.accounts.require('acc-1').display_name, 'Claude Trabalho');
+      // 9. settings
+      assert.equal(upgraded.settings.get('execution.maxIterations'), '7');
+
+      // A step from before migration 15 has no duration, and says so with a
+      // null rather than a zero that would read as "this phase was instant".
+      upgraded.runs.addStep({ runId: 'run-1', iteration: 1, phase: 'evidence', status: 'changed' });
+      const steps = upgraded.runs.steps('run-1');
+      assert.equal(steps.at(-1)!.duration_ms, null);
+      upgraded.runs.addStep({
+        runId: 'run-1',
+        iteration: 1,
+        phase: 'verification',
+        status: 'done',
+        durationMs: 1234,
+      });
+      assert.equal(upgraded.runs.steps('run-1').at(-1)!.duration_ms, 1234);
+
+      // The new entities work on the upgraded database.
+      const withRepository = upgraded.projects.setRepository('proj-1', {
+        key: 'github.com/arcanjog1/orquestrador',
+        url: 'https://github.com/Arcanjog1/Orquestrador',
+        fullName: 'Arcanjog1/Orquestrador',
+        isPrivate: false,
+        defaultBranch: 'claude/new-session-3am7mo',
+      });
+      assert.equal(withRepository.repository_full_name, 'Arcanjog1/Orquestrador');
+      assert.equal(
+        upgraded.projects.findByRepositoryKey('github.com/arcanjog1/orquestrador')?.id,
+        'proj-1',
+      );
+      assert.ok(upgraded.projects.setArchived('proj-1', true).archived_at);
+      assert.equal(upgraded.projects.setArchived('proj-1', false).archived_at, null);
+      upgraded.projectContext.create({
+        id: 'ctx-1',
+        projectId: 'proj-1',
+        kind: 'rule',
+        title: 'Sem API paga',
+        body: 'assinatura apenas',
+      });
+      assert.equal(upgraded.projectContext.list('proj-1').length, 1);
+    } finally {
+      upgraded.close();
+    }
+
+    // Idempotent: reopening applies nothing and changes nothing.
+    const reopened = new Database({ filePath: file });
+    try {
+      assert.equal(reopened.schemaVersion, SCHEMA_VERSION);
+      assert.equal(reopened.projects.require('proj-1').name, 'Projeto Antigo');
+      assert.equal(reopened.projectContext.list('proj-1').length, 1);
+      assert.equal(reopened.chat.countMessages('chat-1'), 1);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -1012,10 +1012,13 @@ test('GitHub: the card takes a client id, signs in with the device code shown, a
   await reloadWindow(window);
   await waitForText(window, /Pular onboarding/, 15_000);
   await click(window, 'skip-onboarding');
-  await waitForText(window, /Recentes/i, 15_000);
+  await waitForText(window, /Projetos/i, 15_000);
   await window.webContents.executeJavaScript(`
     document.querySelector('button[aria-label="Adicionar projeto"]').click()
   `);
+  // The clone URL belongs to the folder mode: connecting a repository does
+  // not clone it, so that field only exists where a clone is on offer.
+  await click(window, 'environment-folder');
   text = await waitForText(window, /octocat\/private-thing/, 15_000);
   assert.match(text, /privado/i);
   await click(window, 'repo-octocat/private-thing');
@@ -1186,16 +1189,25 @@ test('a conversation project is created with no folder, and offers no git action
 
   await click(window, 'add-workspace');
   await waitForText(window, /Adicionar projeto/, 10_000);
-  // Conversation is offered, and is the choice that needs nothing configured.
-  await click(window, 'environment-conversation');
-  await waitForText(window, /Não precisa de pasta, repositório nem servidor/, 10_000);
+  // "Vazio" is the choice that needs nothing configured: a name, and the
+  // repository or folder can come later.
+  await click(window, 'environment-empty');
+  await waitForText(window, /Associe um repositório ou uma pasta depois/, 10_000);
   await type(window, 'conversation-name', 'Arquitetura');
   await click(window, 'conversation-create');
   await waitForText(window, /Arquitetura/, 15_000);
 
+  // It is a real project in the sidebar, and the workspace its runs execute
+  // in owns no folder anywhere.
+  const projects = await window.webContents.executeJavaScript('window.api.project.list()');
+  const project = projects.find((p) => p.name === 'Arquitetura');
+  assert.ok(project, 'the project exists in the sidebar');
+  assert.equal(project.localPath, '', 'and claims no folder on this computer');
+  assert.equal(project.repositoryFullName, null, 'and no repository yet');
+
   const workspaces = await window.webContents.executeJavaScript('window.api.workspace.list()');
-  const created = workspaces.find((w) => w.name === 'Arquitetura');
-  assert.ok(created, 'the conversation project exists');
+  const created = workspaces.find((w) => w.id === project.workspaceId);
+  assert.ok(created, 'the workspace its runs execute in exists');
   assert.equal(created.environment, 'conversation');
   assert.equal(created.localPath, '', 'and it claims no folder on this computer');
 
@@ -1209,6 +1221,374 @@ test('a conversation project is created with no folder, and offers no git action
     `document.querySelector('[data-testid="github-chip"]') === null`,
   );
   assert.equal(gitChip, true, 'a conversation project must not offer git actions');
+});
+
+test('the project menu really works: archive, restore and remove, in the packaged interface', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-projmenu-'));
+  try {
+    // A folder project with one conversation, reached the way a person does.
+    const folder = await window.webContents.executeJavaScript(
+      `window.api.workspace.openProject(${JSON.stringify({ localPath: dir })})`,
+    );
+    const project = await window.webContents.executeJavaScript(
+      `window.api.project.list()`,
+    ).then((list) => list.find((p) => p.workspaceId === folder.workspace.id));
+    assert.ok(project, 'opening a folder produced its project');
+    await window.webContents.executeJavaScript(
+      `window.api.chat.createSession(${JSON.stringify({ workspaceId: folder.workspace.id, title: 'Uma conversa', projectId: project.id })})`,
+    );
+
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Uma conversa/, 15_000);
+
+    // There is no separate "Pastas" section any more: the folder *is* the
+    // project, and appearing in two lists at once was the complaint.
+    const body = await window.webContents.executeJavaScript('document.body.innerText');
+    assert.equal(/^\s*PASTAS\s*$/m.test(body), false, 'the Pastas section is gone');
+
+    // Archive, from the project's own menu.
+    await openMenu(window, `project-menu-${project.id}`);
+    await click(window, `archive-project-${project.id}`);
+    await waitForText(window, /arquivado\. Nada foi apagado/i, 10_000);
+
+    const archived = await window.webContents.executeJavaScript(
+      `window.api.project.list()`,
+    ).then((list) => list.find((p) => p.id === project.id));
+    assert.ok(archived.archivedAt, 'the project is archived');
+    // Its conversation went with it and was not deleted. Scoped to this
+    // project: every case in this suite shares one application data root, so
+    // the global list carries conversations from the cases before it.
+    const stillThere = await window.webContents.executeJavaScript(
+      'window.api.chat.listAllSessions({})',
+    ).then((list) => list.filter((s) => s.projectId === project.id));
+    assert.equal(stillThere.length, 1);
+    assert.equal(stillThere[0].title, 'Uma conversa');
+
+    // It appears under "Arquivados", which is what makes archiving visibly
+    // reversible rather than a disappearance.
+    await waitForText(window, /Arquivados/i, 10_000);
+    await openMenu(window, `project-menu-${project.id}`);
+    await click(window, `archive-project-${project.id}`);
+    await waitForText(window, /restaurado/i, 10_000);
+    const restored = await window.webContents.executeJavaScript(
+      `window.api.project.list()`,
+    ).then((list) => list.find((p) => p.id === project.id));
+    assert.equal(restored.archivedAt, null, 'and it comes back exactly as it was');
+
+    // Remove: the confirmation must say what stays, by name.
+    await openMenu(window, `project-menu-${project.id}`);
+    await click(window, `delete-project-${project.id}`);
+    const confirmation = await waitForText(window, /Remover projeto da lista/i, 10_000);
+    assert.match(confirmation, /1 conversa/, 'the real count, from the main process');
+    assert.match(confirmation, /Sem projeto/);
+    assert.ok(
+      confirmation.includes(dir),
+      'the confirmation names the folder that stays on disk',
+    );
+    assert.match(confirmation, /Nenhum arquivo é apagado/i);
+    assert.match(confirmation, /Arquivar/, 'and offers the reversible alternative');
+  } finally {
+    removeTree(dir);
+  }
+});
+
+test('removing a project from the interface leaves the folder and its files alone', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-safe-remove-'));
+  const canary = join(dir, 'nao-apague-isto.txt');
+  try {
+    writeFileSync(canary, 'este arquivo prova que remover um projeto não apaga nada\n', 'utf8');
+
+    const folder = await window.webContents.executeJavaScript(
+      `window.api.workspace.openProject(${JSON.stringify({ localPath: dir })})`,
+    );
+    const project = await window.webContents.executeJavaScript(
+      `window.api.project.list()`,
+    ).then((list) => list.find((p) => p.workspaceId === folder.workspace.id));
+    await window.webContents.executeJavaScript(
+      `window.api.chat.createSession(${JSON.stringify({ workspaceId: folder.workspace.id, title: 'Conversa preservada', projectId: project.id })})`,
+    );
+
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Conversa preservada/, 15_000);
+
+    await openMenu(window, `project-menu-${project.id}`);
+    await click(window, `delete-project-${project.id}`);
+    await waitForText(window, /Remover projeto da lista/i, 10_000);
+    await click(window, 'confirm');
+    await waitForText(window, /removido da lista/i, 10_000);
+
+    // The three things that must survive an act of organisation.
+    assert.equal(readFileSync(canary, 'utf8').startsWith('este arquivo'), true, 'the file is intact');
+    const sessions = await window.webContents.executeJavaScript(
+      'window.api.chat.listAllSessions({})',
+    ).then((list) => list.filter((s) => s.title === 'Conversa preservada'));
+    assert.equal(sessions.length, 1, 'the conversation was kept');
+    assert.equal(sessions[0].projectId, null, 'and moved to "Sem projeto"');
+    const workspaces = await window.webContents.executeJavaScript('window.api.workspace.list()');
+    assert.ok(
+      workspaces.some((w) => w.id === folder.workspace.id),
+      'the folder is still a workspace the application knows',
+    );
+  } finally {
+    removeTree(dir);
+  }
+});
+
+test('the same folder opened twice is one project, and survives a restart', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-onefolder-'));
+  try {
+    const first = await window.webContents.executeJavaScript(
+      `window.api.workspace.openProject(${JSON.stringify({ localPath: dir })})`,
+    );
+    assert.equal(first.created, true);
+
+    // The same folder, spelled with a trailing separator and a redundant
+    // segment. On any platform this is the same directory.
+    const awkward = join(dir, 'algum', '..');
+    const second = await window.webContents.executeJavaScript(
+      `window.api.workspace.openProject(${JSON.stringify({ localPath: awkward })})`,
+    );
+    assert.equal(second.created, false, 'the second open found the first');
+    assert.equal(second.workspace.id, first.workspace.id);
+    assert.equal(second.projectId, first.projectId);
+
+    const projects = await window.webContents.executeJavaScript('window.api.project.list()');
+    assert.equal(
+      projects.filter((p) => p.workspaceId === first.workspace.id).length,
+      1,
+      'one folder, one project',
+    );
+
+    // And it is still one after the application is closed and reopened.
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    const after = await window.webContents.executeJavaScript('window.api.project.list()');
+    assert.equal(after.filter((p) => p.workspaceId === first.workspace.id).length, 1);
+  } finally {
+    removeTree(dir);
+  }
+});
+
+test('one repository is one project, whichever way its address is written', async () => {
+  const window = await openWindow();
+
+  // Bookkeeping only: no network is reached here, because the project is
+  // created before the metadata is fetched and the fetch failing is allowed.
+  const connected = await window.webContents.executeJavaScript(
+    `window.api.project.connectRepository(${JSON.stringify({ url: 'https://github.com/Arcanjog1/Orquestrador' })})`,
+  );
+  assert.equal(connected.created, true);
+  assert.equal(connected.project.repositoryFullName, 'Arcanjog1/Orquestrador');
+
+  // Four other spellings of the same repository. Each must open the first.
+  for (const spelling of [
+    'https://github.com/Arcanjog1/Orquestrador.git',
+    'git@github.com:Arcanjog1/Orquestrador.git',
+    'Arcanjog1/Orquestrador',
+    'arcanjog1/orquestrador',
+  ]) {
+    const again = await window.webContents.executeJavaScript(
+      `window.api.project.connectRepository(${JSON.stringify({ url: spelling })})`,
+    );
+    assert.equal(again.created, false, `${spelling} opened the existing project`);
+    assert.equal(again.project.id, connected.project.id);
+  }
+
+  // A different repository of the same owner is a different project - and so
+  // the two repositories named in the request are two rows, not one.
+  const other = await window.webContents.executeJavaScript(
+    `window.api.project.connectRepository(${JSON.stringify({ url: 'https://github.com/Arcanjog1/MeuBotao.pushbutton' })})`,
+  );
+  assert.equal(other.created, true);
+  assert.notEqual(other.project.id, connected.project.id);
+  assert.equal(other.project.repositoryFullName, 'Arcanjog1/MeuBotao.pushbutton');
+
+  // The default branch is never guessed, whether or not GitHub could be
+  // reached. Both outcomes are correct behaviour and both are checked here,
+  // because a test that only passes with a network would be a test that
+  // silently stops testing anything on a machine without one.
+  //
+  // This repository's default branch is deliberately not called `main` - it
+  // is `claude/new-session-3am7mo` - so reading it back is the strongest
+  // available evidence that no default was invented.
+  for (const result of [connected, other]) {
+    if (result.metadataError === null) {
+      assert.ok(
+        typeof result.project.defaultBranch === 'string' && result.project.defaultBranch.length > 0,
+        'a successful read reports the branch GitHub named',
+      );
+    } else {
+      assert.equal(
+        result.project.defaultBranch,
+        null,
+        'a failed read reports nothing, never the guessed string "main"',
+      );
+    }
+  }
+  if (connected.metadataError === null) {
+    assert.equal(
+      connected.project.defaultBranch,
+      'claude/new-session-3am7mo',
+      'the real default branch of this repository, which is not "main"',
+    );
+    assert.equal(connected.project.repositoryPrivate, false, 'it is a public repository');
+  }
+
+  // Each holds its own conversations.
+  const openedA = await window.webContents.executeJavaScript(
+    `window.api.project.open(${JSON.stringify({ projectId: connected.project.id })})`,
+  );
+  const openedB = await window.webContents.executeJavaScript(
+    `window.api.project.open(${JSON.stringify({ projectId: other.project.id })})`,
+  );
+  assert.notEqual(openedA.workspaceId, openedB.workspaceId);
+  for (const [opened, project, title] of [
+    [openedA, connected.project, 'Conversa do Orquestrador'],
+    [openedB, other.project, 'Conversa do MeuBotao'],
+  ]) {
+    await window.webContents.executeJavaScript(
+      `window.api.chat.createSession(${JSON.stringify({ workspaceId: opened.workspaceId, title, projectId: project.id })})`,
+    );
+  }
+
+  await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+  await reloadWindow(window);
+  await waitForText(window, /Pular onboarding/, 15_000);
+  await click(window, 'skip-onboarding');
+  await waitForText(window, /Conversa do Orquestrador/, 15_000);
+
+  const filedRight = await window.webContents.executeJavaScript(`
+    (() => {
+      const a = document.querySelector('[data-testid="project-${connected.project.id}"]');
+      const b = document.querySelector('[data-testid="project-${other.project.id}"]');
+      return a !== null && b !== null &&
+        a.innerText.includes('Conversa do Orquestrador') &&
+        b.innerText.includes('Conversa do MeuBotao');
+    })()
+  `);
+  assert.equal(filedRight, true, 'two projects in the sidebar, each with its own conversation');
+});
+
+test('many conversations live in one project, and the search finds one inside a collapsed project', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-many-'));
+  try {
+    const folder = await window.webContents.executeJavaScript(
+      `window.api.workspace.openProject(${JSON.stringify({ localPath: dir })})`,
+    );
+    const project = await window.webContents.executeJavaScript(
+      `window.api.project.list()`,
+    ).then((list) => list.find((p) => p.workspaceId === folder.workspace.id));
+
+    for (const title of ['Primeira ideia', 'Segunda ideia', 'Terceira ideia']) {
+      await window.webContents.executeJavaScript(
+        `window.api.chat.createSession(${JSON.stringify({ workspaceId: folder.workspace.id, title, projectId: project.id })})`,
+      );
+    }
+
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Terceira ideia/, 15_000);
+
+    const count = await window.webContents.executeJavaScript(
+      `document.querySelector('[data-testid="count-project-${project.id}"]')?.textContent ?? ''`,
+    );
+    assert.equal(count.trim(), '3', 'the project counts its conversations');
+
+    // Collapse it. The conversations leave the tree...
+    await click(window, `toggle-project-${project.id}`);
+    const hidden = await window.webContents.executeJavaScript(
+      `document.querySelector('[data-testid="project-${project.id}"]').innerText.includes('Segunda ideia')`,
+    );
+    assert.equal(hidden, false, 'a collapsed project hides its conversations');
+
+    // ...but the search still finds one, and says which project it is in.
+    // This is what makes collapsing safe rather than a way to lose things.
+    await type(window, 'session-search', 'Segunda');
+    const results = await waitForText(window, /Resultados/i, 10_000);
+    assert.match(results, /Segunda ideia/);
+    assert.ok(
+      results.includes(project.name),
+      'the hit names the project it belongs to',
+    );
+  } finally {
+    removeTree(dir);
+  }
+});
+
+test('the project context is written, read and marked in the packaged interface', async () => {
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-context-'));
+  try {
+    const folder = await window.webContents.executeJavaScript(
+      `window.api.workspace.openProject(${JSON.stringify({ localPath: dir })})`,
+    );
+    const project = await window.webContents.executeJavaScript(
+      `window.api.project.list()`,
+    ).then((list) => list.find((p) => p.workspaceId === folder.workspace.id));
+    await window.webContents.executeJavaScript(
+      `window.api.chat.createSession(${JSON.stringify({ workspaceId: folder.workspace.id, title: 'Conversa', projectId: project.id })})`,
+    );
+
+    await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+    await reloadWindow(window);
+    await waitForText(window, /Pular onboarding/, 15_000);
+    await click(window, 'skip-onboarding');
+    await waitForText(window, /Conversa/, 15_000);
+
+    await openMenu(window, `project-menu-${project.id}`);
+    await click(window, `context-project-${project.id}`);
+    await waitForText(window, /O que os agentes sabem sobre este projeto/i, 10_000);
+
+    // The dialog says outright that none of this is evidence.
+    const blurb = await window.webContents.executeJavaScript('document.body.innerText');
+    assert.match(blurb, /Nada aqui é evidência/i);
+    assert.match(blurb, /DoneGate não lê esta tela/i);
+
+    await type(window, 'context-title', 'Sem API paga');
+    await window.webContents.executeJavaScript(`
+      (() => {
+        const el = document.querySelector('[data-testid="context-body"]');
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(el, 'Assinatura apenas. Nunca ANTHROPIC_API_KEY.');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()
+    `);
+    await click(window, 'context-add');
+    await waitForText(window, /Assinatura apenas/, 10_000);
+
+    const stored = await window.webContents.executeJavaScript(
+      `window.api.project.listContext(${JSON.stringify({ projectId: project.id })})`,
+    );
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0].title, 'Sem API paga');
+    assert.equal(stored[0].sourceRef, null, 'written by a person, so no source');
+
+    // It is a decision by default, which competes; pinning makes it travel
+    // with every task, and the badge changes to say so.
+    await click(window, `pin-${stored[0].id}`);
+    await new Promise((r) => setTimeout(r, 300));
+    const pinned = await window.webContents.executeJavaScript(
+      `window.api.project.listContext(${JSON.stringify({ projectId: project.id })})`,
+    );
+    assert.equal(pinned[0].pinned, true);
+  } finally {
+    removeTree(dir);
+  }
 });
 
 test('the team dialog adds a second worker, and refuses two workers on one connection', async () => {
