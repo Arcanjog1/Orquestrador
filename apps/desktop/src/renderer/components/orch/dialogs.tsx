@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Cloud, Copy, ExternalLink, HardDrive, Loader2, MessageSquare, X } from "lucide-react";
+import { Check, Cloud, Copy, ExternalLink, Github, HardDrive, Loader2, MessageSquare, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -33,6 +33,7 @@ import type {
   AccountView,
   GitHubBranchView,
   GitHubRepositoryView,
+  ProjectView,
   WorkspaceView,
 } from "@shared/ipc-contract";
 import { api, messageOf } from "@/lib/api";
@@ -550,7 +551,25 @@ export function LoginDialog({
   );
 }
 
-/** Adds a project: pick a folder, or clone a repository. Both are real. */
+/**
+ * Adds a project — in the three ways a person actually has one.
+ *
+ * | | What it needs | What runs | Where the code is |
+ * |---|---|---|---|
+ * | **Repositório** | a GitHub link | analysis, planning, review | on GitHub |
+ * | **Pasta** | a folder on this computer | everything, files included | on this computer |
+ * | **Vazio** | a name | nothing yet | nowhere yet |
+ * | **Nuvem** | a coordinator + a repository | everything, remotely | in the remote workspace |
+ *
+ * Connecting a repository **does not clone it**. Reading a public repository
+ * over the API is a different act from checking one out, and turning "add this
+ * to my sidebar" into a silent write to somebody's disk would be the wrong
+ * shape of thing. Cloning is offered, separately and by name, under Pasta.
+ *
+ * A project created any of these ways is one project. Selecting the same
+ * folder again, or pasting the same repository in another of its spellings,
+ * opens what is already there.
+ */
 export function AddProjectDialog({
   open,
   onOpenChange,
@@ -566,26 +585,27 @@ export function AddProjectDialog({
   /** With a coordinator connected, "Nuvem" is a real choice rather than a hint. */
   cloudConnected?: boolean;
 }) {
-  // Where this project's work will run. In "Nuvem" no folder is asked for and
-  // none is used: the repository is cloned inside the remote workspace when a
-  // run starts, which is the whole point of the mode.
-  // "Conversa" is first because it is the shape most people start in: no
-  // folder, no repository, no server, and nothing to set up before writing an
-  // objective. Local and Nuvem are the ones that need somewhere to work.
-  const [environment, setEnvironment] = useState<"conversation" | "local" | "cloud">(
-    "conversation",
-  );
+  // "Repositório" is first: it is the way the person described wanting to
+  // work — start from a repository, without cloning everything by hand first.
+  const [mode, setMode] = useState<Mode>("repository");
   const [branches, setBranches] = useState<readonly GitHubBranchView[] | null>(null);
   const [branch, setBranch] = useState<string>("");
   const [branchesError, setBranchesError] = useState<string | null>(null);
   const [cloudRepo, setCloudRepo] = useState<GitHubRepositoryView | null>(null);
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState<"folder" | "clone" | "cloud" | "conversation" | null>(null);
+  const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string | null>(null);
   const [repos, setRepos] = useState<readonly GitHubRepositoryView[] | null>(null);
   const [reposError, setReposError] = useState<string | null>(null);
   const [repoQuery, setRepoQuery] = useState("");
+  // What connecting a repository actually reported back, shown before the
+  // dialog closes so the person sees the real branch rather than a promise.
+  const [connected, setConnected] = useState<{
+    project: ProjectView;
+    created: boolean;
+    metadataError: string | null;
+  } | null>(null);
 
   // The person's repositories, read once per opening, private ones included.
   useEffect(() => {
@@ -608,7 +628,7 @@ export function AddProjectDialog({
   // The chosen repository's branches, read from GitHub - a cloud project has
   // no working copy on this computer to read them from.
   useEffect(() => {
-    if (environment !== "cloud" || !cloudRepo) {
+    if (mode !== "cloud" || !cloudRepo) {
       setBranches(null);
       setBranchesError(null);
       return;
@@ -629,13 +649,16 @@ export function AddProjectDialog({
     return () => {
       alive = false;
     };
-  }, [environment, cloudRepo]);
+  }, [mode, cloudRepo]);
 
   useEffect(() => {
     if (!open) {
-      setEnvironment("local");
+      setMode("repository");
       setCloudRepo(null);
       setBranch("");
+      setUrl("");
+      setName("");
+      setConnected(null);
       setError(null);
     }
   }, [open]);
@@ -644,15 +667,46 @@ export function AddProjectDialog({
     .filter((r) => r.fullName.toLowerCase().includes(repoQuery.trim().toLowerCase()))
     .slice(0, 50);
 
-  /** Creates the cloud project. No folder is chosen, because there is none. */
-  /** A project with no folder anywhere: the shape the main flow starts in. */
-  const createConversation = async () => {
-    setBusy("conversation");
+  const fail = (e: unknown) =>
+    setError(e instanceof Error ? e.message : "Não foi possível adicionar o projeto.");
+
+  /**
+   * Opens the project, which is what makes it usable, and hands its workspace
+   * back to the page. A project with no folder gets a conversation workspace:
+   * real runs that read and reason, and touch no file.
+   */
+  const finish = async (projectId: string) => {
+    const opened = await api.project.open({ projectId });
+    onOpenChange(false);
+    onAdded(opened.workspaceId);
+  };
+
+  /** Connects a repository. Reads its metadata; never clones it. */
+  const connectRepository = async (repositoryUrl: string, suggestedName?: string) => {
+    if (!repositoryUrl.trim()) return;
+    setBusy("repository");
     setError(null);
     try {
-      const created = await api.workspace.createConversation({ name: name.trim() });
-      onAdded(created.id);
-      onOpenChange(false);
+      const result = await api.project.connectRepository({
+        url: repositoryUrl.trim(),
+        ...(suggestedName?.trim() ? { name: suggestedName.trim() } : {}),
+      });
+      setConnected(result);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** A project with nothing attached yet. The repository or folder comes later. */
+  const createEmpty = async () => {
+    if (!name.trim()) return;
+    setBusy("empty");
+    setError(null);
+    try {
+      const project = await api.project.create({ name: name.trim() });
+      await finish(project.id);
     } catch (e) {
       fail(e);
     } finally {
@@ -679,9 +733,6 @@ export function AddProjectDialog({
       setBusy(null);
     }
   };
-
-  const fail = (e: unknown) =>
-    setError(e instanceof Error ? e.message : "Não foi possível adicionar o projeto.");
 
   const pickFolder = async () => {
     setBusy("folder");
@@ -731,44 +782,117 @@ export function AddProjectDialog({
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle className="text-sm">Adicionar projeto</DialogTitle>
-          <DialogDescription className="text-xs">
-            {environment === "cloud"
-              ? "O trabalho acontece em um ambiente isolado na nuvem. Nada é baixado para este computador, e a execução continua com o aplicativo fechado."
-              : environment === "conversation"
-                ? "Para analisar, planejar, comparar e revisar. Não precisa de pasta, repositório nem servidor: os agentes conversam entre si e devolvem uma resposta."
-                : "O Orquestrador trabalha dentro de uma pasta do seu computador."}
-          </DialogDescription>
+          <DialogDescription className="text-xs">{MODE_BLURB[mode]}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
-          {/* Where the work runs. Asked first, because it changes everything
-              below it - a cloud project never asks for a folder. */}
-          <div className="grid grid-cols-3 gap-2" data-testid="environment-choice">
-            {(["conversation", "local", "cloud"] as const).map((choice) => (
+          {/* How the project comes into being. Asked first, because it decides
+              everything below it - a repository project never asks for a folder. */}
+          <div className="grid grid-cols-4 gap-2" data-testid="environment-choice">
+            {MODES.map((choice) => (
               <button
                 key={choice}
-                onClick={() => setEnvironment(choice)}
+                onClick={() => {
+                  setMode(choice);
+                  setConnected(null);
+                  setError(null);
+                }}
                 disabled={busy !== null}
                 className={cn(
-                  "flex items-center justify-center gap-1.5 rounded-lg border px-2 py-2 text-xs transition-colors",
-                  environment === choice
+                  "flex flex-col items-center justify-center gap-1 rounded-lg border px-2 py-2 text-[11px] transition-colors",
+                  mode === choice
                     ? "border-primary/50 bg-accent text-foreground"
                     : "border-border text-muted-foreground hover:border-primary/30",
                 )}
                 data-testid={`environment-${choice}`}
               >
-                {choice === "cloud" ? (
-                  <Cloud className="size-3.5" />
-                ) : choice === "conversation" ? (
-                  <MessageSquare className="size-3.5" />
-                ) : (
-                  <HardDrive className="size-3.5" />
-                )}
-                {choice === "cloud" ? "Nuvem" : choice === "conversation" ? "Conversa" : "Código"}
+                <ModeIcon mode={choice} />
+                {MODE_LABEL[choice]}
               </button>
             ))}
           </div>
 
-          {environment === "conversation" && (
+          {/* ---- Repository: connect, do not clone ---- */}
+          {mode === "repository" && !connected && (
+            <div className="space-y-3" data-testid="repository-project">
+              <label className="block space-y-1.5">
+                <span className="text-xs text-muted-foreground">Endereço do repositório</span>
+                <Input
+                  value={url}
+                  autoFocus
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="https://github.com/dono/nome"
+                  data-testid="repository-url"
+                />
+              </label>
+              <Button
+                className="w-full"
+                disabled={busy !== null || url.trim().length === 0}
+                onClick={() => void connectRepository(url)}
+                data-testid="repository-connect"
+              >
+                {busy === "repository" ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  "Conectar repositório"
+                )}
+              </Button>
+              <p className="text-[11px] text-muted-foreground">
+                O repositório <strong>não</strong> é clonado. O aplicativo lê os arquivos pela API
+                do GitHub — sem login para um repositório público — e usa a sua conexão do GitHub
+                para os privados. Para alterar código, associe uma pasta depois.
+              </p>
+            </div>
+          )}
+
+          {/* What GitHub actually said, before anything is claimed about it. */}
+          {mode === "repository" && connected && (
+            <div className="space-y-3 rounded-lg border border-border p-3" data-testid="repository-connected">
+              <div className="text-xs">
+                {connected.created
+                  ? `Projeto "${connected.project.name}" criado.`
+                  : `Este repositório já era o projeto "${connected.project.name}". Abri esse.`}
+              </div>
+              <dl className="space-y-1 text-[11px]">
+                <div className="flex gap-2">
+                  <dt className="w-28 shrink-0 text-muted-foreground">Repositório</dt>
+                  <dd className="font-mono">{connected.project.repositoryFullName ?? "não informado"}</dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="w-28 shrink-0 text-muted-foreground">Branch padrão</dt>
+                  <dd className="font-mono" data-testid="connected-default-branch">
+                    {connected.project.defaultBranch ?? "não informado"}
+                  </dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="w-28 shrink-0 text-muted-foreground">Visibilidade</dt>
+                  <dd>
+                    {connected.project.repositoryPrivate === null
+                      ? "não informado"
+                      : connected.project.repositoryPrivate
+                        ? "privado"
+                        : "público"}
+                  </dd>
+                </div>
+              </dl>
+              {connected.metadataError && (
+                <p className="text-[11px] text-attention" data-testid="metadata-error">
+                  O projeto foi criado, mas não consegui ler os dados do GitHub:{" "}
+                  {connected.metadataError} A branch padrão fica como “não informado” até uma
+                  próxima leitura — o aplicativo não vai supor que ela se chama <code>main</code>.
+                </p>
+              )}
+              <Button
+                className="w-full"
+                onClick={() => void finish(connected.project.id)}
+                data-testid="repository-open"
+              >
+                Abrir projeto
+              </Button>
+            </div>
+          )}
+
+          {/* ---- Empty: a name, and nothing else yet ---- */}
+          {mode === "empty" && (
             <div className="space-y-3" data-testid="conversation-project">
               <label className="block space-y-1.5">
                 <span className="text-xs text-muted-foreground">Nome do projeto</span>
@@ -781,51 +905,49 @@ export function AddProjectDialog({
                 />
               </label>
               <p className="text-xs text-muted-foreground">
-                Você pode transformar o resultado em código depois, em um projeto de código.
-                Nesta conversa nenhum arquivo é alterado, e o app não vai dizer que alterou.
+                Para analisar, planejar, comparar e revisar. Associe um repositório ou uma pasta
+                depois, pelo menu do projeto. Enquanto não houver pasta, nenhum arquivo é alterado
+                — e o aplicativo não vai dizer que alterou.
               </p>
               <Button
                 className="w-full"
                 disabled={busy !== null || name.trim().length === 0}
-                onClick={() => void createConversation()}
+                onClick={() => void createEmpty()}
                 data-testid="conversation-create"
               >
-                {busy === "conversation" ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  "Criar projeto de conversa"
-                )}
+                {busy === "empty" ? <Loader2 className="size-4 animate-spin" /> : "Criar projeto"}
               </Button>
             </div>
           )}
 
-          {environment === "cloud" && !cloudConnected && (
+          {mode === "cloud" && !cloudConnected && (
             <p className="rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
               Conecte este computador a um coordenador em <strong>Configurações → Nuvem</strong> antes
               de criar um projeto de nuvem.
             </p>
           )}
-          {environment === "cloud" && cloudConnected && !githubConnected && (
+          {mode === "cloud" && cloudConnected && !githubConnected && (
             <p className="rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
               Conecte o GitHub para escolher o repositório.
             </p>
           )}
 
-          {environment === "local" && (
-          <button
-            onClick={() => void pickFolder()}
-            disabled={busy !== null}
-            className={cn(
-              "flex w-full items-center gap-2 rounded-lg border border-dashed border-border px-3 py-2.5 text-sm text-muted-foreground transition-colors",
-              busy ? "opacity-60" : "hover:border-primary/40 hover:text-primary",
-            )}
-          >
-            {busy === "folder" && <Loader2 className="size-3.5 animate-spin" />}
-            Selecionar pasta local
-          </button>
+          {mode === "folder" && (
+            <button
+              onClick={() => void pickFolder()}
+              disabled={busy !== null}
+              className={cn(
+                "flex w-full items-center gap-2 rounded-lg border border-dashed border-border px-3 py-2.5 text-sm text-muted-foreground transition-colors",
+                busy ? "opacity-60" : "hover:border-primary/40 hover:text-primary",
+              )}
+              data-testid="pick-folder"
+            >
+              {busy === "folder" && <Loader2 className="size-3.5 animate-spin" />}
+              Selecionar pasta local
+            </button>
           )}
 
-          {githubConnected && (
+          {githubConnected && mode !== "empty" && (
             <div className="border-t border-border pt-4">
               <SectionLabel>Seus repositórios no GitHub</SectionLabel>
               <Input
@@ -847,7 +969,7 @@ export function AddProjectDialog({
                   <button
                     key={repo.fullName}
                     onClick={() => {
-                      if (environment === "cloud") {
+                      if (mode === "cloud") {
                         setCloudRepo(repo);
                         return;
                       }
@@ -856,7 +978,7 @@ export function AddProjectDialog({
                     }}
                     className={cn(
                       "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
-                      (environment === "cloud" ? cloudRepo?.fullName === repo.fullName : url === repo.cloneUrl) &&
+                      (mode === "cloud" ? cloudRepo?.fullName === repo.fullName : url === repo.cloneUrl) &&
                         "bg-accent",
                     )}
                     data-testid={`repo-${repo.fullName}`}
@@ -873,7 +995,7 @@ export function AddProjectDialog({
             </div>
           )}
 
-          {environment === "cloud" && cloudRepo && (
+          {mode === "cloud" && cloudRepo && (
             <div className="border-t border-border pt-4">
               <SectionLabel>Branch onde o trabalho começa</SectionLabel>
               {branchesError && <p className="mt-2 text-xs text-danger">{branchesError}</p>}
@@ -924,39 +1046,81 @@ export function AddProjectDialog({
             </div>
           )}
 
-          {environment === "local" && (
-          <div className="border-t border-border pt-4">
-            <SectionLabel>{githubConnected ? "Ou informe a URL" : "Ou clonar do GitHub"}</SectionLabel>
-            <div className="mt-2 space-y-2">
-              <Input
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://github.com/…"
-                data-testid="clone-url"
-              />
-              <Input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Nome da pasta (opcional)"
-              />
-              <Button
-                size="sm"
-                className="w-full"
-                disabled={!url.trim() || busy !== null}
-                onClick={() => void clone()}
-              >
-                {busy === "clone" && <Loader2 className="size-3.5 animate-spin" />} Escolher
-                pasta e clonar
-              </Button>
-            </div>
-          </div>
+          {mode === "repository" && !connected && githubConnected && url.trim() && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="w-full"
+              disabled={busy !== null}
+              onClick={() => void connectRepository(url, name)}
+            >
+              Conectar o repositório selecionado
+            </Button>
           )}
 
-          {error && <p className="text-xs text-danger">{error}</p>}
+          {mode === "folder" && (
+            <div className="border-t border-border pt-4">
+              <SectionLabel>{githubConnected ? "Ou informe a URL" : "Ou clonar do GitHub"}</SectionLabel>
+              <div className="mt-2 space-y-2">
+                <Input
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="https://github.com/…"
+                  data-testid="clone-url"
+                />
+                <Input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Nome da pasta (opcional)"
+                />
+                <Button
+                  size="sm"
+                  className="w-full"
+                  disabled={!url.trim() || busy !== null}
+                  onClick={() => void clone()}
+                >
+                  {busy === "clone" && <Loader2 className="size-3.5 animate-spin" />} Escolher
+                  pasta e clonar
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {error && <p className="text-xs text-danger" data-testid="add-project-error">{error}</p>}
         </div>
       </DialogContent>
     </Dialog>
   );
+}
+
+/** The four ways a project starts, in the order they are offered. */
+const MODES = ["repository", "folder", "empty", "cloud"] as const;
+type Mode = (typeof MODES)[number];
+type Busy = "folder" | "clone" | "cloud" | "empty" | "repository" | null;
+
+const MODE_LABEL: Record<Mode, string> = {
+  repository: "Repositório",
+  folder: "Pasta",
+  empty: "Vazio",
+  cloud: "Nuvem",
+};
+
+const MODE_BLURB: Record<Mode, string> = {
+  repository:
+    "O código fica no GitHub. O aplicativo lê os arquivos pela API oficial, sem clonar nada e sem login para repositórios públicos.",
+  folder:
+    "O Orquestrador trabalha dentro de uma pasta do seu computador. É o modo que altera arquivos de verdade.",
+  empty:
+    "Um projeto só com nome, para organizar conversas. Você associa o repositório ou a pasta quando quiser.",
+  cloud:
+    "O trabalho acontece em um ambiente isolado na nuvem. Nada é baixado para este computador, e a execução continua com o aplicativo fechado.",
+};
+
+function ModeIcon({ mode }: { mode: Mode }) {
+  if (mode === "cloud") return <Cloud className="size-3.5" />;
+  if (mode === "repository") return <Github className="size-3.5" />;
+  if (mode === "empty") return <MessageSquare className="size-3.5" />;
+  return <HardDrive className="size-3.5" />;
 }
 
 /** The stages after which a sign-in attempt is over, one way or another. */

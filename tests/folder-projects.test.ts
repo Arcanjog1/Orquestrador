@@ -450,17 +450,34 @@ test('a conversation project is never matched against a folder', async () => {
   const fixture = createDesktopFixture();
   const f = folder();
   try {
-    value(await fixture.router.handle('workspace.createConversation', { name: 'Só conversa' }));
+    const conversation = value<{ id: string }>(
+      await fixture.router.handle('workspace.createConversation', { name: 'Só conversa' }),
+    );
     const report = fixture.services.workspaces.reconcileFolders(fixture.services.projects);
 
-    // It owns no folder, so it gets no identity and no folder project.
-    assert.equal(report.projectsCreated, 0);
+    // It *does* get a project: with "Pastas" gone from the sidebar, a
+    // workspace with no project would be invisible, and invisible reads as
+    // deleted however carefully the rows are preserved.
+    assert.equal(report.projectsCreated, 1);
     assert.deepEqual(report.duplicateFolders, []);
 
-    // And opening a real folder does not attach itself to it.
+    // What it must never get is a folder identity. This is the assertion the
+    // test is really for: an empty key would let a project that owns no
+    // directory be matched against a real one.
+    const record = fixture.services.database.workspaces.require(conversation.id);
+    assert.equal(record.path_key, '');
+
+    // And opening a real folder does not attach itself to it: a second
+    // workspace, a second project, no merging.
     const opened = await open(fixture, f.dir);
     assert.equal(opened.created, true);
     assert.equal(value<unknown[]>(await fixture.router.handle('workspace.list', null)).length, 2);
+    const projects = fixture.services.projects.list();
+    assert.equal(projects.length, 2);
+    assert.notEqual(
+      projects.find((p) => p.workspaceId === conversation.id)?.id,
+      projects.find((p) => p.workspaceId === opened.workspace.id)?.id,
+    );
   } finally {
     await fixture.cleanup();
     f.cleanup();

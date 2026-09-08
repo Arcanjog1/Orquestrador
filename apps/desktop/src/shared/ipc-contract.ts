@@ -98,6 +98,15 @@ export const REQUEST_CHANNELS = [
   'project.rename',
   'project.setWorkspace',
   'project.remove',
+  'project.open',
+  'project.connectRepository',
+  'project.setRepository',
+  'project.setArchived',
+  'project.removalPlan',
+  'project.listContext',
+  'project.addContext',
+  'project.updateContext',
+  'project.removeContext',
 
   'chat.listSessions',
   'chat.listAllSessions',
@@ -257,7 +266,8 @@ export interface RepositoryAnalysisView {
   readonly description: string | null;
   readonly primaryLanguage: string | null;
   readonly isPrivate: boolean;
-  readonly defaultBranch: string;
+  /** Null when GitHub reported none. The interface says so; it never shows `main`. */
+  readonly defaultBranch: string | null;
   readonly ref: string;
   readonly commitSha: string;
   readonly fileCount: number;
@@ -475,6 +485,74 @@ export interface ProjectView {
   readonly sessionCount: number;
   readonly createdAt: string;
   readonly updatedAt: string;
+
+  /**
+   * How the project came to exist, which is also what the sidebar badges it
+   * with: a folder on this computer, a repository on GitHub, or neither yet.
+   * A project can be both - `source` says which one it started as, and
+   * `repositoryFullName` and `localPath` say what it actually has.
+   */
+  readonly source: 'folder' | 'repository' | 'empty';
+  /** Non-null while archived: hidden from the main list, restorable, never deleted. */
+  readonly archivedAt: string | null;
+  /** The folder runs execute in, empty when the project has none. */
+  readonly localPath: string;
+  /**
+   * Where a run of this project executes. Read it before offering anything
+   * that assumes a folder: a `conversation` project has none anywhere, and a
+   * `cloud` one has none on this computer.
+   */
+  readonly environment: 'local' | 'cloud' | 'conversation' | null;
+  /** `owner/name`, in the casing the person supplied. Null when not a repository. */
+  readonly repositoryFullName: string | null;
+  readonly repositoryUrl: string | null;
+  /** Null when unknown - the repository was never read, or was read anonymously. */
+  readonly repositoryPrivate: boolean | null;
+  /**
+   * The default branch **GitHub reported**. Null means it has not been read,
+   * and the interface must say so rather than showing `main`: this repository's
+   * own default branch is not called main, and guessing it was is how a run
+   * ends up checking out a branch that does not exist.
+   */
+  readonly defaultBranch: string | null;
+  /** The branch and commit the last analysis actually read. */
+  readonly analysedBranch: string | null;
+  readonly analysedCommit: string | null;
+  readonly analysedAt: string | null;
+}
+
+/** One entry of a project's shared context, as the interface renders it. */
+export interface ProjectContextView {
+  readonly id: string;
+  readonly projectId: string;
+  readonly kind: ProjectContextKind;
+  readonly title: string;
+  readonly body: string;
+  /** The run, commit or file this came from. Null when a person wrote it. */
+  readonly sourceRef: string | null;
+  readonly pinned: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export type ProjectContextKind =
+  | 'objective'
+  | 'decision'
+  | 'architecture'
+  | 'rule'
+  | 'state'
+  | 'evidence';
+
+/** What removing a project would do, told before it is done. */
+export interface ProjectRemovalPlanView {
+  readonly projectId: string;
+  readonly projectName: string;
+  /** Conversations that would move to "Sem projeto" - none is deleted. */
+  readonly sessionsAffected: number;
+  /** The folder that stays on disk. Empty when the project has none. */
+  readonly localPath: string;
+  /** The repository that stays on GitHub. Null when the project has none. */
+  readonly repositoryFullName: string | null;
 }
 
 export interface ChatSessionView {
@@ -1168,7 +1246,10 @@ export interface IpcMap {
   };
 
   'project.list': { request: void; response: readonly ProjectView[] };
-  'project.create': { request: { name: string; workspaceId?: string | null }; response: ProjectView };
+  'project.create': {
+    request: { name: string; workspaceId?: string | null; repositoryUrl?: string | null };
+    response: ProjectView;
+  };
   'project.rename': { request: { projectId: string; name: string }; response: ProjectView };
   'project.setWorkspace': { request: { projectId: string; workspaceId: string | null }; response: ProjectView };
   /**
@@ -1176,6 +1257,62 @@ export interface IpcMap {
    * projeto"; no workspace, repository or file is touched.
    */
   'project.remove': { request: { projectId: string }; response: { removed: boolean; sessionsMoved: number } };
+
+  /**
+   * Connects a GitHub repository as a project, opening the one that already
+   * has it rather than making a second.
+   *
+   * `created` is false when an existing project was opened, which is what the
+   * interface needs to say "abri o projeto que já existia" instead of
+   * pretending it made something.
+   *
+   * The metadata is fetched after the project exists, so a network failure
+   * costs the branch name and not the project: `metadataError` carries what
+   * went wrong, and every metadata field stays null.
+   */
+  /**
+   * Opens a project: hands back the workspace its runs execute in, making one
+   * when it has none. Never clones and never writes to a folder.
+   */
+  'project.open': {
+    request: { projectId: string };
+    response: {
+      readonly project: ProjectView;
+      readonly workspaceId: string;
+      /** True when this call had to create the workspace. */
+      readonly workspaceCreated: boolean;
+    };
+  };
+  'project.connectRepository': {
+    request: { url: string; name?: string };
+    response: {
+      readonly project: ProjectView;
+      readonly created: boolean;
+      readonly metadataError: string | null;
+    };
+  };
+  'project.setRepository': { request: { projectId: string; url: string | null }; response: ProjectView };
+  /** Puts a project away, or brings it back. Nothing is deleted either way. */
+  'project.setArchived': { request: { projectId: string; archived: boolean }; response: ProjectView };
+  /** What removing would do, so the confirmation can say it exactly. */
+  'project.removalPlan': { request: { projectId: string }; response: ProjectRemovalPlanView };
+
+  'project.listContext': { request: { projectId: string }; response: readonly ProjectContextView[] };
+  'project.addContext': {
+    request: {
+      projectId: string;
+      kind: ProjectContextKind;
+      title: string;
+      body: string;
+      pinned?: boolean;
+    };
+    response: ProjectContextView;
+  };
+  'project.updateContext': {
+    request: { entryId: string; title?: string; body?: string; pinned?: boolean };
+    response: ProjectContextView;
+  };
+  'project.removeContext': { request: { entryId: string }; response: { removed: boolean } };
   'chat.renameSession': { request: { sessionId: string; title: string }; response: ChatSessionView };
   /** Hides or brings back a conversation. Nothing is deleted either way. */
   'chat.archiveSession': {

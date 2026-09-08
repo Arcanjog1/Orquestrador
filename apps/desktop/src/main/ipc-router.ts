@@ -379,6 +379,64 @@ export class IpcRouter {
       return s.projects.setWorkspace(input.projectId, input.workspaceId);
     });
     this.handlers.set('project.remove', (p) => s.projects.remove((p as { projectId: string }).projectId));
+    this.handlers.set('project.open', (p) => {
+      const { projectId } = p as IpcMap['project.open']['request'];
+      const opened = s.workspaces.ensureWorkspaceForProject(projectId, s.projects);
+      const project = s.projects.find(projectId);
+      if (!project) throw new Error('Este projeto não existe mais.');
+      return { project, workspaceId: opened.workspace.id, workspaceCreated: opened.created };
+    });
+    this.handlers.set('project.removalPlan', (p) =>
+      s.projects.removalPlan((p as { projectId: string }).projectId),
+    );
+    this.handlers.set('project.setArchived', (p) => {
+      const input = p as IpcMap['project.setArchived']['request'];
+      return s.projects.setArchived(input.projectId, input.archived);
+    });
+    this.handlers.set('project.setRepository', (p) => {
+      const input = p as IpcMap['project.setRepository']['request'];
+      return s.projects.setRepository(input.projectId, input.url);
+    });
+    // Two steps on purpose: the project exists after the first, so a network
+    // failure costs the branch name and not the project the person asked for.
+    this.handlers.set('project.connectRepository', async (p) => {
+      const input = p as IpcMap['project.connectRepository']['request'];
+      const opened = s.projects.openRepository(
+        input.name === undefined ? { url: input.url } : { url: input.url, name: input.name },
+      );
+      let project = opened.project;
+      let metadataError: string | null = null;
+      try {
+        const metadata = await s.repositoryAnalysis.metadata(input.url);
+        project = s.projects.recordRepositoryMetadata(opened.project.id, {
+          fullName: metadata.fullName,
+          isPrivate: metadata.isPrivate,
+          defaultBranch: metadata.defaultBranch,
+        });
+      } catch (error) {
+        // The project stays. What is missing is the metadata, and the
+        // interface says which - it does not pretend the branch is `main`.
+        metadataError = error instanceof Error ? error.message : String(error);
+      }
+      return { project, created: opened.created, metadataError };
+    });
+    this.handlers.set('project.listContext', (p) =>
+      s.projects.listContext((p as { projectId: string }).projectId),
+    );
+    this.handlers.set('project.addContext', (p) =>
+      s.projects.addContext(p as IpcMap['project.addContext']['request']),
+    );
+    this.handlers.set('project.updateContext', (p) => {
+      const input = p as IpcMap['project.updateContext']['request'];
+      return s.projects.updateContext(input.entryId, {
+        ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.body !== undefined ? { body: input.body } : {}),
+        ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+      });
+    });
+    this.handlers.set('project.removeContext', (p) =>
+      s.projects.removeContext((p as { entryId: string }).entryId),
+    );
     this.handlers.set('chat.listMessages', (p) =>
       s.chat.listMessages((p as { sessionId: string }).sessionId),
     );

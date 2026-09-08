@@ -47,6 +47,7 @@ import type {
   WorkspaceChangesView,
   ChatSessionView,
   ProjectView,
+  ProjectRemovalPlanView,
   RunActivityEvent,
   AgentMessageEvent,
   RunProgressEvent,
@@ -119,7 +120,10 @@ export function WorkspacePage({
   const [sessions, setSessions] = useState<readonly ChatSessionView[]>([]);
   const [projects, setProjects] = useState<readonly ProjectView[]>([]);
   const [projectDialog, setProjectDialog] = useState<{ project: ProjectView | null } | null>(null);
-  const [removingProject, setRemovingProject] = useState<ProjectView | null>(null);
+  // What removing would do, as the main process reports it - not as the
+  // renderer guesses it. The dialog can then say the real counts and the real
+  // paths that stay untouched.
+  const [removalPlan, setRemovalPlan] = useState<ProjectRemovalPlanView | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   // A conversation to open once the page has switched to its folder.
   const pendingSession = useRef<string | null>(null);
@@ -136,6 +140,20 @@ export function WorkspacePage({
   const bottom = useRef<HTMLDivElement>(null);
 
   const fail = useCallback((error: unknown) => toast(messageOf(error)), []);
+
+  /**
+   * The project the sidebar highlights.
+   *
+   * The open conversation's project when there is one, otherwise the project
+   * bound to the folder on screen. Reading it from the conversation first is
+   * what makes the highlight follow what the person is actually looking at.
+   */
+  const activeProjectId = useMemo(() => {
+    const open = sessions.find((s) => s.id === sessionId);
+    if (open?.projectId) return open.projectId;
+    if (!workspace) return null;
+    return projects.find((p) => p.workspaceId === workspace.id)?.id ?? null;
+  }, [sessions, sessionId, projects, workspace]);
 
   // -- Sessions ------------------------------------------------------------
 
@@ -186,6 +204,16 @@ export function WorkspacePage({
         fail(error);
       }
     },
+    // The conversation's latest run, opened where every other detail lives.
+    // A conversation with no run has the item disabled rather than opening an
+    // empty dialog that says nothing.
+    openHistory: (session: ChatSessionView) => {
+      if (!session.lastRun) {
+        toast("Esta conversa ainda não iniciou nenhuma execução.");
+        return;
+      }
+      setDetailRunId(session.lastRun.id);
+    },
   };
 
   /** Opens a conversation, switching to its folder first when it lives elsewhere. */
@@ -202,16 +230,62 @@ export function WorkspacePage({
     setStages([]);
   };
 
-  async function removeProject() {
-    if (!removingProject) return;
+  /**
+   * Opens a project: switches to the folder its runs execute in, and shows
+   * its most recent conversation when it has one.
+   *
+   * `project.open` makes the workspace if the project has none, which is what
+   * a repository connected without a local folder needs. Nothing is cloned.
+   */
+  async function openProject(project: ProjectView) {
     try {
-      const outcome = await api.project.remove({ projectId: removingProject.id });
+      const opened = await api.project.open({ projectId: project.id });
+      const newest = sessions.find((s) => s.projectId === project.id) ?? null;
+      if (opened.workspaceId !== workspace?.id) {
+        if (newest) pendingSession.current = newest.id;
+        onSelectWorkspace(opened.workspaceId);
+        return;
+      }
+      if (newest) openSession(newest.id);
+      await loadSessions();
+    } catch (error) {
+      fail(error);
+    }
+  }
+
+  async function archiveProject(project: ProjectView, archived: boolean) {
+    try {
+      await api.project.setArchived({ projectId: project.id, archived });
+      toast(
+        archived
+          ? `"${project.name}" arquivado. Nada foi apagado — restaure pelo mesmo menu.`
+          : `"${project.name}" restaurado`,
+      );
+      await loadSessions();
+    } catch (error) {
+      fail(error);
+    }
+  }
+
+  /** Asks the main process exactly what removing would do, then confirms it. */
+  async function askToRemoveProject(project: ProjectView) {
+    try {
+      setRemovalPlan(await api.project.removalPlan({ projectId: project.id }));
+    } catch (error) {
+      fail(error);
+    }
+  }
+
+  async function removeProject() {
+    if (!removalPlan) return;
+    try {
+      const outcome = await api.project.remove({ projectId: removalPlan.projectId });
       toast(
         outcome.sessionsMoved > 0
-          ? `Projeto excluído; ${outcome.sessionsMoved} conversa(s) foram para Sem projeto`
-          : "Projeto excluído",
+          ? `Projeto removido da lista; ${outcome.sessionsMoved} conversa(s) foram para "Sem projeto"`
+          : "Projeto removido da lista",
       );
-      setRemovingProject(null);
+      setRemovalPlan(null);
       await loadSessions();
     } catch (error) {
       fail(error);
@@ -630,7 +704,13 @@ export function WorkspacePage({
     async (project: ProjectView | null = null) => {
       if (!workspace) return;
       try {
-        const workspaceId = project?.workspaceId ?? workspace.id;
+        // A project connected from a repository has no workspace until it is
+        // opened. Asking for it here is what lets "nova conversa" work on a
+        // project the person has never opened, instead of quietly putting the
+        // conversation in whichever folder happens to be on screen.
+        const workspaceId = project
+          ? (await api.project.open({ projectId: project.id })).workspaceId
+          : workspace.id;
         const created = await api.chat.createSession({
           workspaceId,
           title: "Nova tarefa",
@@ -755,16 +835,16 @@ export function WorkspacePage({
         onNewTask={() => void newTask()}
         sessions={sessions}
         projects={projects}
-        workspaces={workspaces}
-        activeWorkspaceId={workspace.id}
+        activeProjectId={activeProjectId}
         activeSessionId={sessionId}
         onOpenSession={openSession}
-        onOpenWorkspace={onSelectWorkspace}
         projectActions={{
           create: () => setProjectDialog({ project: null }),
+          open: (project) => void openProject(project),
           rename: (project) => setProjectDialog({ project }),
-          linkWorkspace: (project) => setProjectDialog({ project }),
-          remove: (project) => setRemovingProject(project),
+          settings: (project) => setProjectDialog({ project }),
+          archive: (project, archived) => void archiveProject(project, archived),
+          remove: (project) => void askToRemoveProject(project),
           newSession: (project) => void newTask(project),
         }}
         accountName={
@@ -979,15 +1059,11 @@ export function WorkspacePage({
         }}
       />
       <ConfirmDialog
-        open={removingProject !== null}
-        onOpenChange={(v) => !v && setRemovingProject(null)}
-        title="Excluir projeto?"
-        description={
-          removingProject
-            ? `"${removingProject.name}" sai da lista. Suas ${removingProject.sessionCount} conversa(s) vão para "Sem projeto" e continuam com suas mensagens e execuções. Nenhuma pasta, repositório ou arquivo é tocado.`
-            : ""
-        }
-        confirmLabel="Excluir projeto"
+        open={removalPlan !== null}
+        onOpenChange={(v) => !v && setRemovalPlan(null)}
+        title="Remover projeto da lista?"
+        description={removalPlan ? describeRemoval(removalPlan) : ""}
+        confirmLabel="Remover da lista"
         onConfirm={() => void removeProject()}
       />
       <TeamDialog
@@ -1118,4 +1194,28 @@ function EmptyState({ onSubmit }: { onSubmit: (text: string) => void }) {
       </div>
     </div>
   );
+}
+
+/**
+ * The removal confirmation, in the words of what actually happens.
+ *
+ * Every clause here is a fact from the main process, and the last two
+ * sentences are the ones that matter: an act of organisation must never read
+ * as if it might delete somebody's code, and the only way to make that clear
+ * is to name the folder and the repository that stay exactly where they are.
+ */
+function describeRemoval(plan: ProjectRemovalPlanView): string {
+  const lines = [`"${plan.projectName}" sai da lista de projetos.`];
+  lines.push(
+    plan.sessionsAffected > 0
+      ? `Suas ${plan.sessionsAffected} conversa(s) vão para "Sem projeto" e continuam com todas as mensagens e execuções.`
+      : "Ele não tem conversas.",
+  );
+  if (plan.localPath) lines.push(`A pasta ${plan.localPath} continua no disco, intacta.`);
+  if (plan.repositoryFullName) {
+    lines.push(`O repositório ${plan.repositoryFullName} continua no GitHub, intacto.`);
+  }
+  lines.push("Nenhum arquivo é apagado e nenhum comando do git é executado.");
+  lines.push('Se quiser poder voltar atrás, use "Arquivar" no lugar.');
+  return lines.join(" ");
 }

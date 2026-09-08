@@ -768,6 +768,34 @@ export interface ProjectRecord extends SqlRow {
   metadata: string | null;
   created_at: string;
   updated_at: string;
+  /** Set while the project is archived: hidden from the list, never deleted. */
+  archived_at: string | null;
+  /** Canonical repository identity (see src/github/repository-identity.ts); '' for none. */
+  repository_key: string;
+  repository_url: string | null;
+  /** `owner/name` in the casing the person supplied. */
+  repository_full_name: string | null;
+  repository_private: number | null;
+  /** The branch GitHub reported. NULL means unknown - never a guessed 'main'. */
+  default_branch: string | null;
+  analysed_branch: string | null;
+  analysed_commit: string | null;
+  analysed_at: string | null;
+  /** 'folder' | 'repository' | 'empty'. */
+  source: string;
+}
+
+/** One entry of a project's shared context. */
+export interface ProjectContextRecord extends SqlRow {
+  id: string;
+  project_id: string;
+  kind: string;
+  title: string;
+  body: string;
+  source_ref: string | null;
+  pinned: number;
+  created_at: string;
+  updated_at: string;
 }
 
 /**
@@ -776,10 +804,26 @@ export interface ProjectRecord extends SqlRow {
  * at none; a conversation belongs to at most one project.
  */
 export class ProjectRepository extends Repository {
-  create(input: { id: string; name: string; workspaceId?: string | null; metadata?: unknown }): ProjectRecord {
+  create(input: {
+    id: string;
+    name: string;
+    workspaceId?: string | null;
+    metadata?: unknown;
+    /** '' when the project is not a repository. Never null: the column is NOT NULL. */
+    repositoryKey?: string;
+    repositoryUrl?: string | null;
+    repositoryFullName?: string | null;
+    repositoryPrivate?: boolean | null;
+    defaultBranch?: string | null;
+    source?: 'folder' | 'repository' | 'empty';
+  }): ProjectRecord {
     const timestamp = now();
     this.db.run(
-      'INSERT INTO projects (id, name, workspace_id, metadata, created_at, updated_at) VALUES (?,?,?,?,?,?)',
+      `INSERT INTO projects (
+         id, name, workspace_id, metadata, created_at, updated_at,
+         repository_key, repository_url, repository_full_name, repository_private,
+         default_branch, source
+       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         input.id,
         input.name,
@@ -787,13 +831,119 @@ export class ProjectRepository extends Repository {
         input.metadata === undefined ? null : JSON.stringify(input.metadata),
         timestamp,
         timestamp,
+        input.repositoryKey ?? '',
+        input.repositoryUrl ?? null,
+        input.repositoryFullName ?? null,
+        input.repositoryPrivate === undefined || input.repositoryPrivate === null
+          ? null
+          : input.repositoryPrivate
+            ? 1
+            : 0,
+        input.defaultBranch ?? null,
+        input.source ?? (input.workspaceId ? 'folder' : 'empty'),
       ] as SqlValue[],
     );
     return this.require(input.id);
   }
 
+  /**
+   * Every project, archived ones last.
+   *
+   * Archived projects are returned, not hidden: the caller decides whether to
+   * show them, and a list that silently omitted them would make "where did my
+   * project go?" a question with no answer in the data.
+   */
   list(): ProjectRecord[] {
-    return this.db.all<ProjectRecord>('SELECT * FROM projects ORDER BY updated_at DESC, name');
+    return this.db.all<ProjectRecord>(
+      `SELECT * FROM projects
+        ORDER BY CASE WHEN archived_at IS NULL THEN 0 ELSE 1 END, updated_at DESC, name`,
+    );
+  }
+
+  /**
+   * The project for a repository, if one exists.
+   *
+   * The oldest wins, exactly as with a workspace: where an installation
+   * already holds two projects for one repository, the first one made is the
+   * one whose conversations the person has been using.
+   */
+  findByRepositoryKey(key: string): ProjectRecord | undefined {
+    if (key.length === 0) return undefined;
+    return this.db.get<ProjectRecord>(
+      'SELECT * FROM projects WHERE repository_key = ? ORDER BY created_at ASC, rowid ASC LIMIT 1',
+      [key],
+    );
+  }
+
+  /** Repository keys held by more than one project, so they can be shown rather than merged. */
+  duplicateRepositories(): Array<{ repositoryKey: string; projectIds: string[] }> {
+    const rows = this.db.all<{ repository_key: string; ids: string }>(
+      `SELECT repository_key, GROUP_CONCAT(id) AS ids
+         FROM projects
+        WHERE repository_key <> ''
+        GROUP BY repository_key
+       HAVING COUNT(*) > 1`,
+    );
+    return rows.map((row) => ({
+      repositoryKey: row.repository_key,
+      projectIds: String(row.ids).split(','),
+    }));
+  }
+
+  /** Associates (or clears) the repository. Never touches the repository itself. */
+  setRepository(
+    id: string,
+    repository: {
+      key: string;
+      url: string | null;
+      fullName: string | null;
+      isPrivate: boolean | null;
+      defaultBranch: string | null;
+    },
+  ): ProjectRecord {
+    const current = this.require(id);
+    this.db.run(
+      `UPDATE projects
+          SET repository_key = ?, repository_url = ?, repository_full_name = ?,
+              repository_private = ?, default_branch = ?, source = ?, updated_at = ?
+        WHERE id = ?`,
+      [
+        repository.key,
+        repository.url,
+        repository.fullName,
+        repository.isPrivate === null ? null : repository.isPrivate ? 1 : 0,
+        repository.defaultBranch,
+        // Connecting a repository to a folder project does not stop it being a
+        // folder project: the folder is still where runs execute.
+        repository.key.length > 0 && current.workspace_id === null ? 'repository' : current.source,
+        now(),
+        id,
+      ] as SqlValue[],
+    );
+    return this.require(id);
+  }
+
+  /** Records what was actually read: a branch and the commit it was at. */
+  setAnalysis(id: string, analysis: { branch: string | null; commit: string | null }): ProjectRecord {
+    this.db.run(
+      'UPDATE projects SET analysed_branch = ?, analysed_commit = ?, analysed_at = ?, updated_at = ? WHERE id = ?',
+      [analysis.branch, analysis.commit, now(), now(), id] as SqlValue[],
+    );
+    return this.require(id);
+  }
+
+  /**
+   * Archives or restores. Nothing is deleted either way, and the
+   * conversations keep their project: restoring puts everything back exactly
+   * as it was, which is the whole reason archiving exists next to removing.
+   */
+  setArchived(id: string, archived: boolean): ProjectRecord {
+    this.db.run('UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ?', [
+      archived ? now() : null,
+      now(),
+      id,
+    ] as SqlValue[]);
+    return this.require(id);
   }
 
   find(id: string): ProjectRecord | undefined {
@@ -851,6 +1001,113 @@ export class ProjectRepository extends Repository {
     const sessionsMoved = this.countSessions(id, true);
     const result = this.db.run('DELETE FROM projects WHERE id = ?', [id]);
     return { removed: Number(result.changes) > 0, sessionsMoved };
+  }
+}
+
+/**
+ * The shared context of a project: what the agents are told, and where it came from.
+ *
+ * Deliberately many small typed entries rather than one document, because the
+ * requirement is to send a *selection* to an agent - "Não despeje todas as
+ * conversas no prompt de cada agente" - and a selection needs things to select
+ * between. Each entry carries a `source_ref` so a claim can be traced to the
+ * run, commit or file it came from.
+ *
+ * Nothing here is evidence. An entry a model wrote is a claim like any other;
+ * the DoneGate never reads this table, and a summary in it can never stand in
+ * for a verified file change.
+ */
+export class ProjectContextRepository extends Repository {
+  create(input: {
+    id: string;
+    projectId: string;
+    kind: string;
+    title: string;
+    body: string;
+    sourceRef?: string | null;
+    pinned?: boolean;
+  }): ProjectContextRecord {
+    const timestamp = now();
+    this.db.run(
+      `INSERT INTO project_context (id, project_id, kind, title, body, source_ref, pinned, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [
+        input.id,
+        input.projectId,
+        input.kind,
+        input.title,
+        input.body,
+        input.sourceRef ?? null,
+        input.pinned ? 1 : 0,
+        timestamp,
+        timestamp,
+      ] as SqlValue[],
+    );
+    return this.require(input.id);
+  }
+
+  find(id: string): ProjectContextRecord | undefined {
+    return this.db.get<ProjectContextRecord>('SELECT * FROM project_context WHERE id = ?', [id]);
+  }
+
+  require(id: string): ProjectContextRecord {
+    const row = this.find(id);
+    if (!row) throw new Error(`Project context entry ${id} does not exist.`);
+    return row;
+  }
+
+  /** Every entry of a project, pinned first, then most recently touched. */
+  list(projectId: string): ProjectContextRecord[] {
+    return this.db.all<ProjectContextRecord>(
+      'SELECT * FROM project_context WHERE project_id = ? ORDER BY pinned DESC, updated_at DESC',
+      [projectId],
+    );
+  }
+
+  update(
+    id: string,
+    input: { title?: string; body?: string; sourceRef?: string | null; pinned?: boolean },
+  ): ProjectContextRecord {
+    const current = this.require(id);
+    this.db.run(
+      'UPDATE project_context SET title = ?, body = ?, source_ref = ?, pinned = ?, updated_at = ? WHERE id = ?',
+      [
+        input.title ?? current.title,
+        input.body ?? current.body,
+        input.sourceRef === undefined ? current.source_ref : input.sourceRef,
+        input.pinned === undefined ? current.pinned : input.pinned ? 1 : 0,
+        now(),
+        id,
+      ] as SqlValue[],
+    );
+    return this.require(id);
+  }
+
+  remove(id: string): boolean {
+    return Number(this.db.run('DELETE FROM project_context WHERE id = ?', [id]).changes) > 0;
+  }
+
+  /**
+   * Replaces the single entry of a kind that is written by the application
+   * rather than by a person - the current state, say - keyed by title so a
+   * run does not accumulate a hundred near-identical rows.
+   */
+  upsertByTitle(input: {
+    id: string;
+    projectId: string;
+    kind: string;
+    title: string;
+    body: string;
+    sourceRef?: string | null;
+  }): ProjectContextRecord {
+    const existing = this.db.get<ProjectContextRecord>(
+      'SELECT * FROM project_context WHERE project_id = ? AND kind = ? AND title = ? LIMIT 1',
+      [input.projectId, input.kind, input.title],
+    );
+    if (existing) {
+      return this.update(existing.id, { body: input.body, sourceRef: input.sourceRef ?? null });
+    }
+    return this.create(input);
   }
 }
 

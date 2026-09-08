@@ -30,6 +30,16 @@ export type Validator<T> = (value: unknown, path: string) => T;
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
+/** The kinds of shared-context entry a project can hold. Mirrors `ProjectContextKind`. */
+const PROJECT_CONTEXT_KINDS = [
+  'objective',
+  'decision',
+  'architecture',
+  'rule',
+  'state',
+  'evidence',
+] as const;
+
 function fail(path: string, expectation: string): never {
   throw new IpcValidationError(`${path} ${expectation}`);
 }
@@ -535,12 +545,48 @@ export const REQUEST_VALIDATORS: {
   ),
   'project.list': noArgs,
   'project.create': obj(
-    { name: str({ min: 1, max: 200 }), workspaceId: nullable(id) },
-    { optional: ['workspaceId'] },
+    {
+      name: str({ min: 1, max: 200 }),
+      workspaceId: nullable(id),
+      repositoryUrl: nullable(str({ min: 1, max: 400 })),
+    },
+    { optional: ['workspaceId', 'repositoryUrl'] },
   ),
   'project.rename': obj({ projectId: id, name: str({ min: 1, max: 200 }) }),
   'project.setWorkspace': obj({ projectId: id, workspaceId: nullable(id) }),
   'project.remove': obj({ projectId: id }),
+  // The URL is validated for shape here and for meaning in the service: this
+  // is a length and character bound, and `repositoryKey` decides whether it
+  // actually names a repository.
+  'project.connectRepository': obj(
+    { url: str({ min: 1, max: 400 }), name: str({ min: 1, max: 200 }) },
+    { optional: ['name'] },
+  ),
+  'project.setRepository': obj({ projectId: id, url: nullable(str({ min: 1, max: 400 })) }),
+  'project.setArchived': obj({ projectId: id, archived: bool }),
+  'project.removalPlan': obj({ projectId: id }),
+  'project.open': obj({ projectId: id }),
+  'project.listContext': obj({ projectId: id }),
+  'project.addContext': obj(
+    {
+      projectId: id,
+      kind: oneOf(PROJECT_CONTEXT_KINDS),
+      title: str({ min: 1, max: 200 }),
+      body: str({ min: 1, max: 8000 }),
+      pinned: bool,
+    },
+    { optional: ['pinned'] },
+  ),
+  'project.updateContext': obj(
+    {
+      entryId: id,
+      title: str({ min: 1, max: 200 }),
+      body: str({ min: 1, max: 8000 }),
+      pinned: bool,
+    },
+    { optional: ['title', 'body', 'pinned'] },
+  ),
+  'project.removeContext': obj({ entryId: id }),
   'chat.renameSession': obj({ sessionId: id, title: sessionTitle }),
   'chat.archiveSession': obj({ sessionId: id, archived: bool }),
   'chat.deleteSession': obj({ sessionId: id }),

@@ -730,6 +730,100 @@ ALTER TABLE agent_invocations ADD COLUMN current_tool TEXT;
 ALTER TABLE agent_invocations ADD COLUMN working_directory TEXT;
 `,
   },
+  {
+    id: 14,
+    name: 'project-as-the-entity',
+    sql: `
+-- The project becomes the one thing a person organises by.
+--
+-- Until now the interface had three lists - Recentes, Projetos and Pastas -
+-- and the same folder could appear in two of them, because the folder lived
+-- in \`workspaces\` and the organisation lived in \`projects\` with nothing
+-- joining them on screen. Nothing below moves data between those tables:
+-- \`workspaces\` stays exactly what it is, the place a run executes, with its
+-- team, its budget and its verifications. What the project gains is the
+-- identity a person recognises it by - a repository, a folder, or neither.
+--
+-- Every column is added, none is dropped or rewritten, and every one has a
+-- default that is what an existing row already means. An installation that
+-- upgrades and never connects a repository is unchanged in every observable
+-- way.
+
+-- Archiving. Hiding a project must be reversible, and it must be a different
+-- act from removing it: 'remove' forgets the organisation, 'archive' puts it
+-- away with its conversations intact and offers it back.
+ALTER TABLE projects ADD COLUMN archived_at TEXT;
+
+-- The repository this project is, when it is one.
+--
+-- \`repository_key\` is the canonical identity: host + owner + name, folded to
+-- lower case (see src/github/repository-identity.ts). It is what stops the
+-- same repository from becoming two projects when it is pasted as an https
+-- URL one day and as owner/name the next. Empty means the project is not a
+-- repository, and an empty key deliberately matches nothing.
+--
+-- NOT unique, for the same reason \`workspaces.path_key\` is not: an
+-- installation may already hold two projects for one repository, and a unique
+-- index would make the migration fail on exactly the person who needs it.
+-- Uniqueness is enforced where the decision is made - when a repository is
+-- connected - and anything already duplicated is shown, never merged behind
+-- somebody's back.
+ALTER TABLE projects ADD COLUMN repository_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE projects ADD COLUMN repository_url TEXT;
+ALTER TABLE projects ADD COLUMN repository_full_name TEXT;
+ALTER TABLE projects ADD COLUMN repository_private INTEGER;
+
+-- The real default branch, as GitHub reported it. Never a guess, and never
+-- the string 'main' written by this application: a repository whose default
+-- branch has not been read keeps NULL, and the interface says it does not
+-- know rather than showing a name that may not exist.
+ALTER TABLE projects ADD COLUMN default_branch TEXT;
+
+-- What was actually read, the last time the repository was analysed. A branch
+-- and a commit, so "the project was analysed" is a claim with a sha attached.
+ALTER TABLE projects ADD COLUMN analysed_branch TEXT;
+ALTER TABLE projects ADD COLUMN analysed_commit TEXT;
+ALTER TABLE projects ADD COLUMN analysed_at TEXT;
+
+-- How the project came to exist: 'folder' (a directory was opened),
+-- 'repository' (a repository was connected), or 'empty' (created with
+-- neither, to be associated later). Existing rows are folders or empties;
+-- 'folder' is the honest default because every project that exists today was
+-- created next to a workspace.
+ALTER TABLE projects ADD COLUMN source TEXT NOT NULL DEFAULT 'folder';
+
+CREATE INDEX idx_projects_repository_key ON projects(repository_key);
+CREATE INDEX idx_projects_archived ON projects(archived_at);
+
+-- What the agents are told about the project, and where each piece came from.
+--
+-- This is the shared context: the objective, the decisions taken, the shape of
+-- the architecture, the rules that do not bend, the current state, and the
+-- evidence that was actually verified. It is deliberately a table of small
+-- typed entries and not one long document, because the point is to send a
+-- *selection* to an agent instead of pouring every conversation into every
+-- prompt.
+--
+-- \`source_ref\` is where the entry comes from - a run id, a commit, a file
+-- path. An entry with no source is something a person wrote. An entry a model
+-- produced is still only a claim: nothing here is evidence that a file
+-- changed, and the DoneGate does not read this table.
+CREATE TABLE project_context (
+  id          TEXT PRIMARY KEY,
+  project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  -- 'objective' | 'decision' | 'architecture' | 'rule' | 'state' | 'evidence'
+  kind        TEXT NOT NULL,
+  title       TEXT NOT NULL,
+  body        TEXT NOT NULL,
+  source_ref  TEXT,
+  -- Pinned entries are always included; the rest are chosen by relevance.
+  pinned      INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX idx_project_context_project ON project_context(project_id, kind, updated_at DESC);
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

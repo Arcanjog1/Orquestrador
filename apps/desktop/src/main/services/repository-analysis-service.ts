@@ -26,6 +26,7 @@ import {
   RepositoryReader,
   RateLimitedError,
   parseRepositoryUrl,
+  type RepositoryMetadata,
   type RepositorySnapshot,
 } from '../../../../../src/github/repository-reader.js';
 import { GitHubError } from '../../../../../src/github/github-client.js';
@@ -59,6 +60,36 @@ export class RepositoryAnalysisService {
   /** True when this text is a GitHub repository link we could read. */
   recognises(text: string): boolean {
     return parseRepositoryUrl(text) !== null;
+  }
+
+  /**
+   * What GitHub says about the repository, without reading its code.
+   *
+   * This is what connecting a repository to a project needs: the canonical
+   * name, whether it is private, and the **real** default branch. One request,
+   * anonymous for a public repository, and no tree walked.
+   */
+  async metadata(url: string, signal?: AbortSignal): Promise<RepositoryMetadata> {
+    const ref = parseRepositoryUrl(url);
+    if (!ref) {
+      throw new RepositoryAnalysisError(
+        'Esse endereço não parece um repositório do GitHub. Um exemplo do que funciona: ' +
+          'https://github.com/dono/repositorio',
+        'invalid-url',
+      );
+    }
+    const token = await this.tokenIfConnected();
+    try {
+      return await this.reader.metadata(ref, { token, ...(signal ? { signal } : {}) });
+    } catch (error) {
+      if (error instanceof RateLimitedError) {
+        throw new RepositoryAnalysisError(error.message, 'rate-limit');
+      }
+      if (error instanceof GitHubError) {
+        throw new RepositoryAnalysisError(error.message, error.kind);
+      }
+      throw error;
+    }
   }
 
   /**

@@ -99,6 +99,15 @@ export interface ReadFile {
   readonly truncated: boolean;
 }
 
+/** What GitHub says about a repository, without reading any of its code. */
+export interface RepositoryMetadata {
+  readonly fullName: string;
+  readonly description: string | null;
+  readonly isPrivate: boolean;
+  /** Null when GitHub reported none. Never the guessed string `main`. */
+  readonly defaultBranch: string | null;
+}
+
 /** What the application read, and can point at. */
 export interface RepositorySnapshot {
   readonly owner: string;
@@ -107,7 +116,15 @@ export interface RepositorySnapshot {
   readonly description: string | null;
   readonly primaryLanguage: string | null;
   readonly isPrivate: boolean;
-  readonly defaultBranch: string;
+  /**
+   * The default branch **GitHub reported**, or null when it reported none.
+   *
+   * Never a guess. This used to fall back to the string `main`, which is a
+   * lie shaped like an answer: a repository whose default branch is called
+   * something else would be described as having one called `main`, and a
+   * caller that acted on it would check out a branch that does not exist.
+   */
+  readonly defaultBranch: string | null;
   /** The ref that was read: a branch name, tag, or sha. */
   readonly ref: string;
   /** The exact commit the analysis is about. Cited, so it can be checked. */
@@ -193,6 +210,39 @@ export class RepositoryReader {
    * anonymously, because asking someone to sign in to read something the
    * whole world can read is a toll, not a security measure.
    */
+  /**
+   * What GitHub says about the repository, and nothing else.
+   *
+   * Connecting a repository to a project needs the real default branch, the
+   * canonical full name and whether it is private. It does not need the tree
+   * or the contents of a single file, and fetching those would turn "add this
+   * project to my sidebar" into a dozen API calls and a rate-limit risk.
+   *
+   * One request. Anonymous for a public repository, as everywhere else here.
+   */
+  async metadata(
+    ref: RepositoryRef,
+    options: { token?: string | null; signal?: AbortSignal } = {},
+  ): Promise<RepositoryMetadata> {
+    const meta = await this.get<{
+      full_name?: unknown;
+      description?: unknown;
+      private?: unknown;
+      default_branch?: unknown;
+    }>(`/repos/${enc(ref.owner)}/${enc(ref.repo)}`, options.token ?? null, options.signal);
+    return {
+      fullName: typeof meta.full_name === 'string' ? meta.full_name : `${ref.owner}/${ref.repo}`,
+      description: typeof meta.description === 'string' ? meta.description : null,
+      isPrivate: meta.private === true,
+      // Null, not 'main'. The caller shows "não informado" and asks again
+      // later; it does not act on a name this application made up.
+      defaultBranch:
+        typeof meta.default_branch === 'string' && meta.default_branch.length > 0
+          ? meta.default_branch
+          : null,
+    };
+  }
+
   async read(
     ref: RepositoryRef,
     options: { token?: string | null; signal?: AbortSignal } = {},
@@ -206,11 +256,18 @@ export class RepositoryReader {
       default_branch?: unknown;
     }>(`/repos/${enc(ref.owner)}/${enc(ref.repo)}`, token, options.signal);
 
-    const defaultBranch = typeof meta.default_branch === 'string' ? meta.default_branch : 'main';
+    const defaultBranch =
+      typeof meta.default_branch === 'string' && meta.default_branch.length > 0
+        ? meta.default_branch
+        : null;
 
     // The exact commit, so the analysis names something checkable rather than
     // "the repository", which drifts the moment somebody pushes.
-    const resolved = await this.resolveRef(ref, ref.ref ?? defaultBranch, token, options.signal);
+    //
+    // `HEAD` is the fallback, not `main`: it is git's own name for whatever
+    // the default happens to be, GitHub resolves it, and it cannot be wrong
+    // the way a guessed branch name can.
+    const resolved = await this.resolveRef(ref, ref.ref ?? defaultBranch ?? 'HEAD', token, options.signal);
     const wanted = resolved.ref;
     const commitSha = resolved.sha;
 

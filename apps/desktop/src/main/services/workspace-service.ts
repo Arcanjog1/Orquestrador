@@ -32,6 +32,7 @@ import { AgentService, orchestratorAgentIdFor, workerAgentIdFor } from './agent-
 import type { GitHubService } from './github-service.js';
 import { parseGitHubRemote, redact } from '../core.js';
 import { folderKey, suggestedProjectName } from '../../../../../src/workspace/folder-identity.js';
+import { displayFullName, repositoryKey } from '../../../../../src/github/repository-identity.js';
 import type { ProjectService } from './project-service.js';
 
 /** Which provider each role runs on. Fixed: Codex supervises, Claude Code executes. */
@@ -321,10 +322,12 @@ export class WorkspaceService {
   reconcileFolders(projects: ProjectService): {
     keysBackfilled: number;
     projectsCreated: number;
+    repositoriesLinked: number;
     duplicateFolders: Array<{ pathKey: string; workspaceIds: string[] }>;
   } {
     let keysBackfilled = 0;
     let projectsCreated = 0;
+    let repositoriesLinked = 0;
 
     for (const workspace of this.database.workspaces.list()) {
       // Only a folder on this computer has a folder identity. A conversation
@@ -341,19 +344,54 @@ export class WorkspaceService {
         }
       }
 
-      // A folder with no project is the split the person described: it shows
-      // up under "Pastas" and nowhere under "Projetos", so its conversations
-      // look homeless. One project, named after the workspace, fixes it
-      // without touching a single conversation.
-      if (isLocalFolder && !this.database.projects.findByWorkspace(workspace.id)) {
-        projects.create({ name: workspace.display_name, workspaceId: workspace.id });
+      // **Every** workspace gets a project, not only a local folder.
+      //
+      // This changed when "Pastas" left the sidebar. While that section
+      // existed, a cloud or conversation workspace with no project was merely
+      // filed oddly - it still appeared, under Pastas. With one tree there is
+      // nowhere else to appear, so a workspace without a project would simply
+      // vanish from the interface, taking its conversations with it. Nothing
+      // is deleted by that, but a person cannot see the difference between
+      // "hidden" and "gone", and they should never have to.
+      let project = this.database.projects.findByWorkspace(workspace.id);
+      if (!project) {
+        const created = projects.create({
+          name: workspace.display_name,
+          workspaceId: workspace.id,
+        });
+        project = this.database.projects.require(created.id);
         projectsCreated += 1;
+      }
+
+      // A cloud workspace already knows its repository. Copying that identity
+      // onto the project is what stops the same repository from becoming a
+      // second project the first time it is connected from the new dialog.
+      const repositoryUrl = workspace.repository_url ?? repositoryUrlOfFullName(workspace.repository_full_name);
+      const key = repositoryKey(repositoryUrl);
+      if (key.length > 0 && project.repository_key.length === 0) {
+        const clash = this.database.projects.findByRepositoryKey(key);
+        // Where two projects would claim one repository, neither is changed
+        // and both are kept: choosing between them is not a decision a
+        // start-up reconciliation gets to make quietly.
+        if (!clash) {
+          this.database.projects.setRepository(project.id, {
+            key,
+            url: repositoryUrl,
+            fullName: workspace.repository_full_name ?? displayFullName(repositoryUrl),
+            isPrivate: workspace.repository_private === null ? null : workspace.repository_private === 1,
+            // Not guessed. `workspaces.default_branch` is what git or the
+            // person recorded; where there is none, it stays unknown.
+            defaultBranch: workspace.default_branch ?? workspace.branch ?? null,
+          });
+          repositoriesLinked += 1;
+        }
       }
     }
 
     return {
       keysBackfilled,
       projectsCreated,
+      repositoriesLinked,
       duplicateFolders: this.database.workspaces.duplicateFolders(),
     };
   }
@@ -372,6 +410,50 @@ export class WorkspaceService {
     const bound = this.database.projects.findByWorkspace(workspaceId);
     if (bound) return bound.id;
     return projects.create({ name: fallbackName, workspaceId }).id;
+  }
+
+  /**
+   * The workspace a project's runs execute in, creating one if it has none.
+   *
+   * A project connected from a repository has no folder on this computer, and
+   * a project created empty has nothing at all. Both still need somewhere for
+   * a run to happen, and the honest answer for a project with no working copy
+   * is a `conversation` workspace: its runs analyse, plan and review, and
+   * touch no file anywhere. That is a real mode this application already has,
+   * not a placeholder.
+   *
+   * What it deliberately does **not** do is clone. Turning "open my project"
+   * into a silent `git clone` would write to somebody's disk because they
+   * clicked a name in a sidebar. Associating a folder is a separate, explicit
+   * act, and until it happens the project says what it can and cannot do.
+   */
+  ensureWorkspaceForProject(
+    projectId: string,
+    projects: ProjectService,
+  ): { workspace: WorkspaceView; created: boolean } {
+    const project = projects.require(projectId);
+    if (project.workspace_id) {
+      const existing = this.database.workspaces.find(project.workspace_id);
+      if (existing) {
+        this.database.workspaces.touch(existing.id);
+        return { workspace: this.toView(existing), created: false };
+      }
+      // The workspace was removed but the project still points at it. Falling
+      // through creates a new one rather than failing to open the project.
+    }
+
+    const record = this.database.workspaces.create({
+      id: newId('ws'),
+      name: project.name,
+      // No folder, and never resolved: this project does not have one yet.
+      localPath: '',
+      environment: 'conversation',
+      ...(project.repository_url ? { repositoryUrl: project.repository_url } : {}),
+      // Only what GitHub actually reported. Null stays null.
+      ...(project.default_branch ? { defaultBranch: project.default_branch } : {}),
+    });
+    projects.setWorkspace(projectId, record.id);
+    return { workspace: this.toView(record), created: true };
   }
 
   /**
@@ -1056,4 +1138,10 @@ function firstLine(text: string): string {
 function positiveOrNull(value: unknown): number | null {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** `owner/name` back to the canonical URL, for a cloud workspace that stored only the name. */
+function repositoryUrlOfFullName(fullName: string | null): string | null {
+  if (!fullName || fullName.trim().length === 0) return null;
+  return `https://github.com/${fullName.trim()}`;
 }
