@@ -206,7 +206,7 @@ src/
 tests/                14 arquivos, 156 testes
   helpers/            git-fixture, fake-runtime-source
 spike/                windows-spike.mjs   (ferramenta INTERNA de desenvolvimento)
-docs/                 este arquivo
+docs/                 este arquivo + EXTERNAL_REFERENCES.md (catálogo de pesquisa)
 SPIKE.md              instruções do spike (NÃO é a experiência do produto)
 THIRD-PARTY-NOTICES.md
 tsconfig.json  tsconfig.base.json  tsconfig.test.json  package.json
@@ -531,6 +531,12 @@ via `electron-updater`. Sem assinatura por ora.
 7. Commitar por etapa na branch `claude/new-session-3am7mo` e fazer push.
 8. Ao terminar, reportar: FILES CREATED, FILES MODIFIED, TESTS, KNOWN
    LIMITATIONS, NEXT PHASE.
+
+9. Se a tarefa envolver pesquisa ou inspiração arquitetural, consultar
+   [`EXTERNAL_REFERENCES.md`](EXTERNAL_REFERENCES.md) — catálogo de referências
+   externas, com **consulta seletiva**: abrir só a referência relevante à tarefa,
+   sem clonar, instalar ou executar nada, e sem substituir a arquitetura
+   existente.
 
 Se algo neste documento contradisser o código, **o código é a verdade** —
 atualize o documento.
