@@ -44,6 +44,16 @@ export interface WorkerReportInput {
   readonly answer: string;
   /** What the application measured, never what the worker said. */
   readonly evidence: GitEvidence | null;
+  /**
+   * The same measurement as the previous iteration left it.
+   *
+   * Without it the report can only speak about the run's baseline, so a
+   * delegation that merely *read* four files reported all four as changed
+   * again - the accumulated diff, presented as this invocation's work.
+   */
+  readonly previousEvidence: GitEvidence | null;
+  /** Files this delegation asked the application to open, and only read. */
+  readonly readFiles: readonly string[];
   /** Verifications and file checks the application ran this iteration. */
   readonly verifications: readonly ReportVerification[];
   /** Criteria this iteration still cannot prove. */
@@ -68,12 +78,26 @@ export interface WorkerReport {
   readonly headline: string;
   /** The worker's own summary, trimmed. Empty when it said nothing. */
   readonly declared: string;
-  /** Files the *application* observed changing. Never the worker's list. */
+  /**
+   * What **this invocation** changed, measured against the iteration before it.
+   *
+   * Kept apart from the run's total on purpose: a delegation that only read
+   * files must not report them as written, and one that changed a single file
+   * must not inherit the three the previous round wrote.
+   */
   readonly evidenceFiles: {
     readonly created: readonly string[];
     readonly modified: readonly string[];
     readonly deleted: readonly string[];
   };
+  /** What the run has accumulated since its baseline. Context, not this turn. */
+  readonly runTotalFiles: {
+    readonly created: readonly string[];
+    readonly modified: readonly string[];
+    readonly deleted: readonly string[];
+  };
+  /** Files the application opened for this delegation and nothing wrote. */
+  readonly readOnlyFiles: readonly string[];
   /** True when evidence was unavailable, so "nothing changed" means "unknown". */
   readonly evidenceUnavailable: boolean;
   readonly tools: readonly string[];
@@ -109,14 +133,26 @@ export function buildWorkerReport(input: WorkerReportInput): WorkerReport {
   // both verbatim reported one file as two - and "2 arquivos alterados" for a
   // single hello.txt is the kind of small wrongness that makes a reader stop
   // trusting the rest. Created and deleted win; modified is what is left.
-  const created = evidence?.addedFiles ?? [];
-  const deleted = evidence?.deletedFiles ?? [];
-  const named = new Set([...created, ...deleted]);
+  const runTotal = normalise(evidence);
+  // This invocation's own work: what the run shows now, minus what it already
+  // showed before this delegation ran. A file the previous iteration wrote and
+  // this one only read is in the run's total and not in this one's.
+  const before = normalise(input.previousEvidence);
   const evidenceFiles = {
-    created: cap(created),
-    modified: cap((evidence?.changedFiles ?? []).filter((file) => !named.has(file))),
-    deleted: cap(deleted),
+    created: cap(runTotal.created.filter((file) => !before.created.includes(file))),
+    modified: cap(
+      runTotal.modified.filter(
+        (file) => !before.modified.includes(file) && !before.created.includes(file),
+      ),
+    ),
+    deleted: cap(runTotal.deleted.filter((file) => !before.deleted.includes(file))),
   };
+  const touched = new Set([
+    ...evidenceFiles.created,
+    ...evidenceFiles.modified,
+    ...evidenceFiles.deleted,
+  ]);
+  const readOnlyFiles = cap(input.readFiles.filter((file) => !touched.has(file)));
 
   const errors: string[] = [];
   if (input.failureDetail) errors.push(input.failureDetail);
@@ -140,6 +176,8 @@ export function buildWorkerReport(input: WorkerReportInput): WorkerReport {
     headline: headlineOf(status, worker, evidenceFiles),
     declared,
     evidenceFiles,
+    runTotalFiles: { created: cap(runTotal.created), modified: cap(runTotal.modified), deleted: cap(runTotal.deleted) },
+    readOnlyFiles,
     evidenceUnavailable,
     tools: [...input.tools],
     verifications: [...input.verifications],
@@ -247,6 +285,29 @@ function recommend(input: {
   }
 }
 
+/**
+ * Git's own lists, with the double-counting removed.
+ *
+ * A new file appears in both `addedFiles` and `changedFiles`, so listing both
+ * verbatim reported one file as two - and "2 arquivos alterados" for a single
+ * hello.txt is the kind of small wrongness that makes a reader stop trusting
+ * the rest.
+ */
+function normalise(evidence: GitEvidence | null): {
+  created: string[];
+  modified: string[];
+  deleted: string[];
+} {
+  const created = [...(evidence?.addedFiles ?? [])];
+  const deleted = [...(evidence?.deletedFiles ?? [])];
+  const named = new Set([...created, ...deleted]);
+  return {
+    created,
+    modified: [...(evidence?.changedFiles ?? [])].filter((file) => !named.has(file)),
+    deleted,
+  };
+}
+
 function cap(list: readonly string[]): string[] {
   return list.length > MAX_FILES
     ? [...list.slice(0, MAX_FILES), `… e mais ${list.length - MAX_FILES}`]
@@ -277,9 +338,19 @@ export function renderWorkerReport(report: WorkerReport): string {
   if (report.evidenceUnavailable) {
     lines.push('  evidência indisponível — "nada mudou" aqui significa "não deu para observar"');
   }
-  lines.push(`  criados:     ${report.evidenceFiles.created.join(', ') || '(nenhum)'}`);
-  lines.push(`  modificados: ${report.evidenceFiles.modified.join(', ') || '(nenhum)'}`);
-  lines.push(`  removidos:   ${report.evidenceFiles.deleted.join(', ') || '(nenhum)'}`);
+  lines.push('  NESTA DELEGAÇÃO:');
+  lines.push(`    criados:     ${report.evidenceFiles.created.join(', ') || '(nenhum)'}`);
+  lines.push(`    modificados: ${report.evidenceFiles.modified.join(', ') || '(nenhum)'}`);
+  lines.push(`    removidos:   ${report.evidenceFiles.deleted.join(', ') || '(nenhum)'}`);
+  if (report.readOnlyFiles.length > 0) {
+    lines.push(`    apenas lidos: ${report.readOnlyFiles.join(', ')}`);
+  }
+  if (differsFromRun(report)) {
+    lines.push('  ACUMULADO NA EXECUÇÃO (desde o início, não é o trabalho desta delegação):');
+    lines.push(`    criados:     ${report.runTotalFiles.created.join(', ') || '(nenhum)'}`);
+    lines.push(`    modificados: ${report.runTotalFiles.modified.join(', ') || '(nenhum)'}`);
+    lines.push(`    removidos:   ${report.runTotalFiles.deleted.join(', ') || '(nenhum)'}`);
+  }
   if (report.verifications.length > 0) {
     lines.push('  verificações:');
     for (const check of report.verifications) {
@@ -336,6 +407,13 @@ export function renderWorkerReport(report: WorkerReport): string {
  * anything on its own. It exists so the supervisor is *told* the two do not
  * line up, instead of reading a confident summary next to an empty diff.
  */
+/** True when the run has more than this delegation did, so both are worth showing. */
+function differsFromRun(report: WorkerReport): boolean {
+  const count = (files: WorkerReport['evidenceFiles']): number =>
+    files.created.length + files.modified.length + files.deleted.length;
+  return count(report.runTotalFiles) !== count(report.evidenceFiles);
+}
+
 function disagrees(report: WorkerReport): boolean {
   if (report.evidenceUnavailable) return false;
   const touched =

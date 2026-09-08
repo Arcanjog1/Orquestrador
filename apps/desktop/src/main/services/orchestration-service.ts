@@ -834,6 +834,8 @@ export class OrchestrationService {
     /** This iteration's worker answer, which is what its report is about. */
     let iterationAnswer = '';
     let previousTree = treeKey(baseline.statusShort, baseline.unstagedDiff + baseline.stagedDiff);
+    /** Evidence as the previous iteration left it, so a report can subtract it. */
+    let previousEvidence: GitEvidence | null = null;
     let warnedOrchestratorLevel = false;
     // The short path is offered once per run. A second attempt would be the
     // loop arguing with a gate that already said no.
@@ -1029,6 +1031,8 @@ export class OrchestrationService {
             worker: delegated.record,
             answer: delegated.answer,
             evidence: null,
+            previousEvidence: null,
+            readFiles: [],
             verifications: [],
             unproven: ledger.pending().filter((c) => c.status !== 'failed').map((c) => c.text),
             failedCriteria: ledger.pending().filter((c) => c.status === 'failed').map((c) => c.text),
@@ -1338,6 +1342,8 @@ export class OrchestrationService {
           worker: record.worker,
           answer: iterationAnswer,
           evidence,
+          previousEvidence,
+          readFiles: fileReads.map((read) => read.request.path),
           verifications: [
             ...verification.map((result) => ({
               label: result.command,
@@ -1562,6 +1568,10 @@ export class OrchestrationService {
         this.progress(runId, sessionId, 'needs-human', 'Sem evidência nova', 'NEEDS_HUMAN');
         return;
       }
+
+      // Kept for the next iteration's report, so it can say what *that*
+      // delegation changed rather than repeating the run's whole diff.
+      previousEvidence = evidence;
 
       feedback = this.buildFeedback(evidence, verification, unknownIds, record, ledger);
     }
@@ -2153,6 +2163,10 @@ export class OrchestrationService {
     worker: NonNullable<IterationRecord['worker']>;
     answer: string;
     evidence: GitEvidence | null;
+    /** The same measurement as the previous iteration left it. */
+    previousEvidence: GitEvidence | null;
+    /** Files this delegation asked the application to open. */
+    readFiles: readonly string[];
     verifications: readonly { label: string; passed: boolean; problem?: string }[];
     unproven: readonly string[];
     failedCriteria: readonly string[];
@@ -2162,6 +2176,8 @@ export class OrchestrationService {
       worker,
       answer: input.answer,
       evidence: input.evidence,
+      previousEvidence: input.previousEvidence,
+      readFiles: input.readFiles,
       verifications: input.verifications,
       unproven: input.unproven,
       failedCriteria: input.failedCriteria,

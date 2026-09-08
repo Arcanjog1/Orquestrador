@@ -71,6 +71,8 @@ function input(over: Partial<WorkerReportInput> = {}): WorkerReportInput {
     worker: worker(),
     answer: 'Criei hello.txt com os seis bytes pedidos.',
     evidence: evidence(),
+    previousEvidence: null,
+    readFiles: [],
     verifications: [{ label: '[leitura direta] hello.txt', passed: true }],
     unproven: [],
     failedCriteria: [],
@@ -239,4 +241,64 @@ test('a created file is not counted twice when git names it added and changed', 
   assert.deepEqual([...report.evidenceFiles.created], ['hello.txt']);
   assert.deepEqual([...report.evidenceFiles.modified], []);
   assert.match(report.headline, /1 arquivo\(s\) alterado\(s\)/);
+});
+
+test('a delegation that only read files reports no changes of its own', () => {
+  // The defect: the report spoke against the run's baseline, so a round that
+  // merely read the four files presented all four as modified again.
+  const four = ['index.html', 'style.css', 'app.js', 'README.md'];
+  const wrote = evidence({ addedFiles: four, changedFiles: four });
+  const report = buildWorkerReport(
+    input({
+      evidence: wrote,
+      // The previous iteration is the one that wrote them.
+      previousEvidence: wrote,
+      readFiles: four,
+      answer: 'Revisei os quatro arquivos.',
+      verifications: [],
+      unproven: ['os quatro arquivos existem'],
+    }),
+  );
+  assert.deepEqual([...report.evidenceFiles.created], []);
+  assert.deepEqual([...report.evidenceFiles.modified], []);
+  assert.deepEqual([...report.readOnlyFiles], four);
+  assert.deepEqual([...report.runTotalFiles.created], four);
+  assert.match(report.headline, /nenhum arquivo alterado/);
+
+  const text = renderWorkerReport(report);
+  assert.match(text, /NESTA DELEGAÇÃO:/);
+  assert.match(text, /apenas lidos: index\.html, style\.css, app\.js, README\.md/);
+  assert.match(text, /ACUMULADO NA EXECUÇÃO \(desde o início, não é o trabalho desta delegação\)/);
+});
+
+test('the iteration that wrote the files reports them as its own work', () => {
+  const four = ['index.html', 'style.css', 'app.js', 'README.md'];
+  const report = buildWorkerReport(
+    input({
+      evidence: evidence({ addedFiles: four, changedFiles: four }),
+      previousEvidence: evidence({ addedFiles: [], changedFiles: [] }),
+      readFiles: [],
+      verifications: [],
+      unproven: [],
+    }),
+  );
+  assert.deepEqual([...report.evidenceFiles.created], four);
+  assert.deepEqual([...report.readOnlyFiles], []);
+  assert.match(report.headline, /4 arquivo\(s\) alterado\(s\)/);
+  // Nothing extra to show: this delegation is the whole run so far.
+  assert.doesNotMatch(renderWorkerReport(report), /ACUMULADO NA EXECUÇÃO/);
+});
+
+test('a file this delegation both read and changed counts as changed, not as read', () => {
+  const report = buildWorkerReport(
+    input({
+      evidence: evidence({ addedFiles: [], changedFiles: ['app.js'] }),
+      previousEvidence: evidence({ addedFiles: [], changedFiles: [] }),
+      readFiles: ['app.js', 'README.md'],
+      verifications: [],
+      unproven: [],
+    }),
+  );
+  assert.deepEqual([...report.evidenceFiles.modified], ['app.js']);
+  assert.deepEqual([...report.readOnlyFiles], ['README.md']);
 });

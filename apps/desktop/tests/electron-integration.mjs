@@ -830,6 +830,67 @@ test('a conversation is renamed, archived, found and deleted from the real sideb
   }
 });
 
+test('a cancelled run stops showing progress: no step is left spinning', async () => {
+  // The history showed DONE messages next to steps still animating, so a
+  // person could not tell which run was finished, cancelled or still going.
+  // A run that stopped has no step in progress - checked through the real IPC.
+  const window = await openWindow();
+  const dir = mkdtempSync(join(tmpdir(), 'lao-electron-cancel-'));
+  try {
+    const workspace = await window.webContents.executeJavaScript(
+      `window.api.workspace.create(${JSON.stringify({ name: 'Cancelar', localPath: dir })})`,
+    );
+    const session = await window.webContents.executeJavaScript(
+      `window.api.chat.createSession(${JSON.stringify({ workspaceId: workspace.id, title: 'Cancelar' })})`,
+    );
+    // A run created directly, left RUNNING with an open step, then cancelled.
+    const created = services.database.runs.create({
+      id: 'run-electron-cancel',
+      sessionId: session.id,
+      workspaceId: workspace.id,
+      objective: 'crie o miniaplicativo',
+      orchestratorAgentId: null,
+      maxIterations: 4,
+    });
+    services.database.runs.setStatus(created.id, 'RUNNING');
+    services.database.runs.addStep({
+      runId: created.id,
+      iteration: 1,
+      phase: 'worker',
+      status: 'running',
+      summary: 'Claude executando...',
+    });
+    assert.equal(
+      services.database.runs.steps(created.id).filter((s) => s.status === 'running').length,
+      1,
+    );
+
+    services.database.runs.setStatus(created.id, 'CANCELLED', 'Cancelado pelo usuário.');
+
+    const after = services.database.runs.steps(created.id);
+    assert.equal(
+      after.filter((s) => s.status === 'running' || s.status === 'started').length,
+      0,
+      'nothing is left spinning',
+    );
+    assert.equal(services.database.runs.require(created.id).status, 'CANCELLED');
+
+    // And a late result cannot put it back.
+    services.database.runs.setStatus(created.id, 'DONE', 'Tarefa concluída e verificada.');
+    assert.equal(services.database.runs.require(created.id).status, 'CANCELLED');
+
+    // These checks share one database, so this one puts back what it made.
+    await window.webContents.executeJavaScript(
+      `window.api.chat.deleteSession(${JSON.stringify({ sessionId: session.id })})`,
+    );
+    await window.webContents.executeJavaScript(
+      `window.api.workspace.remove(${JSON.stringify({ workspaceId: workspace.id })})`,
+    );
+  } finally {
+    removeTree(dir);
+  }
+});
+
 test('projects: the "+" of a project with no folder yet still lands the conversation in it', async () => {
   // The reported defect. Clicking "+" on a project whose workspace does not
   // exist yet switches folders, and the switch used to eat the selection: the
