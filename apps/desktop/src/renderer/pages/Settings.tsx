@@ -28,7 +28,9 @@ import { cn } from "@/lib/utils";
 import { api, messageOf } from "@/lib/api";
 import { applyTheme, THEMES } from "@/lib/theme";
 import { Link, useRouter, useSearch } from "@/router";
+import { ACCOUNT_CAPABILITY_TIERS, ACCOUNT_REASONING_TIERS } from "@shared/ipc-contract";
 import type {
+  AccountRoutingView,
   AccountView,
   CloudStatusView,
   GitHubStatusView,
@@ -182,6 +184,7 @@ export function SettingsPage({
                       account={a}
                       onReconnect={() => connect(a)}
                       onRemove={() => setRemoving(a)}
+                      onChanged={() => reload()}
                     />
                   ))}
                   <AddAccount
@@ -199,6 +202,7 @@ export function SettingsPage({
                       account={a}
                       onReconnect={() => connect(a)}
                       onRemove={() => setRemoving(a)}
+                      onChanged={() => reload()}
                     />
                   ))}
                   <AddAccount
@@ -820,10 +824,12 @@ function AccountCard({
   account,
   onReconnect,
   onRemove,
+  onChanged,
 }: {
   account: AccountView;
   onReconnect: () => void;
   onRemove: () => void;
+  onChanged: (updated: AccountView) => void;
 }) {
   const connected = account.state === "connected";
   return (
@@ -870,9 +876,147 @@ function AccountCard({
         </DropdownMenu>
       </div>
       {account.detail && <p className="mt-2 text-xs text-muted-foreground">{account.detail}</p>}
+      <AccountRouting account={account} onChanged={onChanged} />
     </div>
   );
 }
+
+/**
+ * O teto desta conta.
+ *
+ * O que aconteceu sem isto: a execução escalou o worker até o topo, o topo
+ * significava o modelo premium no esforço máximo, e a conta respondeu
+ * *"You're out of usage credits"*. A assinatura não tinha acabado — faltavam
+ * os créditos extras que aquele modelo consome, e nada no aplicativo sabia que
+ * isso podia ser verdade de uma conta e não de outra.
+ *
+ * Por isso o teto mora **na conta**. Duas contas Claude podem ter tetos
+ * diferentes, e mexer numa não mexe na outra.
+ */
+function AccountRouting({
+  account,
+  onChanged,
+}: {
+  account: AccountView;
+  onChanged: (updated: AccountView) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Held locally, seeded from the account and reseeded when it changes.
+  //
+  // Reading straight from the prop loses an edit: saving reloads the accounts,
+  // and a second change made before that reload lands would compose against
+  // the stale value and quietly undo the first one. Two quick changes have to
+  // both survive.
+  const [routing, setRouting] = useState<AccountRoutingView>(account.routing);
+  useEffect(() => {
+    setRouting(account.routing);
+  }, [account.routing]);
+
+  async function save(patch: Partial<AccountRoutingView>) {
+    const next: AccountRoutingView = { ...routing, ...patch };
+    setRouting(next);
+    setBusy(true);
+    setError(null);
+    try {
+      onChanged(
+        await api.accounts.setRoutingPolicy({
+          accountId: account.id,
+          maxCapability: next.maxCapability,
+          maxReasoning: next.maxReasoning,
+          allowPremiumModels: next.allowPremiumModels,
+        }),
+      );
+    } catch (e) {
+      // The save failed, so the screen must not keep showing it as done.
+      setRouting(account.routing);
+      setError(messageOf(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 border-t border-border/60 pt-3" data-testid={`routing-${account.id}`}>
+      <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+        Roteamento desta conta
+      </div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        <label className="text-xs text-muted-foreground">
+          Teto de modelo
+          <select
+            className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+            value={routing.maxCapability ?? ""}
+            disabled={busy}
+            data-testid={`routing-capability-${account.id}`}
+            onChange={(e) => void save({ maxCapability: e.target.value || null })}
+          >
+            <option value="">Sem teto</option>
+            {ACCOUNT_CAPABILITY_TIERS.map((tier) => (
+              <option key={tier} value={tier}>
+                {CAPABILITY_LABEL[tier]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-xs text-muted-foreground">
+          Teto de raciocínio
+          <select
+            className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+            value={routing.maxReasoning ?? ""}
+            disabled={busy}
+            data-testid={`routing-reasoning-${account.id}`}
+            onChange={(e) => void save({ maxReasoning: e.target.value || null })}
+          >
+            <option value="">Sem teto</option>
+            {ACCOUNT_REASONING_TIERS.map((tier) => (
+              <option key={tier} value={tier}>
+                {REASONING_LABEL[tier]}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <label className="mt-2 flex items-start gap-2 text-xs text-muted-foreground">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={routing.allowPremiumModels}
+          disabled={busy}
+          data-testid={`routing-premium-${account.id}`}
+          onChange={(e) => void save({ allowPremiumModels: e.target.checked })}
+        />
+        <span>
+          Permitir modelos que exigem créditos extras
+          {routing.premiumModels.length > 0 && (
+            <> ({routing.premiumModels.join(", ")})</>
+          )}
+          . Desligado, o roteamento nunca escolhe um deles — nem para tentar.
+        </span>
+      </label>
+      {error && (
+        <p className="mt-2 text-xs text-danger" data-testid={`routing-error-${account.id}`}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Os níveis, nas palavras que a tela usa. */
+const CAPABILITY_LABEL: Record<string, string> = {
+  FAST: "Rápido",
+  BALANCED: "Equilibrado",
+  STRONG: "Forte (Opus)",
+  MAX: "Máximo (inclui premium)",
+};
+
+const REASONING_LABEL: Record<string, string> = {
+  LOW: "Baixo",
+  MEDIUM: "Médio",
+  HIGH: "Alto",
+  MAX: "Máximo",
+};
 
 function AddAccount({ label, onClick }: { label: string; onClick: () => void }) {
   return (

@@ -938,6 +938,30 @@ CREATE INDEX idx_permission_grants_workspace ON workspace_permission_grants(work
 ALTER TABLE agent_invocations ADD COLUMN report_json TEXT;
 `,
   },
+  {
+    id: 18,
+    name: 'account-routing-policy',
+    sql: `
+-- What one account is allowed to spend on.
+--
+-- A run escalated the worker to the top tier, which meant the premium model at
+-- maximum effort, and the account answered "You're out of usage credits". The
+-- subscription was not exhausted: that account simply had no extra credits for
+-- that model, and nothing in the application knew such a thing could be true of
+-- one account and not another.
+--
+-- On the account, not in settings, because it is a property of the account -
+-- two Claude accounts can differ and neither is a global switch.
+--
+-- NULL ceilings mean "no ceiling", which is what every existing row gets: a
+-- migration must not silently change how anybody's runs are routed.
+-- \`allow_premium_models\` defaults to 0 rather than 1, because the one default
+-- that cannot be right is the one that spends credits nobody agreed to spend.
+ALTER TABLE accounts ADD COLUMN max_capability TEXT;
+ALTER TABLE accounts ADD COLUMN max_reasoning TEXT;
+ALTER TABLE accounts ADD COLUMN allow_premium_models INTEGER NOT NULL DEFAULT 0;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

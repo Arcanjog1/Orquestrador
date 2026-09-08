@@ -635,9 +635,15 @@ test('an empty balance stops the run instead of being retried until the iteratio
 
     assert.equal(run.status, 'NEEDS_HUMAN');
     assert.equal(broke.calls.length, 1, 'an empty balance is never retried');
+    // The sentence now depends on what the provider actually said. This one
+    // says only "sem saldo", which does not distinguish an exhausted
+    // subscription from missing extra credits - so the run says so instead of
+    // picking one, and sends nobody to fix the wrong thing.
     assert.ok(
-      messages(fixture, session.id).some((m) => /sem saldo ou fora da cota/.test(m.body)),
-      'the person is told what actually stopped it',
+      messages(fixture, session.id).some((m) =>
+        /recusada por saldo, cota ou direito de uso, e a mensagem do provedor não diz qual/.test(m.body),
+      ),
+      'the person is told what actually stopped it, and no more than that',
     );
   } finally {
     await fixture.cleanup();

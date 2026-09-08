@@ -85,6 +85,13 @@ import {
   renderWorkerReport,
   type WorkerReport,
 } from '../../../../../src/worker/worker-report.js';
+import {
+  capabilityCeilingOf,
+  reasoningCeilingOf,
+  DEFAULT_ACCOUNT_POLICY,
+  type AccountRoutingPolicy,
+} from '../../../../../src/routing/account-policy.js';
+import { classifyCreditFailure } from '../../../../../src/routing/credit-failure.js';
 import type { ContextEntry } from '../../../../../src/context/project-context.js';
 import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
 import type { DeniedToolCall } from '../core.js';
@@ -964,7 +971,10 @@ export class OrchestrationService {
         // A provider that will keep refusing must stop the run rather than be
         // asked again eight times: an empty balance and a rejected credential
         // are not made better by another attempt, and each attempt may cost.
-        const terminal = terminalFailure(delegated.record.failure);
+        const terminal = terminalFailure(
+          delegated.record.failure,
+          delegated.record.failureDetail ?? null,
+        );
         if (terminal) {
           // A refused tool is the one terminal failure a person can actually
           // resolve, so it gets a request they can answer rather than a
@@ -2093,6 +2103,30 @@ export class OrchestrationService {
     return report;
   }
 
+  /**
+   * What one account is allowed to spend on.
+   *
+   * Defaults are conservative and deliberate: no tier ceiling, so nothing
+   * about existing routing changes, and premium models off, because the one
+   * default that cannot be right is the one that spends credits nobody agreed
+   * to spend. An unreadable account gets the same defaults rather than an
+   * exception - a routing decision must not fail on a settings lookup.
+   */
+  private policyFor(accountId: string | null): AccountRoutingPolicy {
+    if (!accountId) return DEFAULT_ACCOUNT_POLICY;
+    try {
+      const account = this.database.accounts.find(accountId);
+      if (!account) return DEFAULT_ACCOUNT_POLICY;
+      return {
+        maxCapability: capabilityCeilingOf(account.max_capability),
+        maxReasoning: reasoningCeilingOf(account.max_reasoning),
+        allowPremiumModels: account.allow_premium_models === 1,
+      };
+    } catch {
+      return DEFAULT_ACCOUNT_POLICY;
+    }
+  }
+
   private buildFeedback(
     evidence: GitEvidence,
     verification: readonly CommandResult[],
@@ -2283,8 +2317,43 @@ export class OrchestrationService {
             selection: input.routing.selection,
             manual: input.routing.manual,
             unavailableModels: input.unavailableModels,
+            // What this account is allowed to spend on. Read per delegation,
+            // from the account actually being used, so two Claude accounts can
+            // hold different ceilings and neither is a global switch.
+            policy: this.policyFor(slot.accountId),
           })
         : null;
+
+      // The policy left nothing to run. That is a question for the person, not
+      // a model choice: falling through to the CLI default here would run the
+      // model the policy exists to keep out.
+      if (routed?.policyBlocked) {
+        const reason =
+          'A tarefa pede uma capacidade que a política desta conta não permite. ' +
+          `${routed.selectionReason}. Ajuste o teto da conta em Contas e integrações, ` +
+          'ou aprove o uso de créditos extras para esta conta.';
+        this.database.runs.setStatus(runId, 'NEEDS_HUMAN', reason);
+        this.say(sessionId, runId, 'system', reason);
+        this.step(runId, iteration, 'routing', 'blocked', reason, {
+          requestedCapability: routed.requestedCapability,
+          requestedReasoning: routed.requestedReasoning,
+        });
+        this.progress(runId, sessionId, 'needs-human', 'Política da conta', 'NEEDS_HUMAN');
+        return {
+          record: last ?? {
+            agent: slot.runner.kind,
+            profile: slot.accountId,
+            task,
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            exitCode: null,
+            outcome: 'cancelled',
+            durationMs: 0,
+            mechanical: true,
+          },
+          answer,
+        };
+      }
 
       const planned: RoutingRecord | null = routed
         ? {
@@ -2582,7 +2651,9 @@ export class OrchestrationService {
       // A failure that another model cannot fix - no balance, a rejected key -
       // must not be answered by trying another model, which would only spend
       // again to be refused again.
-      if (terminalFailure(result.failure)) return { record: last, answer };
+      if (terminalFailure(result.failure, `${result.failureDetail ?? ''}\n${result.stderr}`)) {
+        return { record: last, answer };
+      }
       if (input.signal.aborted || !modelUnavailable || !routed?.resolvedModel) {
         return { record: last, answer };
       }
@@ -3002,7 +3073,18 @@ export function teamOf(runners: RunnerPair): readonly WorkerSlot[] {
  * may cost. Stopping with a sentence is the honest outcome; eight more
  * identical refusals is not.
  */
-export function terminalFailure(failure: ProviderFailureKind | undefined): string | null {
+export function terminalFailure(
+  failure: ProviderFailureKind | undefined,
+  /**
+   * What the provider or CLI actually said, when anything was captured.
+   *
+   * Used only to say the *right* thing about credits: "out of usage credits"
+   * is not "the subscription ran out", and a run that reported the second
+   * when the provider said the first would send somebody to fix the wrong
+   * thing. When the text says nothing precise, the general sentence stands.
+   */
+  detail?: string | null,
+): string | null {
   switch (failure) {
     case 'tool-permission-denied':
       return (
@@ -3021,11 +3103,16 @@ export function terminalFailure(failure: ProviderFailureKind | undefined): strin
         'A pasta deste projeto não pôde ser usada para escrever. Verifique o caminho e as ' +
         'permissões da pasta em Projeto, e continue quando quiser.'
       );
-    case 'insufficient-credit':
+    case 'insufficient-credit': {
+      const read = classifyCreditFailure(detail);
+      if (read.cause !== 'unknown') {
+        return `${read.message} A execução parou aqui: insistir só repetiria a recusa.`;
+      }
       return (
-        'A conexão está sem saldo ou fora da cota do provider. A execução parou aqui: ' +
-        'insistir só repetiria a recusa. Resolva o saldo e continue quando quiser.'
+        'A conexão foi recusada por saldo, cota ou direito de uso, e a mensagem do provedor ' +
+        'não diz qual dos três. A execução parou aqui: insistir só repetiria a recusa.'
       );
+    }
     case 'authentication':
       return 'A credencial desta conexão não foi aceita. Atualize a chave em Contas e continue quando quiser.';
     case 'permission':
@@ -3096,7 +3183,11 @@ export function failureExplanation(failure: ProviderFailureKind): string {
     case 'authentication':
       return "The worker's credential was not accepted.";
     case 'insufficient-credit':
-      return "The worker's account is out of balance or quota.";
+      return (
+        "The worker's account refused the call for credit or quota reasons. This is not a " +
+        'reasoning failure, so do not answer it by asking for a stronger model - a stronger ' +
+        'model is usually the more expensive one, and it is what caused this.'
+      );
     case 'rate-limit':
       return 'The provider asked to wait before the next call.';
     case 'timeout':

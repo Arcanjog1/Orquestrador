@@ -107,11 +107,22 @@ test('a multi-module debugging task requested STRONG runs on the strong model wi
 });
 
 test('a critical architecture change requested MAX resolves to the top model; MAX is internal', () => {
-  const out = route('Redesenhe a arquitetura crítica de pagamentos', { capability: 'MAX', reasoning: 'MAX' });
+  // The top model draws on credits beyond the subscription, so an account has
+  // to say it may be used. Without that the router stops at opus - which is
+  // the whole point of the account policy, and is asserted below.
+  const out = route('Redesenhe a arquitetura crítica de pagamentos', { capability: 'MAX', reasoning: 'MAX' }, {
+    policy: { maxCapability: null, maxReasoning: null, allowPremiumModels: true },
+  });
   assert.equal(out.capability, 'MAX');
   assert.equal(out.resolvedModel, 'fable');
   // This CLI declared `max`, so `max` is what it gets.
   assert.equal(out.resolvedReasoning, 'max');
+});
+
+test('the same request on an account that has not allowed extra credits stops at opus', () => {
+  const out = route('Redesenhe a arquitetura crítica de pagamentos', { capability: 'MAX', reasoning: 'MAX' });
+  assert.equal(out.resolvedModel, 'opus');
+  assert.match(out.selectionReason, /créditos extras/);
 });
 
 test('the incident rule: internal MAX is never sent as "max" to a CLI that did not declare it', () => {
@@ -169,19 +180,32 @@ test('manual selection sends exactly what the person typed, validated against th
 });
 
 test('an unavailable model falls to the next candidate - a stronger one first - and says so', () => {
+  // On an account that allows the premium model, the stronger stand-in is it.
+  const premium = { maxCapability: null, maxReasoning: null, allowPremiumModels: true } as const;
   const out = route('Depure a falha entre módulos', { capability: 'STRONG', reasoning: 'HIGH' }, {
     unavailableModels: ['opus'],
+    policy: premium,
   });
   assert.equal(out.resolvedModel, 'fable', 'a stronger stand-in before a weaker one');
   assert.equal(out.fallbackUsed, true);
   assert.match(out.selectionReason, /indisponível nesta execução: opus/);
   // The router also hands the loop the rest of the sequence, for the retry.
-  const first = route('Depure a falha entre módulos', { capability: 'STRONG', reasoning: 'HIGH' });
+  const first = route('Depure a falha entre módulos', { capability: 'STRONG', reasoning: 'HIGH' }, {
+    policy: premium,
+  });
   assert.deepEqual(first.alternatives, ['fable', 'sonnet', 'haiku']);
   assert.deepEqual(
     candidateSequence('anthropic', 'FAST').map((c) => c.model),
     ['haiku', 'sonnet', 'opus', 'fable'],
   );
+
+  // And on an account that has not allowed it, the same refusal falls to a
+  // weaker model rather than to one it cannot pay for.
+  const capped = route('Depure a falha entre módulos', { capability: 'STRONG', reasoning: 'HIGH' }, {
+    unavailableModels: ['opus'],
+  });
+  assert.equal(capped.resolvedModel, 'sonnet');
+  assert.equal(capped.alternatives.includes('fable'), false);
 });
 
 test('repeated no-progress attempts escalate: first more reasoning, then a stronger model', () => {

@@ -17,8 +17,14 @@ import { createGitFixture, type GitFixture } from './helpers/git-fixture.js';
 import { makeAgentResult, type AgentRunner } from '../src/agents/agent-runner.js';
 import type { AgentInput, AgentResult, HealthStatus } from '../src/core/types.js';
 import type { WorkerRuntimeCapabilities } from '../src/routing/provider-policy.js';
-import { WORKER_SELECTIONS as CORE_SELECTIONS } from '../src/routing/tiers.js';
 import {
+  WORKER_SELECTIONS as CORE_SELECTIONS,
+  CAPABILITY_TIERS,
+  REASONING_TIERS,
+} from '../src/routing/tiers.js';
+import {
+  ACCOUNT_CAPABILITY_TIERS as SHARED_CAPABILITY_TIERS,
+  ACCOUNT_REASONING_TIERS as SHARED_REASONING_TIERS,
   WORKER_SELECTIONS as SHARED_SELECTIONS,
   type IpcResult,
   type RunDetailView,
@@ -216,6 +222,58 @@ async function chat(prepared: Prepared): Promise<ChatMessageView[]> {
 
 test('the shared contract spells the worker selections exactly as the core does', () => {
   assert.deepEqual([...SHARED_SELECTIONS], [...CORE_SELECTIONS]);
+});
+
+test('the shared contract spells the routing tiers exactly as the core does', () => {
+  assert.deepEqual([...SHARED_CAPABILITY_TIERS], [...CAPABILITY_TIERS]);
+  assert.deepEqual([...SHARED_REASONING_TIERS], [...REASONING_TIERS]);
+});
+
+test("the account's ceiling holds through a real run: MAX/MAX arrives as opus/high", async () => {
+  // The incident, through the loop rather than the router alone. The
+  // supervisor asks for the top tier; the account allows Opus at high and no
+  // extra credits; the worker is handed opus/high and the premium model is
+  // never sent - not even as an attempt to be refused.
+  const worker = new RoutedWorker((input) => writeHello(input.workingDirectory));
+  const prepared = await prepare({
+    orchestratorScript: [
+      delegate(`Crie hello.txt contendo exatamente: ${EXPECTED}`, {
+        capability: 'max',
+        reasoning: 'max',
+      }),
+      done(),
+    ],
+    worker,
+  });
+  try {
+    value(
+      await prepared.fixture.router.handle('accounts.setRoutingPolicy', {
+        accountId: prepared.accounts.first,
+        maxCapability: 'STRONG',
+        maxReasoning: 'HIGH',
+        allowPremiumModels: false,
+      }),
+    );
+
+    const run = await prepared.run('faça');
+    assert.equal(run.status, 'DONE', run.summary ?? '');
+    assert.deepEqual(worker.calls[0]!.routing, { model: 'opus', reasoning: 'high' });
+
+    const rows = await workerRows(prepared, run.id);
+    assert.equal(rows[0]!.model, 'opus');
+    assert.equal(rows[0]!.requestedCapability, 'MAX');
+    assert.match(
+      rows[0]!.selectionReason ?? '',
+      /Solicitado MAX\/MAX; limitado a STRONG\/HIGH pela política da conta/,
+    );
+    // Nothing was spent finding out: the premium model was never attempted.
+    assert.equal(
+      worker.calls.some((call) => call.routing?.model === 'fable'),
+      false,
+    );
+  } finally {
+    await prepared.cleanup();
+  }
 });
 
 test('within one run the model follows each delegation: STRONG then FAST, both on the record', async () => {

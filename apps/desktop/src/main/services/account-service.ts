@@ -13,6 +13,11 @@ import type { Account, AuthState, Database, ProviderAccountManager } from '../co
 import { newId } from '../core.js';
 import type { AccountView, ProviderName } from '../../shared/ipc-contract.js';
 import type { EventBus } from '../events.js';
+import {
+  capabilityCeilingOf,
+  reasoningCeilingOf,
+  PREMIUM_MODELS,
+} from '../../../../../src/routing/account-policy.js';
 
 export type UrlOpener = (url: string) => void | Promise<void>;
 
@@ -67,6 +72,7 @@ export class AccountService {
       provider: row.provider_id,
       state: row.auth_state as AuthState,
       detail: detailFor(row.auth_state as AuthState),
+      routing: routingViewOf(row),
     }));
   }
 
@@ -93,6 +99,7 @@ export class AccountService {
       provider: record.provider_id,
       state: 'disconnected',
       detail: detailFor('disconnected'),
+      routing: routingViewOf(record),
     };
   }
 
@@ -173,6 +180,28 @@ export class AccountService {
     return this.database.accounts.remove(accountId);
   }
 
+  /**
+   * Sets what one account is allowed to spend on.
+   *
+   * The tiers are validated at the IPC boundary; this stores them and returns
+   * the account as the screen will show it. Nothing here touches any other
+   * account - a ceiling is a property of the account, not a global setting.
+   */
+  setRoutingPolicy(input: {
+    accountId: string;
+    maxCapability: string | null;
+    maxReasoning: string | null;
+    allowPremiumModels: boolean;
+  }): AccountView {
+    const record = this.database.accounts.require(input.accountId);
+    this.database.accounts.setRoutingPolicy(input.accountId, {
+      maxCapability: capabilityCeilingOf(input.maxCapability),
+      maxReasoning: reasoningCeilingOf(input.maxReasoning),
+      allowPremiumModels: input.allowPremiumModels,
+    });
+    return this.viewOf(record.id, record.auth_state as AuthState);
+  }
+
   private viewOf(accountId: string, state: AuthState, detail?: string): AccountView {
     const record = this.database.accounts.require(accountId);
     return {
@@ -181,8 +210,29 @@ export class AccountService {
       provider: record.provider_id,
       state,
       detail: detail ?? detailFor(state),
+      routing: routingViewOf(record),
     };
   }
+}
+
+/**
+ * The account's ceiling, as the screen reads it.
+ *
+ * `premiumModels` travels with it so the interface can name the models the
+ * switch is about, instead of the person having to guess what "extra credits"
+ * refers to.
+ */
+function routingViewOf(record: {
+  max_capability: string | null;
+  max_reasoning: string | null;
+  allow_premium_models: number;
+}): AccountView['routing'] {
+  return {
+    maxCapability: capabilityCeilingOf(record.max_capability),
+    maxReasoning: reasoningCeilingOf(record.max_reasoning),
+    allowPremiumModels: record.allow_premium_models === 1,
+    premiumModels: [...PREMIUM_MODELS],
+  };
 }
 
 function detailFor(state: AuthState): string {

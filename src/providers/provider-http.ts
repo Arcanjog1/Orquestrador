@@ -178,7 +178,7 @@ export function classify(
   const retrySeconds = parseRetryAfter(retryAfter);
 
   const saysNoCredit =
-    /insufficient[_ ]?quota|insufficient[_ ]?credit|credit balance|billing_?(hard_limit|error)|quota[_ ]exceeded|exceeded your current quota|payment required|saldo/.test(
+    /insufficient[_ ]?quota|insufficient[_ ]?credit|credit balance|billing_?(hard_limit|error)|quota[_ ]exceeded|exceeded your current quota|payment required|saldo|out of (usage |extra |additional )?credits|usage credits/.test(
       lower,
     );
 

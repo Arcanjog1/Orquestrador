@@ -205,7 +205,7 @@ export function isMechanicalFailure(result: AttemptOutcome): boolean {
   if (result.outcome === 'spawn-error') return true;
   if (result.outcome === 'completed' && result.exitCode === 0) return false;
   const text = `${result.stderr}\n${result.stdout}`;
-  return /\b(ENOENT|EACCES|ECONN\w*|ETIMEDOUT|EAI_AGAIN|command not found|n[ãa]o (foi )?encontrad|not logged in|please (log ?in|run \/login)|login required|authentication|unauthori[sz]ed|invalid api key|forbidden|rate.?limit|usage limit|quota|overloaded|permission denied|network|proxy|certificate)\b/i.test(
+  return /\b(ENOENT|EACCES|ECONN\w*|ETIMEDOUT|EAI_AGAIN|command not found|n[ãa]o (foi )?encontrad|not logged in|please (log ?in|run \/login)|login required|authentication|unauthori[sz]ed|invalid api key|forbidden|rate.?limit|usage limit|usage credits|out of credits|credit balance|quota|overloaded|permission denied|network|proxy|certificate)\b/i.test(
     text,
   );
 }

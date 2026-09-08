@@ -94,6 +94,15 @@ export function candidateSequence(
   provider: RoutingProvider,
   tier: CapabilityTier,
   unavailable: readonly string[] = [],
+  /**
+   * Models the account's policy refuses.
+   *
+   * Applied here rather than after resolution on purpose: the incident this
+   * exists for is a run that chose the premium model, sent it, and learned
+   * from the refusal - "You're out of usage credits" - that the account could
+   * not use it. A candidate the account will not accept must never be first.
+   */
+  refused: (model: string) => boolean = () => false,
 ): Array<{ model: string; tier: CapabilityTier }> {
   const table = provider === 'anthropic' ? CLAUDE_MODELS : null;
   if (!table) return [];
@@ -106,6 +115,7 @@ export function candidateSequence(
     const at = CAPABILITY_TIERS[rank]!;
     for (const model of table[at]) {
       if (unavailable.includes(model) || out.some((entry) => entry.model === model)) continue;
+      if (refused(model)) continue;
       out.push({ model, tier: at });
     }
   }

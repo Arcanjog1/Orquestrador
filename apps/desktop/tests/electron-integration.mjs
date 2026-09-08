@@ -447,6 +447,71 @@ test('a verification is added, edited and switched off on the real Settings scre
   }
 });
 
+test("accounts: the ceiling is set in the interface, per account, and persists", async () => {
+  // The request was explicit that this must be changeable without editing
+  // JSON, environment variables or files. So it is driven here the way a
+  // person drives it: open Settings, pick the two ceilings, tick the box.
+  const window = await openWindow();
+  const one = await window.webContents.executeJavaScript(
+    `window.api.accounts.create(${JSON.stringify({ name: 'Claude Teto A', provider: 'anthropic' })})`,
+  );
+  const two = await window.webContents.executeJavaScript(
+    `window.api.accounts.create(${JSON.stringify({ name: 'Claude Teto B', provider: 'anthropic' })})`,
+  );
+  try {
+    await window.webContents.executeJavaScript(
+      `(() => { location.hash = '#/configuracoes?tab=accounts'; return true; })()`,
+    );
+    await reloadWindow(window);
+    // Uppercased by CSS, and innerText follows - so matched case-insensitively.
+    await waitForText(window, /roteamento desta conta/i, 15_000);
+
+    // The premium model is named on the switch, so "extra credits" is not a
+    // phrase the person has to interpret.
+    const body = await window.webContents.executeJavaScript('document.body.innerText');
+    assert.match(body, /Permitir modelos que exigem créditos extras \(fable\)/);
+
+    await select(window, `routing-capability-${one.id}`, 'STRONG');
+    await select(window, `routing-reasoning-${one.id}`, 'HIGH');
+
+    const saved = await (async () => {
+      const until = Date.now() + 15_000;
+      while (Date.now() < until) {
+        const list = await window.webContents.executeJavaScript('window.api.accounts.list()');
+        const found = list.find((a) => a.id === one.id);
+        if (found?.routing.maxCapability === 'STRONG' && found?.routing.maxReasoning === 'HIGH') {
+          return found;
+        }
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      return null;
+    })();
+    assert.ok(saved, 'the ceiling reached the database');
+    assert.equal(saved.routing.allowPremiumModels, false, 'and extra credits stay off by default');
+
+    // The other account is untouched: this is a property of an account.
+    const list = await window.webContents.executeJavaScript('window.api.accounts.list()');
+    assert.equal(list.find((a) => a.id === two.id).routing.maxCapability, null);
+
+    // And it survives reopening the window.
+    await reloadWindow(window);
+    await waitForText(window, /roteamento desta conta/i, 15_000);
+    const afterReload = await window.webContents.executeJavaScript(
+      `(() => document.querySelector('[data-testid="routing-capability-${one.id}"]').value)()`,
+    );
+    assert.equal(afterReload, 'STRONG');
+  } finally {
+    await window.webContents.executeJavaScript(
+      `(async () => {
+         for (const id of ${JSON.stringify([one.id, two.id])}) {
+           try { await window.api.accounts.remove({ accountId: id }); } catch {}
+         }
+         return true;
+       })()`,
+    );
+  }
+});
+
 test('the login dialog shows the device code, keeps it while waiting, and drops it when done', async () => {
   const window = await openWindow();
 
@@ -2161,6 +2226,27 @@ async function type(window, testid, text) {
     })()
   `);
   if (done !== 'typed') throw new Error(`no input with data-testid="${testid}"`);
+}
+
+/**
+ * Chooses an option in a `<select>` the way React sees it.
+ *
+ * Same reason `type` exists: assigning `.value` alone does not reach React's
+ * state, so the native setter is used and a change event dispatched.
+ */
+async function select(window, testid, value) {
+  const done = await window.webContents.executeJavaScript(`
+    (() => {
+      const el = document.querySelector('[data-testid="${testid}"]');
+      if (!el) return 'missing';
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype, 'value').set;
+      setter.call(el, ${JSON.stringify(value)});
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'selected';
+    })()
+  `);
+  if (done !== 'selected') throw new Error(`no select with data-testid="${testid}"`);
 }
 
 /** Reloads the page and resolves once the new document has finished loading. */

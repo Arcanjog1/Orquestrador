@@ -79,6 +79,12 @@ export interface AccountRecord extends SqlRow {
   /** The last characters of the key, so it can be recognised, never read. */
   key_hint: string | null;
   base_url: string | null;
+  /** The strongest capability tier this account may use. NULL: no ceiling. */
+  max_capability: string | null;
+  /** The strongest reasoning tier this account may use. NULL: no ceiling. */
+  max_reasoning: string | null;
+  /** 1 when this account may be routed to a model that needs extra credits. */
+  allow_premium_models: number;
   default_model: string | null;
   default_reasoning: string | null;
   /** 0 until the person deliberately switches a metered connection on. */
@@ -86,6 +92,34 @@ export interface AccountRecord extends SqlRow {
 }
 
 export class AccountRepository extends Repository {
+  /**
+   * Sets what this account is allowed to spend on.
+   *
+   * Per account, never global: two Claude accounts can hold different
+   * ceilings, and changing one must not touch the other. A tier is stored
+   * only when it is a real tier - the caller validates - and NULL means "no
+   * ceiling", which is what every account had before this existed.
+   */
+  setRoutingPolicy(
+    accountId: string,
+    policy: {
+      maxCapability: string | null;
+      maxReasoning: string | null;
+      allowPremiumModels: boolean;
+    },
+  ): AccountRecord {
+    this.db.run(
+      'UPDATE accounts SET max_capability = ?, max_reasoning = ?, allow_premium_models = ? WHERE id = ?',
+      [
+        policy.maxCapability,
+        policy.maxReasoning,
+        policy.allowPremiumModels ? 1 : 0,
+        accountId,
+      ],
+    );
+    return this.require(accountId);
+  }
+
   create(input: {
     id: string;
     providerId: string;

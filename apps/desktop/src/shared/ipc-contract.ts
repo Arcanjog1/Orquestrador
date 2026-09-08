@@ -36,6 +36,7 @@ export const REQUEST_CHANNELS = [
   'accounts.cancelConnect',
   'accounts.status',
   'accounts.remove',
+  'accounts.setRoutingPolicy',
   'github.status',
   'github.configure',
   'github.connect',
@@ -234,6 +235,24 @@ export interface AccountView {
   readonly provider: string;
   readonly state: AuthStateView;
   readonly detail: string;
+  /**
+   * What this account is allowed to spend on.
+   *
+   * Per account, never global: two Claude accounts can hold different
+   * ceilings. Null tiers mean no ceiling.
+   */
+  readonly routing: AccountRoutingView;
+}
+
+export interface AccountRoutingView {
+  /** `FAST` | `BALANCED` | `STRONG` | `MAX`, or null for no ceiling. */
+  readonly maxCapability: string | null;
+  /** `LOW` | `MEDIUM` | `HIGH` | `MAX`, or null for no ceiling. */
+  readonly maxReasoning: string | null;
+  /** Whether a model that needs credits beyond the subscription may be used. */
+  readonly allowPremiumModels: boolean;
+  /** The model aliases this application treats as needing extra credits. */
+  readonly premiumModels: readonly string[];
 }
 
 export interface AccountProgressEvent {
@@ -375,6 +394,16 @@ export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
  */
 export const WORKER_SELECTIONS = ['auto', 'speed', 'quality', 'manual'] as const;
 export type WorkerSelection = (typeof WORKER_SELECTIONS)[number];
+
+/**
+ * The tiers an account's ceiling is expressed in.
+ *
+ * Mirrors the core's `CAPABILITY_TIERS` / `REASONING_TIERS` (a test keeps them
+ * equal); spelled here so the renderer and the validator need nothing from the
+ * core - the same rule `WORKER_SELECTIONS` above follows.
+ */
+export const ACCOUNT_CAPABILITY_TIERS = ['FAST', 'BALANCED', 'STRONG', 'MAX'] as const;
+export const ACCOUNT_REASONING_TIERS = ['LOW', 'MEDIUM', 'HIGH', 'MAX'] as const;
 
 /**
  * One role of a workspace's team, resolved for display.
@@ -1133,6 +1162,21 @@ export interface IpcMap {
   'accounts.cancelConnect': { request: { accountId: string }; response: { cancelled: boolean } };
   'accounts.status': { request: { accountId: string }; response: AccountView };
   'accounts.remove': { request: { accountId: string }; response: { removed: boolean } };
+  /**
+   * Sets one account's ceiling. Never touches another account.
+   *
+   * Nulls clear a ceiling. `allowPremiumModels` is the only switch that can
+   * let the router reach a model that draws on extra credits.
+   */
+  'accounts.setRoutingPolicy': {
+    request: {
+      accountId: string;
+      maxCapability: string | null;
+      maxReasoning: string | null;
+      allowPremiumModels: boolean;
+    };
+    response: AccountView;
+  };
 
   /**
    * GitHub, one login for the application, by OAuth device flow.

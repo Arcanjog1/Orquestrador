@@ -428,6 +428,9 @@ export class IpcRouter {
       if (!project) throw new Error('Este projeto não existe mais.');
       return { project, workspaceId: opened.workspace.id, workspaceCreated: opened.created };
     });
+    this.handlers.set('accounts.setRoutingPolicy', (p) =>
+      s.accounts.setRoutingPolicy(p as IpcMap['accounts.setRoutingPolicy']['request']),
+    );
     this.handlers.set('project.preflight', async (p) =>
       s.workspaces.preflight((p as { projectId: string }).projectId, s.projects),
     );

@@ -16,7 +16,14 @@
  *    by sending a gigabyte of text.
  */
 
-import { REASONING_LEVELS, WORKER_SELECTIONS, type IpcMap, type RequestChannel } from './ipc-contract.js';
+import {
+  ACCOUNT_CAPABILITY_TIERS,
+  ACCOUNT_REASONING_TIERS,
+  REASONING_LEVELS,
+  WORKER_SELECTIONS,
+  type IpcMap,
+  type RequestChannel,
+} from './ipc-contract.js';
 
 export class IpcValidationError extends Error {
   readonly code = 'INVALID_ARGUMENT';
@@ -376,6 +383,14 @@ export const REQUEST_VALIDATORS: {
   'accounts.cancelConnect': obj({ accountId: id }),
   'accounts.status': obj({ accountId: id }),
   'accounts.remove': obj({ accountId: id }),
+  // Tiers by name, nullable for "no ceiling". A value that is not a tier is
+  // refused here rather than stored and quietly ignored later.
+  'accounts.setRoutingPolicy': obj({
+    accountId: id,
+    maxCapability: nullable(oneOf(ACCOUNT_CAPABILITY_TIERS)),
+    maxReasoning: nullable(oneOf(ACCOUNT_REASONING_TIERS)),
+    allowPremiumModels: bool,
+  }),
 
   'github.status': noArgs,
   // Shape only: the service says, case by case, what is wrong with a value

@@ -30,6 +30,13 @@ import {
 import type { RoutingProvider } from './provider-policy.js';
 import { assessTask, isSensitive } from './task-assessment.js';
 import {
+  applyCeiling,
+  DEFAULT_ACCOUNT_POLICY,
+  isPremiumModel,
+  refusesModel,
+  type AccountRoutingPolicy,
+} from './account-policy.js';
+import {
   DEFAULT_REQUIREMENTS,
   higherCapability,
   higherReasoning,
@@ -70,6 +77,11 @@ export interface RouterInput {
   manual?: { model: string | null; reasoning: string | null };
   /** Models this run already found unavailable. */
   unavailableModels?: readonly string[];
+  /**
+   * What this account is allowed to spend on. Absent means the safe default:
+   * no tier ceiling, premium models off.
+   */
+  policy?: AccountRoutingPolicy;
 }
 
 export interface RouterOutput {
@@ -87,10 +99,19 @@ export interface RouterOutput {
   fallbackUsed: boolean;
   /** Next models to try if the CLI refuses the resolved one, in order. */
   alternatives: string[];
+  /**
+   * True when the account's policy left nothing to run.
+   *
+   * Not a model choice - a question for the person. The caller stops and
+   * asks rather than falling back to the CLI default, which would be
+   * choosing a model nobody approved.
+   */
+  policyBlocked: boolean;
 }
 
 export function routeWorkerModel(input: RouterInput): RouterOutput {
   const requested = input.requested ?? { ...DEFAULT_REQUIREMENTS };
+  const policy = input.policy ?? DEFAULT_ACCOUNT_POLICY;
   const reasons: string[] = [];
   let fallbackUsed = false;
 
@@ -103,9 +124,20 @@ export function routeWorkerModel(input: RouterInput): RouterOutput {
     );
   }
 
-  // 1. Manual: exactly what the person typed, checked against the CLI.
+  // 1. Manual: exactly what the person typed, checked against the CLI *and*
+  //    against the account's policy. A typed model is still a request, and a
+  //    policy that a manual choice could step over would not be a policy.
   if (input.selection === 'manual') {
-    const model = input.capabilities.modelFlag ? input.manual?.model?.trim() || null : null;
+    const typed = input.capabilities.modelFlag ? input.manual?.model?.trim() || null : null;
+    let model = typed;
+    if (typed && refusesModel(typed, policy)) {
+      model = null;
+      fallbackUsed = true;
+      reasons.push(
+        `"${typed}" exige créditos extras e a política desta conta não permite; ` +
+          'usando o padrão do CLI',
+      );
+    }
     const effort = input.capabilities.effortFlag
       ? resolveFixedEffort(input.manual?.reasoning ?? null, input.capabilities.declaredEfforts)
       : { value: null, fallbackUsed: false, note: null };
@@ -129,6 +161,7 @@ export function routeWorkerModel(input: RouterInput): RouterOutput {
       selectionReason: reasons.join('; '),
       fallbackUsed,
       alternatives: [],
+      policyBlocked: false,
     };
   }
 
@@ -182,18 +215,45 @@ export function routeWorkerModel(input: RouterInput): RouterOutput {
     }
   }
 
+  // 5b. The account's ceiling.
+  //
+  // Last of the tier steps and before a single model name is considered:
+  // clamping here is what makes "requested MAX, ran STRONG" a recorded fact
+  // rather than a refusal discovered by spending. Downward only - a ceiling
+  // is not a floor.
+  const ceiling = applyCeiling(capability, reasoning, policy);
+  if (ceiling.note) {
+    fallbackUsed = true;
+    reasons.push(ceiling.note);
+  }
+  capability = ceiling.capability;
+  reasoning = ceiling.reasoning;
+
   // 6. Provider policy → CLI values.
   let resolvedModel: string | null = null;
   let alternatives: string[] = [];
+  let policyBlocked = false;
   if (!input.capabilities.modelFlag) {
     fallbackUsed = true;
     reasons.push('o CLI não aceita --model; padrão do CLI');
   } else {
-    const sequence = candidateSequence(input.provider, capability, input.unavailableModels ?? []);
+    const sequence = candidateSequence(input.provider, capability, input.unavailableModels ?? [], (model) =>
+      refusesModel(model, policy),
+    );
+    const withoutPolicy = candidateSequence(input.provider, capability, input.unavailableModels ?? []);
     const first = sequence[0];
     if (!first) {
       fallbackUsed = true;
-      reasons.push('nenhum modelo disponível na política; padrão do CLI');
+      // Nothing left *because of the policy* is a different situation from
+      // nothing left at all: the first is a decision the person can change,
+      // and falling back to the CLI default there would run a model the
+      // policy exists to keep out.
+      policyBlocked = withoutPolicy.length > 0;
+      reasons.push(
+        policyBlocked
+          ? 'todos os modelos deste nível exigem créditos extras e a política desta conta não permite'
+          : 'nenhum modelo disponível na política; padrão do CLI',
+      );
     } else {
       resolvedModel = first.model;
       alternatives = sequence.slice(1).map((entry) => entry.model);
@@ -203,7 +263,18 @@ export function routeWorkerModel(input: RouterInput): RouterOutput {
       }
       if (first.tier !== capability) {
         fallbackUsed = true;
-        reasons.push(`sem modelo ${capability} disponível; usando ${first.tier}`);
+        const premiumSkipped =
+          withoutPolicy.length > sequence.length &&
+          withoutPolicy.some((entry) => isPremiumModel(entry.model));
+        reasons.push(
+          premiumSkipped
+            ? `modelo ${capability} exige créditos extras e a política desta conta não permite; usando ${first.tier}`
+            : `sem modelo ${capability} disponível; usando ${first.tier}`,
+        );
+      } else if (withoutPolicy.length > sequence.length) {
+        // Same tier, but a premium candidate was skipped to get here. Said
+        // out loud so nobody wonders why the top model was not used.
+        reasons.push('candidatos que exigem créditos extras foram ignorados pela política da conta');
       }
       reasons.push(`modelo ${resolvedModel}`);
     }
@@ -231,6 +302,7 @@ export function routeWorkerModel(input: RouterInput): RouterOutput {
     selectionReason: reasons.join('; '),
     fallbackUsed,
     alternatives,
+    policyBlocked,
   };
 }
 
