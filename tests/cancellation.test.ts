@@ -245,3 +245,37 @@ test('the cancellation survives reopening the application', async () => {
     await prepared.cleanup();
   }
 });
+
+/* ---- two rounds with no new evidence ------------------------------------ */
+
+test('two iterations that prove nothing new stop for a person, without escalating', async () => {
+  // The shape of the incident: the supervisor keeps asking for the same thing,
+  // the workspace does not change, the criteria stay pending. Repeating that is
+  // a loop, and a stronger model does not break it.
+  const verify = JSON.stringify({
+    action: 'verify',
+    acceptanceCriteria: ['index.html existe'],
+    verificationCommands: [],
+    fileChecks: [{ path: 'index.html', mustExist: true, criteria: [] }],
+    fileReads: [],
+    summary: 'quero ver de novo',
+  });
+  const prepared = await prepare({ orchestratorScript: [verify, verify, verify, verify] });
+  try {
+    const sent = value<{ run: { id: string } }>(await prepared.send('faça'));
+    const run = await prepared.fixture.services.orchestration.waitFor(sent.run.id);
+
+    assert.equal(run.status, 'NEEDS_HUMAN');
+    assert.match(run.summary ?? '', /não produziram nenhuma evidência nova/);
+    const steps = prepared.fixture.services.database.runs.steps(sent.run.id);
+    assert.equal(steps.find((s) => s.phase === 'progress')?.status, 'stagnant');
+
+    // It stopped early rather than spending the whole budget.
+    assert.ok(
+      prepared.orchestrator.calls.length <= 3,
+      `stopped after ${prepared.orchestrator.calls.length} rounds`,
+    );
+  } finally {
+    await prepared.cleanup();
+  }
+});

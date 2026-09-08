@@ -8,7 +8,7 @@
  */
 
 import type { Decision, DecisionAction } from '../core/types.js';
-import type { FileCheckRequest } from '../verification/file-check.js';
+import type { FileCheckRequest, FileReadRequest } from '../verification/file-check.js';
 import { capabilityFromWire, reasoningFromWire } from '../routing/tiers.js';
 
 export const ALLOWED_ACTIONS: readonly DecisionAction[] = ['delegate', 'verify', 'done', 'blocked'];
@@ -57,6 +57,7 @@ export function parseDecision(raw: string): ParseResult {
     acceptanceCriteria: [],
     verificationCommands: [],
     fileChecks: [],
+    fileReads: [],
   };
 
   const criteria = readStringArray(obj.acceptanceCriteria, 'acceptanceCriteria');
@@ -70,6 +71,10 @@ export function parseDecision(raw: string): ParseResult {
   const checks = readFileChecks(obj.fileChecks);
   if (checks.error) return fail(checks.error, raw);
   decision.fileChecks = checks.value;
+
+  const reads = readFileReads(obj.fileReads);
+  if (reads.error) return fail(reads.error, raw);
+  decision.fileReads = reads.value;
 
   const files = readStringArray(obj.relevantFiles, 'relevantFiles');
   if (files.error) return fail(files.error, raw);
@@ -292,6 +297,44 @@ function truncate(text: string, max: number): string {
  * against the workspace root and bounds-checked by `runFileCheck`; this
  * function's job is only to refuse a shape that is not a file check.
  */
+/**
+ * `fileReads`, as data.
+ *
+ * Same rule as a file check: two known fields, nothing else accepted. A read
+ * shows content; it settles no criterion, which is why it takes no `criteria`
+ * and cannot be mistaken for proof.
+ */
+function readFileReads(value: unknown): { value: FileReadRequest[]; error?: string } {
+  if (value === undefined || value === null) return { value: [] };
+  if (!Array.isArray(value)) return { value: [], error: '"fileReads" must be an array.' };
+  if (value.length > 10) return { value: [], error: '"fileReads" may hold at most 10 entries.' };
+
+  const out: FileReadRequest[] = [];
+  for (const [index, entry] of value.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { value: [], error: `"fileReads[${index}]" must be an object.` };
+    }
+    const row = entry as Record<string, unknown>;
+    for (const key of Object.keys(row)) {
+      if (key !== 'path' && key !== 'maxBytes') {
+        return { value: [], error: `"fileReads[${index}].${key}" is not a field of a file read.` };
+      }
+    }
+    if (typeof row.path !== 'string' || row.path.trim().length === 0) {
+      return { value: [], error: `"fileReads[${index}].path" must be a non-empty string.` };
+    }
+    const request: Record<string, unknown> = { path: row.path.trim() };
+    if (row.maxBytes !== undefined && row.maxBytes !== null) {
+      if (typeof row.maxBytes !== 'number' || !Number.isInteger(row.maxBytes) || row.maxBytes <= 0) {
+        return { value: [], error: `"fileReads[${index}].maxBytes" must be a positive integer.` };
+      }
+      request.maxBytes = row.maxBytes;
+    }
+    out.push(request as unknown as FileReadRequest);
+  }
+  return { value: out };
+}
+
 function readFileChecks(value: unknown): { value: FileCheckRequest[]; error?: string } {
   if (value === undefined || value === null) return { value: [] };
   if (!Array.isArray(value)) return { value: [], error: '"fileChecks" must be an array.' };

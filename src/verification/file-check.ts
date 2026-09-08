@@ -223,6 +223,138 @@ export async function runFileCheck(
   return { ...base, ...found, passed: true, outcome: 'ok', problem: null };
 }
 
+/* ------------------------------------------------------------------ *
+ * Reading a file for the supervisor
+ * ------------------------------------------------------------------ */
+
+/** What the supervisor asked to see. Data, never a command. */
+export interface FileReadRequest {
+  readonly path: string;
+  /** Bytes to return, capped. Omitted means the default budget. */
+  readonly maxBytes?: number;
+}
+
+export interface FileReadResult {
+  readonly request: FileReadRequest;
+  readonly ok: boolean;
+  readonly outcome: FileCheckOutcome;
+  readonly resolvedPath: string | null;
+  readonly sizeBytes: number | null;
+  readonly sha256: string | null;
+  /** The text, truncated to the budget. Null when nothing was read. */
+  readonly text: string | null;
+  /** True when the file is longer than what came back. */
+  readonly truncated: boolean;
+  readonly problem: string | null;
+}
+
+/** What one read may return, and what the whole round may return. */
+export const MAX_READ_BYTES = 16 * 1024;
+export const MAX_READ_TOTAL_BYTES = 64 * 1024;
+
+/**
+ * Reads a file so the supervisor does not have to ask the worker to copy it.
+ *
+ * The incident this exists for: the supervisor asked the worker, over and over,
+ * for the full contents of four files it had just written. The answers came
+ * back truncated, the criteria stayed pending, and the run climbed to a
+ * stronger model for a problem no model could fix - the application could have
+ * opened the files itself the whole time.
+ *
+ * Same boundary as a file check, for the same reason: resolved inside the
+ * workspace, checked after following links, never a command, and bounded, so a
+ * large file cannot fill a prompt. Truncation is *reported*, because a silent
+ * truncation is how the supervisor came to believe it had seen a whole file.
+ */
+export async function runFileRead(
+  workspaceRoot: string,
+  request: FileReadRequest,
+  budget: number = MAX_READ_BYTES,
+): Promise<FileReadResult> {
+  const empty = {
+    request,
+    resolvedPath: null,
+    sizeBytes: null,
+    sha256: null,
+    text: null,
+    truncated: false,
+  } as const;
+  const check = await runFileCheck(workspaceRoot, { path: request.path });
+  if (!check.passed) {
+    return { ...empty, ok: false, outcome: check.outcome, problem: check.problem };
+  }
+
+  const limit = Math.max(0, Math.min(request.maxBytes ?? budget, budget));
+  try {
+    const bytes = await readFile(check.resolvedPath!);
+    const shown = bytes.subarray(0, limit);
+    return {
+      request,
+      ok: true,
+      outcome: 'ok',
+      resolvedPath: check.resolvedPath,
+      sizeBytes: bytes.byteLength,
+      sha256: check.sha256,
+      text: shown.toString('utf8'),
+      truncated: bytes.byteLength > shown.byteLength,
+      problem: null,
+    };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return {
+      ...empty,
+      ok: false,
+      outcome: 'read-error',
+      resolvedPath: check.resolvedPath,
+      problem: `Não foi possível ler "${request.path}": ${code ?? 'erro desconhecido'}.`,
+    };
+  }
+}
+
+/**
+ * Reads several files under one shared budget.
+ *
+ * The budget is shared on purpose: five files at the per-file limit would be a
+ * prompt nobody can read and a cost nobody chose. Files that do not fit are
+ * reported as such rather than dropped in silence.
+ */
+export async function runFileReads(
+  workspaceRoot: string,
+  requests: readonly FileReadRequest[],
+): Promise<FileReadResult[]> {
+  const out: FileReadResult[] = [];
+  let remaining = MAX_READ_TOTAL_BYTES;
+  for (const request of requests) {
+    if (remaining <= 0) {
+      out.push({
+        request,
+        ok: false,
+        outcome: 'too-large',
+        resolvedPath: null,
+        sizeBytes: null,
+        sha256: null,
+        text: null,
+        truncated: false,
+        problem: 'O orçamento de leitura desta rodada acabou antes deste arquivo.',
+      });
+      continue;
+    }
+    const result = await runFileRead(workspaceRoot, request, Math.min(MAX_READ_BYTES, remaining));
+    remaining -= result.text ? Buffer.byteLength(result.text, 'utf8') : 0;
+    out.push(result);
+  }
+  return out;
+}
+
+/** One read, as the supervisor's prompt shows it. */
+export function describeFileRead(result: FileReadResult): string {
+  if (!result.ok) return `FALHOU ${result.request.path} — ${result.problem ?? result.outcome}`;
+  return (
+    `${result.request.path} (${result.sizeBytes} bytes, sha256 ${result.sha256?.slice(0, 12)}…` +
+    `${result.truncated ? ', TRUNCADO' : ''})`
+  );
+}
+
 /** Runs several checks, in order, and never lets one failure hide the rest. */
 export async function runFileChecks(
   workspaceRoot: string,

@@ -91,7 +91,7 @@ test('the whole schema still satisfies strict mode, and the version moved', () =
     [...DECISION_JSON_SCHEMA.required].sort(),
     Object.keys(DECISION_JSON_SCHEMA.properties).sort(),
   );
-  assert.equal(DECISION_SCHEMA_VERSION, 5, 'the contract changed shape, so the version says so');
+  assert.equal(DECISION_SCHEMA_VERSION, 6, 'the contract changed shape, so the version says so');
 });
 
 /* ---- the parser -------------------------------------------------------- */

@@ -113,7 +113,12 @@ export interface AcceptanceCriterion {
   note?: string;
 }
 
-import type { FileCheckRequest, FileCheckResult } from '../verification/file-check.js';
+import type {
+  FileCheckRequest,
+  FileCheckResult,
+  FileReadRequest,
+  FileReadResult,
+} from '../verification/file-check.js';
 import type { WorkerReport } from '../worker/worker-report.js';
 import type { CapabilityTier, ReasoningTier, WorkerRequirements } from '../routing/tiers.js';
 
@@ -139,6 +144,19 @@ export interface Decision {
    * what it actually demonstrates and nothing else.
    */
   fileChecks: FileCheckRequest[];
+  /**
+   * Files the supervisor wants to *see*.
+   *
+   * The application opens them and puts a bounded excerpt, the size and the
+   * hash in front of the supervisor. It exists because the supervisor was
+   * asking the worker to copy whole files into the chat - answers came back
+   * truncated, the criteria stayed pending, and the run went round again for
+   * something the application could read for itself.
+   *
+   * Reading is not proof of anything: a read shows content, a check settles a
+   * criterion, and they are separate fields for that reason.
+   */
+  fileReads: FileReadRequest[];
   /** Optional human-readable rationale. Never model reasoning; a one-liner. */
   summary?: string;
   /** Present (and required) when `action === 'blocked'`. */
@@ -476,6 +494,8 @@ export interface IterationRecord {
   doneRejection?: DoneGateResult;
   /** Files the application read and compared for itself in this iteration. */
   fileChecks?: readonly FileCheckResult[];
+  /** Files the application opened and showed to the supervisor. */
+  fileReads?: readonly FileReadResult[];
   /** The normalised account of what the worker did, and what was measured. */
   workerReport?: WorkerReport;
   notes: string[];

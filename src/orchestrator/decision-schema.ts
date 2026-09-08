@@ -23,7 +23,7 @@
 import { ALLOWED_ACTIONS } from './decision-parser.js';
 import { CAPABILITY_TIERS, REASONING_TIERS } from '../routing/tiers.js';
 
-export const DECISION_SCHEMA_VERSION = 5;
+export const DECISION_SCHEMA_VERSION = 6;
 
 /** The tiers as the decision JSON spells them (lowercase). */
 export const WIRE_CAPABILITIES = CAPABILITY_TIERS.map((tier) => tier.toLowerCase());
@@ -39,6 +39,7 @@ export const DECISION_JSON_SCHEMA = {
     'acceptanceCriteria',
     'verificationCommands',
     'fileChecks',
+    'fileReads',
     'summary',
     'reason',
     'relevantFiles',
@@ -134,6 +135,30 @@ export const DECISION_JSON_SCHEMA = {
               'The acceptance criteria this check proves, verbatim. A check settles ' +
               'exactly the criteria it names and no others; one that names none is ' +
               'recorded and settles nothing.',
+          },
+        },
+      },
+    },
+    fileReads: {
+      type: 'array',
+      description:
+        'Files for the application to open and show you. It returns the size, a sha256 and ' +
+        'the content, truncated to a budget and marked when truncated. Use this instead of ' +
+        'asking a worker to copy a file into its answer: the application can read the file ' +
+        'and a copied answer is neither complete nor evidence. Reading proves nothing on ' +
+        'its own - a "fileChecks" entry is what settles a criterion.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['path', 'maxBytes'],
+        properties: {
+          path: {
+            type: 'string',
+            description: 'Path relative to the project folder. Same limits as a file check.',
+          },
+          maxBytes: {
+            type: ['integer', 'null'],
+            description: 'Bytes to return for this file. Null for the default budget.',
           },
         },
       },

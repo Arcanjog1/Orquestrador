@@ -19,6 +19,7 @@
  *     from the worker's summary of what it did.
  */
 
+import { createHash } from 'node:crypto';
 import { rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type {
@@ -70,9 +71,12 @@ import type { AgentMessageType, PublishInput } from '../../../../../src/bus/mess
 import { describeActivity } from '../../../../../src/agents/activity-monitor.js';
 import {
   describeFileCheck,
+  describeFileRead,
   runFileChecks,
+  runFileReads,
   type FileCheckRequest,
   type FileCheckResult,
+  type FileReadResult,
 } from '../../../../../src/verification/file-check.js';
 import { renderContext, selectContext } from '../../../../../src/context/project-context.js';
 import {
@@ -92,6 +96,7 @@ import {
   type AccountRoutingPolicy,
 } from '../../../../../src/routing/account-policy.js';
 import { classifyCreditFailure } from '../../../../../src/routing/credit-failure.js';
+import { buildWorkerPrompt } from '../../../../../src/orchestrator/worker-prompt.js';
 import type { ContextEntry } from '../../../../../src/context/project-context.js';
 import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
 import type { DeniedToolCall } from '../core.js';
@@ -835,6 +840,9 @@ export class OrchestrationService {
     let fastPathTried = false;
     /** Consecutive iterations that asked for unknown ids and proved nothing. */
     let barrenVerifyRounds = 0;
+    /** The evidence as the previous iteration left it, and how long it has stood. */
+    let previousFingerprint: string | null = null;
+    let stagnantRounds = 0;
     // What was said in this conversation before this run, so a follow-up
     // ("continue", "now also do X") is read against what came before it.
     const history = this.conversationBefore(sessionId, runId);
@@ -1218,6 +1226,24 @@ export class OrchestrationService {
         environment?.kind === 'local' && decision.fileChecks.length > 0
           ? await runFileChecks(cwd, decision.fileChecks)
           : [];
+      // Files the supervisor asked to *see*. The application opens them, so
+      // nobody has to ask a worker to copy a file into an answer - which is
+      // what the run that prompted this did, four files at a time, getting
+      // truncated copies back and going round again.
+      const fileReads =
+        environment?.kind === 'local' && decision.fileReads.length > 0
+          ? await runFileReads(cwd, decision.fileReads)
+          : [];
+      if (fileReads.length > 0) {
+        record.fileReads = fileReads;
+        this.step(
+          runId,
+          iteration,
+          'file-read',
+          fileReads.every((read) => read.ok) ? 'read' : 'partial',
+          fileReads.map(describeFileRead).join('; ').slice(0, 500),
+        );
+      }
       for (const request of decision.fileChecks) {
         requestedFileChecks.set(JSON.stringify(request), request);
       }
@@ -1496,6 +1522,44 @@ export class OrchestrationService {
           pending: ledger.pending().map((criterion) => criterion.text),
         });
         this.progress(runId, sessionId, 'needs-human', reason, 'NEEDS_HUMAN');
+        return;
+      }
+
+      // Two rounds that produced nothing new.
+      //
+      // The incident: the supervisor asked the worker for the full contents of
+      // the same four files, got a truncated answer, kept the same criteria
+      // pending, and asked again - climbing to Opus/Alto on the way, for a
+      // problem no model was going to solve. Repeating a strategy that has
+      // already produced the same evidence twice is not persistence, it is a
+      // loop, and it costs a delegation each time round.
+      //
+      // Measured on *evidence*, not on the decision: two different-sounding
+      // instructions that leave the workspace, the verifications and the
+      // ledger exactly as they were are the same round twice.
+      const fingerprint = evidenceFingerprint({
+        tree,
+        verification,
+        fileChecks,
+        pending: ledger.pending().map((criterion) => `${criterion.status}:${criterion.text}`),
+      });
+      stagnantRounds = fingerprint === previousFingerprint ? stagnantRounds + 1 : 0;
+      previousFingerprint = fingerprint;
+      if (stagnantRounds >= 2) {
+        const pending = ledger.pending().map((criterion) => criterion.text);
+        const reason =
+          'Duas iterações seguidas não produziram nenhuma evidência nova: o workspace, as ' +
+          'verificações e os critérios estão exatamente como estavam. Repetir a mesma ' +
+          'estratégia não muda isso, e um modelo mais forte também não. ' +
+          (pending.length > 0
+            ? `Falta comprovar: ${pending.slice(0, 4).map((c) => `"${c}"`).join('; ')}. `
+            : '') +
+          'Cadastre uma verificação, aponte uma verificação direta de arquivo, ou diga o que ' +
+          'aceitar como prova.';
+        this.database.runs.setStatus(runId, 'NEEDS_HUMAN', reason);
+        this.say(sessionId, runId, 'system', reason);
+        this.step(runId, iteration, 'progress', 'stagnant', reason, { pending });
+        this.progress(runId, sessionId, 'needs-human', 'Sem evidência nova', 'NEEDS_HUMAN');
         return;
       }
 
@@ -1805,6 +1869,16 @@ export class OrchestrationService {
             '  nothing checked stays unproven, and an unproven criterion blocks DONE.',
             '  A path outside the project is refused, not read.',
             '',
+            'READING A FILE (always available, no registration needed):',
+            '  "fileReads": [{"path": "app.js", "maxBytes": null}] - the application opens the',
+            '  file and puts its size, its sha256 and its contents in front of you, truncated',
+            '  to a budget and marked when truncated.',
+            '  Use this instead of asking a worker to paste a file into its answer. A worker',
+            '  copying a file is slower, costs a delegation, and comes back truncated without',
+            '  saying so - and the application can simply read it.',
+            '  Reading proves nothing on its own. A "fileChecks" entry is what settles a',
+            '  criterion; a read is how you look.',
+            '',
           ]),
       'Answer with a single JSON object and nothing else:',
       '{',
@@ -1812,6 +1886,7 @@ export class OrchestrationService {
       '  "task": "what the coding agent must do (required for delegate)",',
       '  "acceptanceCriteria": ["objective, checkable statements"],',
       '  "verificationCommands": ["verification ids from the list above"],',
+      '  "fileReads": [{"path": "...", "maxBytes": null}],',
       '  "fileChecks": [{"path": "...", "mustExist": true, "expectBytesHex": null,',
       '                  "expectText": "...", "expectSizeBytes": null, "forbidBom": null,',
       '                  "forbidTrailingNewline": null, "criteria": ["..."]}],',
@@ -2220,6 +2295,26 @@ export class OrchestrationService {
       );
     }
 
+    // The files the supervisor asked to see, read by the application.
+    const reads = record?.fileReads ?? [];
+    if (reads.length > 0) {
+      lines.push('', 'FILE CONTENTS (opened by the application; no worker was asked to copy them):');
+      for (const read of reads) {
+        lines.push(`  ${describeFileRead(read)}`);
+        if (read.text !== null) {
+          lines.push(indent(read.text));
+          if (read.truncated) {
+            lines.push(
+              '  … truncado. Peça um trecho menor ou um "fileChecks" se precisar comparar bytes.',
+            );
+          }
+        }
+      }
+      lines.push(
+        '  Ler não prova nada por si só: um "fileChecks" é o que resolve um critério.',
+      );
+    }
+
     // What the application read for itself. Reported before the commands,
     // because in a workspace with no registered verification this is the only
     // proof there is - and a supervisor that cannot see it will keep asking
@@ -2323,6 +2418,29 @@ export class OrchestrationService {
     const { runId, sessionId, workspace, cwd, runners, slot, iteration, task } = input;
     let last: NonNullable<IterationRecord['worker']> | null = null;
     let answer = '';
+
+    // The instruction the worker actually receives.
+    //
+    // It used to be the tool policy plus the supervisor's free text, and
+    // nothing else - so a task saying "confira os critérios abaixo" arrived
+    // with no list, three times in one run. The criteria existed: they were in
+    // the decision, in the ledger and in the gate. They were simply never sent.
+    const workerPrompt = buildWorkerPrompt({
+      preamble: toolPolicyPreamble(this.grantsFor(workspace.id)),
+      task,
+      criteria: input.decision.acceptanceCriteria,
+    });
+    if (workerPrompt.danglingReference) {
+      // The supervisor pointed at a list it did not define. Recorded, because
+      // a run where this keeps happening is a run going in circles.
+      this.step(
+        runId,
+        iteration,
+        'delegation',
+        'dangling-criteria',
+        'A tarefa cita uma lista de critérios que a decisão não definiu; o worker foi avisado.',
+      );
+    }
 
     for (let attempt = 0; attempt <= MODEL_RETRIES; attempt += 1) {
       const routed: RouterOutput | null = input.routing
@@ -2449,7 +2567,7 @@ export class OrchestrationService {
 
       const invoke = (resumeSessionId: string | null) =>
         slot.runner.run({
-          prompt: `${toolPolicyPreamble(this.grantsFor(workspace.id))}\n\n${task}`,
+          prompt: workerPrompt.text,
           workingDirectory: cwd,
           timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
           runId,
@@ -3398,6 +3516,30 @@ function toolsUsed(activity: ActivitySnapshot | undefined): string[] {
   }
   if (activity.currentTool && !seen.includes(activity.currentTool)) seen.push(activity.currentTool);
   return seen;
+}
+
+/**
+ * A stable summary of everything an iteration proved.
+ *
+ * Deliberately built from *measurements* - the tree, the verifications the
+ * application ran, the files it read, and how the ledger stands - and not from
+ * anything an agent said. Two iterations whose prose differed but whose
+ * evidence is identical must hash the same, because that is exactly the case
+ * this exists to catch.
+ */
+function evidenceFingerprint(input: {
+  tree: string;
+  verification: readonly CommandResult[];
+  fileChecks: readonly FileCheckResult[];
+  pending: readonly string[];
+}): string {
+  const parts = [
+    input.tree,
+    ...input.verification.map((result) => `${result.command}=${result.exitCode}:${result.refused ?? ''}`),
+    ...input.fileChecks.map((check) => `${check.request.path}=${check.outcome}:${check.sha256 ?? ''}`),
+    ...[...input.pending].sort(),
+  ];
+  return createHash('sha1').update(parts.join('\u0000')).digest('hex');
 }
 
 function describeError(error: unknown): string {
