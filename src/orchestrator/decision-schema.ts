@@ -23,7 +23,7 @@
 import { ALLOWED_ACTIONS } from './decision-parser.js';
 import { CAPABILITY_TIERS, REASONING_TIERS } from '../routing/tiers.js';
 
-export const DECISION_SCHEMA_VERSION = 4;
+export const DECISION_SCHEMA_VERSION = 5;
 
 /** The tiers as the decision JSON spells them (lowercase). */
 export const WIRE_CAPABILITIES = CAPABILITY_TIERS.map((tier) => tier.toLowerCase());
@@ -38,6 +38,7 @@ export const DECISION_JSON_SCHEMA = {
     'task',
     'acceptanceCriteria',
     'verificationCommands',
+    'fileChecks',
     'summary',
     'reason',
     'relevantFiles',
@@ -67,6 +68,75 @@ export const DECISION_JSON_SCHEMA = {
       description:
         'Verification ids registered for this workspace. Never a command line: an id that is ' +
         'not registered is reported as a failure and never executed.',
+    },
+    fileChecks: {
+      type: 'array',
+      description:
+        'Files for the application to open and compare itself. Data, never a command: no ' +
+        'shell runs, and a path outside the project is refused rather than read. This is ' +
+        'the way to prove a file\'s contents in a workspace with no registered ' +
+        'verifications - "verify" accepts either these or a registered id, and needs at ' +
+        'least one of the two.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'path',
+          'mustExist',
+          'expectBytesHex',
+          'expectText',
+          'expectSizeBytes',
+          'forbidBom',
+          'forbidTrailingNewline',
+          'criteria',
+        ],
+        properties: {
+          path: {
+            type: 'string',
+            description:
+              'Path relative to the project folder. Absolute paths, "..", and links ' +
+              'leading out of the project are refused.',
+          },
+          mustExist: {
+            type: ['boolean', 'null'],
+            description:
+              'Null or true: the file must exist. False asserts the opposite - the check ' +
+              'passes only when the file is absent.',
+          },
+          expectBytesHex: {
+            type: ['string', 'null'],
+            description:
+              'The exact bytes, in hex, e.g. "70726F6E746F". Null when not asserted. ' +
+              'Cannot be combined with expectText.',
+          },
+          expectText: {
+            type: ['string', 'null'],
+            description:
+              'The exact UTF-8 text. Null when not asserted. Cannot be combined with ' +
+              'expectBytesHex.',
+          },
+          expectSizeBytes: {
+            type: ['integer', 'null'],
+            description: 'The exact size in bytes. Null when not asserted.',
+          },
+          forbidBom: {
+            type: ['boolean', 'null'],
+            description: 'True to fail the check when the file starts with a UTF-8 BOM.',
+          },
+          forbidTrailingNewline: {
+            type: ['boolean', 'null'],
+            description: 'True to fail the check when the file ends with a newline.',
+          },
+          criteria: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'The acceptance criteria this check proves, verbatim. A check settles ' +
+              'exactly the criteria it names and no others; one that names none is ' +
+              'recorded and settles nothing.',
+          },
+        },
+      },
     },
     summary: {
       type: ['string', 'null'],

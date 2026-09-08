@@ -28,7 +28,9 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -369,10 +371,21 @@ async function runWith(options: {
   maxIterations?: number;
   seed?: (dir: string) => void;
   registerVerification?: boolean;
+  /** False for a plain folder with no repository at all. */
+  git?: boolean;
 }) {
-  const repo = createGitFixture('lao-fc-loop-');
-  repo.write('README.md', '# x\n');
-  repo.commitAll('base');
+  const repo =
+    options.git === false
+      ? (() => {
+          const s = scratch();
+          return { dir: s.dir, cleanup: s.cleanup };
+        })()
+      : (() => {
+          const fixture = createGitFixture('lao-fc-loop-');
+          fixture.write('README.md', '# x\n');
+          fixture.commitAll('base');
+          return fixture;
+        })();
   options.seed?.(repo.dir);
 
   const orchestrator = new ScriptedAgent('mock-codex', 'Codex', options.orchestratorScript);
@@ -684,6 +697,80 @@ test('asking twice for ids that do not exist stops with a concrete reason', asyn
     assert.ok(step, 'the record names the dead end');
     assert.match(step!.detail ?? '', /inventada/);
     assert.match(step!.detail ?? '', /hello\.txt/);
+  } finally {
+    await prepared.cleanup();
+  }
+});
+
+test('the request\'s own verify decision finishes a run, on a folder with no git and no verifications', async () => {
+  // The exact decision the request asks to be accepted, including the nulls
+  // strict mode forces for the fields it does not assert.
+  const CRITERION_PT =
+    'hello.txt existe e contém exatamente os bytes UTF-8 70 72 6F 6E 74 6F, sem BOM e sem quebra de linha.';
+  const verify = JSON.stringify({
+    action: 'verify',
+    task: null,
+    acceptanceCriteria: [CRITERION_PT],
+    verificationCommands: [],
+    fileChecks: [
+      {
+        path: 'hello.txt',
+        expectBytesHex: PRONTO_HEX,
+        expectText: null,
+        expectSizeBytes: 6,
+        forbidBom: true,
+        forbidTrailingNewline: true,
+        mustExist: true,
+        criteria: [CRITERION_PT],
+      },
+    ],
+    workerId: null,
+    requiresTools: false,
+    satisfiedCriteria: [],
+    relevantFiles: ['hello.txt'],
+    summary: 'Verificar diretamente os seis bytes de hello.txt.',
+    reason: null,
+    workerRequirements: { capability: 'fast', reasoning: 'low', rationale: 'Comparação direta.' },
+  });
+  const done = JSON.stringify({
+    action: 'done',
+    acceptanceCriteria: [CRITERION_PT],
+    verificationCommands: [],
+    fileChecks: [],
+    summary: 'hello.txt está correto.',
+  });
+
+  let before: { mtimeMs: number; hash: string } | null = null;
+  const prepared = await runWith({
+    git: false,
+    registerVerification: false,
+    seed: (dir) => {
+      // Already correct on disk before the run starts.
+      const file = join(dir, 'hello.txt');
+      writeFileSync(file, Buffer.from(PRONTO_HEX, 'hex'));
+      before = {
+        mtimeMs: statSync(file).mtimeMs,
+        hash: createHash('sha256').update(readFileSync(file)).digest('hex'),
+      };
+    },
+    orchestratorScript: [verify, done],
+    workerScript: [],
+    maxIterations: 4,
+  });
+  try {
+    assert.equal(prepared.run.status, 'DONE');
+    assert.equal(prepared.worker.calls.length, 0, 'nothing needed doing, so nothing was delegated');
+    assert.equal(existsSync(join(prepared.repo.dir, '.git')), false, 'and there is no repository');
+
+    // The gate re-read the file itself; the worker never said a word.
+    const steps = prepared.fixture.services.database.runs.steps(prepared.runId);
+    assert.equal(steps.find((s) => s.phase === 'file-check')?.status, 'passed');
+    assert.equal(steps.filter((s) => s.phase === 'done-gate').at(-1)?.status, 'passed');
+
+    // And it was not rewritten to manufacture a diff.
+    const file = join(prepared.repo.dir, 'hello.txt');
+    assert.equal(statSync(file).mtimeMs, before!.mtimeMs, 'the file was not touched');
+    assert.equal(createHash('sha256').update(readFileSync(file)).digest('hex'), before!.hash);
   } finally {
     await prepared.cleanup();
   }

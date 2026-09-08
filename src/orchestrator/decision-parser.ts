@@ -117,10 +117,7 @@ export function parseDecision(raw: string): ParseResult {
     decision.verificationCommands.length === 0 &&
     decision.fileChecks.length === 0
   ) {
-    return fail(
-      '"verify" requires at least one entry in "verificationCommands" or "fileChecks".',
-      raw,
-    );
+    return fail(EMPTY_VERIFY_ERROR, raw);
   }
 
   // Advisory, so lenient: a well-formed object is taken, anything else is
@@ -175,6 +172,7 @@ export function buildRepairPrompt(error: string, raw: string): string {
     'Your previous response could not be used because it was not in the required format.',
     '',
     `Problem: ${error}`,
+    ...(error === EMPTY_VERIFY_ERROR ? ['', ...EMPTY_VERIFY_GUIDANCE] : []),
     '',
     'Reply with a single JSON object and nothing else - no prose, no code fence, no explanation.',
     '',
@@ -184,11 +182,31 @@ export function buildRepairPrompt(error: string, raw: string): string {
     '  "task": "string, required when action is delegate; null otherwise",',
     '  "reason": "string, required when action is blocked; null otherwise",',
     '  "acceptanceCriteria": ["string", ...],',
-    '  "verificationCommands": ["string", ...],',
+    '  "verificationCommands": ["registered verification id", ...],',
+    '  "fileChecks": [{',
+    '      "path": "relative/to/the/project",',
+    '      "mustExist": true | false | null,',
+    '      "expectBytesHex": "70726F6E746F" | null,',
+    '      "expectText": "pronto" | null,',
+    '      "expectSizeBytes": 6 | null,',
+    '      "forbidBom": true | false | null,',
+    '      "forbidTrailingNewline": true | false | null,',
+    '      "criteria": ["the acceptance criteria this check proves, verbatim"]',
+    '  }, ...],',
     '  "relevantFiles": ["string", ...],',
+    '  "workerId": "worker id from the team, or null",',
+    '  "requiresTools": true | false | null,',
+    '  "satisfiedCriteria": ["string", ...],',
     '  "summary": "one short line, or null",',
     '  "workerRequirements": {"capability": "fast" | "balanced" | "strong" | "max", "reasoning": "low" | "medium" | "high" | "max", "rationale": "one line or null"}',
     '}',
+    '',
+    'Rules for the two proof fields:',
+    '  verificationCommands holds ids REGISTERED for this workspace, never a command line.',
+    '  An id that is not registered is reported as a failure and never executed.',
+    '  fileChecks are data, not commands: the application opens the path itself and compares',
+    '  the bytes. No shell runs. A path outside the project is refused rather than read.',
+    '  Use expectBytesHex OR expectText, never both; set the other to null.',
     '',
     'Do not change your decision. Repeat the same decision in the correct format.',
     '',
@@ -198,6 +216,19 @@ export function buildRepairPrompt(error: string, raw: string): string {
     '---',
   ].join('\n');
 }
+
+/** The one error whose fix is a *different field*, not a different shape. */
+export const EMPTY_VERIFY_ERROR =
+  '"verify" requires at least one entry in "verificationCommands" or "fileChecks".';
+
+const EMPTY_VERIFY_GUIDANCE = [
+  'You asked to verify without saying what to verify with. "verify" needs at least one of:',
+  '  - a verification id registered for this workspace, in "verificationCommands"; or',
+  '  - a file check, in "fileChecks", which needs no registration at all.',
+  'If this workspace has no registered verifications, the second is the way: name the file,',
+  'say what its bytes must be, and list in "criteria" the acceptance criteria it proves.',
+  'Do not repeat the same empty "verify". Do not invent a verification id.',
+];
 
 /**
  * Finds the first balanced JSON object in `text`.
@@ -294,8 +325,14 @@ function readFileChecks(value: unknown): { value: FileCheckRequest[]; error?: st
       return { value: [], error: `"fileChecks[${index}].path" must be a non-empty string.` };
     }
     const request: Record<string, unknown> = { path: row.path.trim() };
+    // Under the strict schema every property of a file check is *required*,
+    // so a field the supervisor is not asserting arrives as `null` rather
+    // than being left out. Null is read exactly as a missing key - without
+    // this, a schema-conformant check would be refused as "must be a string"
+    // for the very field it deliberately left unset.
+    const given = (key: string): boolean => row[key] !== undefined && row[key] !== null;
     for (const key of ['mustExist', 'forbidBom', 'forbidTrailingNewline'] as const) {
-      if (row[key] !== undefined) {
+      if (given(key)) {
         if (typeof row[key] !== 'boolean') {
           return { value: [], error: `"fileChecks[${index}].${key}" must be a boolean.` };
         }
@@ -303,20 +340,20 @@ function readFileChecks(value: unknown): { value: FileCheckRequest[]; error?: st
       }
     }
     for (const key of ['expectBytesHex', 'expectText'] as const) {
-      if (row[key] !== undefined) {
+      if (given(key)) {
         if (typeof row[key] !== 'string') {
           return { value: [], error: `"fileChecks[${index}].${key}" must be a string.` };
         }
         request[key] = row[key];
       }
     }
-    if (row.expectSizeBytes !== undefined) {
+    if (given('expectSizeBytes')) {
       if (typeof row.expectSizeBytes !== 'number' || !Number.isInteger(row.expectSizeBytes)) {
         return { value: [], error: `"fileChecks[${index}].expectSizeBytes" must be an integer.` };
       }
       request.expectSizeBytes = row.expectSizeBytes;
     }
-    if (row.criteria !== undefined) {
+    if (given('criteria')) {
       const criteria = readStringArray(row.criteria, `fileChecks[${index}].criteria`);
       if (criteria.error) return { value: [], error: criteria.error };
       request.criteria = criteria.value;

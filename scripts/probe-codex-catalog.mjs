@@ -52,14 +52,47 @@ const arg = (name) => {
 };
 
 const FIXTURE = join(here, 'fixtures', 'codex-models-with-max.json');
+/**
+ * The decision the fake backend answers the turn with.
+ *
+ * Deliberately a `verify` carrying a `fileChecks` entry, and deliberately the
+ * whole contract rather than a handful of fields: this is the shape a strict
+ * schema *forces* - every property present, unasserted ones null - and the
+ * probe's job is to prove that shape survives the round trip through a real
+ * binary and comes back out of `--output-last-message` intact.
+ */
 const DECISION = {
-  action: 'delegate',
-  task: 'Create hello.txt containing exactly: Olá AI Orchestrator',
-  acceptanceCriteria: ['hello.txt exists with the exact content'],
+  action: 'verify',
+  task: null,
+  acceptanceCriteria: [
+    'hello.txt existe e contém exatamente os bytes UTF-8 70 72 6F 6E 74 6F, sem BOM e sem quebra de linha.',
+  ],
   verificationCommands: [],
-  summary: 'probe decision',
+  fileChecks: [
+    {
+      path: 'hello.txt',
+      mustExist: true,
+      expectBytesHex: '70726F6E746F',
+      expectText: null,
+      expectSizeBytes: 6,
+      forbidBom: true,
+      forbidTrailingNewline: true,
+      criteria: [
+        'hello.txt existe e contém exatamente os bytes UTF-8 70 72 6F 6E 74 6F, sem BOM e sem quebra de linha.',
+      ],
+    },
+  ],
+  workerId: null,
+  requiresTools: false,
+  satisfiedCriteria: [],
+  relevantFiles: ['hello.txt'],
+  summary: 'Verificar diretamente os seis bytes de hello.txt.',
   reason: null,
-  relevantFiles: [],
+  workerRequirements: {
+    capability: 'fast',
+    reasoning: 'low',
+    rationale: 'Comparação direta dos bytes de um arquivo.',
+  },
 };
 
 /** The application's own decision schema and strict-mode check, from dist. */
@@ -68,6 +101,25 @@ async function loadDecisionSchema() {
   try {
     const mod = await import(dist.href);
     return { schema: mod.DECISION_JSON_SCHEMA, problemsOf: mod.strictSchemaProblems };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The application's own parser, so the round trip is closed.
+ *
+ * Sending a schema the CLI accepts is half the claim; the other half is that
+ * what comes back out of `--output-last-message` is something the application
+ * can act on. Checking only for the string `"action"` would have missed the
+ * case this probe now covers: strict mode requires every property, so an
+ * unasserted field arrives as `null`, and a parser that read `null` as "wrong
+ * type" would refuse a decision the schema itself demanded.
+ */
+async function loadDecisionParser() {
+  try {
+    const mod = await import(new URL('../dist/orchestrator/decision-parser.js', import.meta.url).href);
+    return mod.parseDecision;
   } catch {
     return null;
   }
@@ -277,6 +329,21 @@ export async function probeCodexCatalog(codexPath, { log = () => {} } = {}) {
   const turnRequested = seen.some((s) => s.endsWith('/responses'));
   const producedDecision = decision !== null && decision.includes('"action"');
 
+  // And the application can read it. A decision the parser refuses is not a
+  // decision, whatever the transport did.
+  const parseDecision = await loadDecisionParser();
+  let decisionParsed = null;
+  let decisionParseError = null;
+  if (parseDecision && decision !== null) {
+    const parsed = parseDecision(decision);
+    decisionParsed = parsed.ok;
+    if (!parsed.ok) decisionParseError = parsed.error;
+    else if ((parsed.decision.fileChecks ?? []).length === 0) {
+      decisionParsed = false;
+      decisionParseError = 'the file check did not survive the round trip';
+    }
+  }
+
   // The schema check: when the application's schema was sent, the CLI must
   // have forwarded it in strict mode, and it must satisfy the strict rules
   // the real API enforces. Both are asserted against what the fake received,
@@ -298,9 +365,17 @@ export async function probeCodexCatalog(codexPath, { log = () => {} } = {}) {
     schemaSent,
     schemaStrict,
     schemaProblems,
+    decisionParsed,
+    decisionParseError,
     requests: seen,
     stderrTail: result.stderr.split(/\r?\n/).filter((l) => l.trim()).slice(-6),
-    pass: !unknownVariant && catalogueRequested && turnRequested && producedDecision && schemaOk,
+    pass:
+      !unknownVariant &&
+      catalogueRequested &&
+      turnRequested &&
+      producedDecision &&
+      schemaOk &&
+      decisionParsed !== false,
   };
 }
 
@@ -315,6 +390,7 @@ if (invokedDirectly) {
   console.log(`# turn requested: ${result.turnRequested}`);
   console.log(`# decision produced: ${result.producedDecision}`);
   console.log(`# schema sent: ${result.schemaSent}; strict: ${result.schemaStrict}; problems: ${result.schemaProblems.join('; ') || 'none'}`);
+  console.log(`# decision parsed by the application: ${result.decisionParsed ?? 'not checked'}${result.decisionParseError ? ` (${result.decisionParseError})` : ''}`);
   for (const line of result.stderrTail) console.log(`#   stderr: ${line}`);
   console.log(result.pass ? '# PASS: the catalogue with max was accepted and the decision came back' : '# FAIL');
   process.exit(result.pass ? 0 : 1);

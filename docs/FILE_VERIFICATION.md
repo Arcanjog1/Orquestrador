@@ -136,6 +136,32 @@ defeito que tornava um arquivo correto inconcluível.
 Quando não sobra nada, o bloco diz isso — e diz por quê: uma nova delegação
 repetiria trabalho já feito.
 
+## 4b. O contrato tem quatro faces, e uma delas estava faltando
+
+Depois da build `1650c9c` o supervisor respondeu **duas vezes** com
+`action=verify`, `verificationCommands=[]` e sem `fileChecks`, e as duas foram
+recusadas. Ele não estava sendo teimoso: **não podia** responder outra coisa.
+
+`codex exec` recebe o contrato em `--output-schema` e o encaminha em modo
+estrito, onde `additionalProperties: false` é obrigatório — e o
+`DECISION_JSON_SCHEMA` daquela versão **não tinha `fileChecks`**. O prompt
+mandava usar um campo que o schema proibia. O prompt de reparo repetia o mesmo
+contrato incompleto, então a segunda tentativa não tinha como ser diferente da
+primeira.
+
+As quatro faces — **schema estrito, parser, prompt principal e prompt de
+reparo** — agora dizem a mesma coisa, e um teste prende cada uma delas.
+
+Uma consequência do modo estrito: **todo campo é obrigatório**, então um campo
+não afirmado chega como `null` (`"expectText": null` ao lado de
+`"expectBytesHex"`). O parser lê `null` exatamente como lê uma chave ausente —
+sem isso, a única forma que o schema permite seria recusada como "must be a
+string".
+
+Verificado contra o binário real: `codex-cli 0.153.4` aceitou o schema com
+`fileChecks`, encaminhou em `strict: true` sem nenhum problema, e a decisão
+voltou por `--output-last-message` e foi **aceita pelo parser do aplicativo**.
+
 ## 5. Resultado
 
 O mesmo cenário, com o supervisor usando o mecanismo:
@@ -153,7 +179,7 @@ Num workspace **sem nenhuma verificação cadastrada**.
 
 Tudo acima foi exercitado neste ambiente Linux, com git real, sistema de
 arquivos real e o laço real — 22 testes cobrindo os desfechos, os limites e o
-laço inteiro. A falha de leitura é exercitada de duas formas: um arquivo usado
+laço inteiro, mais 9 prendendo o contrato de decisão. A falha de leitura é exercitada de duas formas: um arquivo usado
 como pasta (`ENOTDIR`) e um arquivo sem permissão de leitura (`EACCES`) — este
 último só significa alguma coisa fora do root, e é assim que roda na CI Linux.
 
