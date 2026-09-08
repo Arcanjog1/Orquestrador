@@ -53,6 +53,20 @@ export class GitEvidenceCollector {
   }
 
   /**
+   * The `origin` remote, exactly as `.git/config` holds it.
+   *
+   * Read rather than inferred, and read from the checkout rather than from
+   * what the project *says* it is: the whole point of asking is to compare
+   * the two. Null when there is no remote, or when git could not answer -
+   * neither is evidence that the folder is the right repository.
+   */
+  async originUrl(): Promise<string | null> {
+    const result = await this.git(['config', '--get', 'remote.origin.url']);
+    const url = result.stdout.trim();
+    return result.ok && url.length > 0 ? url : null;
+  }
+
+  /**
    * Whether this folder is a git repository - and, when it is not, whether
    * that is because it genuinely is not one or because git could not run.
    *

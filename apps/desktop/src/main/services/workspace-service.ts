@@ -26,12 +26,17 @@ import {
   type WorkspaceBranchesView,
   type WorkspaceChangesView,
   type WorkspaceView,
+  type ProjectView,
 } from '../../shared/ipc-contract.js';
 import type { RuntimeService } from './runtime-service.js';
 import { AgentService, orchestratorAgentIdFor, workerAgentIdFor } from './agent-service.js';
 import type { GitHubService } from './github-service.js';
 import { parseGitHubRemote, redact } from '../core.js';
 import { folderKey, suggestedProjectName } from '../../../../../src/workspace/folder-identity.js';
+import {
+  assessPreflight,
+  type PreflightResult,
+} from '../../../../../src/workspace/preflight.js';
 import { displayFullName, repositoryKey } from '../../../../../src/github/repository-identity.js';
 import type { ProjectService } from './project-service.js';
 
@@ -497,6 +502,206 @@ export class WorkspaceService {
     });
     projects.setWorkspace(projectId, record.id);
     return { workspace: this.toView(record), created: true };
+  }
+
+  /**
+   * What the application can say about a project's folder, measured now.
+   *
+   * The interface asks this before offering "codar": a project connected from
+   * a repository has an identity long before it has a checkout, and the
+   * difference between "ready" and "there is no folder yet" is the difference
+   * between starting work and starting it in the wrong place.
+   */
+  async preflight(projectId: string, projects: ProjectService): Promise<PreflightResult> {
+    const project = projects.require(projectId);
+    const workspace = project.workspace_id
+      ? this.database.workspaces.find(project.workspace_id)
+      : null;
+    const path = workspace?.local_path?.trim() ?? '';
+    const declaredRepositoryUrl = project.repository_url ?? workspace?.repository_url ?? null;
+    const declaredDefaultBranch = project.default_branch ?? workspace?.default_branch ?? null;
+    if (path.length === 0) {
+      return assessPreflight({
+        workspacePath: '',
+        folderExists: false,
+        isGitRepository: false,
+        gitProblem: null,
+        remoteUrl: null,
+        branch: null,
+        dirty: false,
+        declaredRepositoryUrl,
+        declaredDefaultBranch,
+      });
+    }
+    if (!exists(path)) {
+      return assessPreflight({
+        workspacePath: path,
+        folderExists: false,
+        isGitRepository: false,
+        gitProblem: null,
+        remoteUrl: null,
+        branch: null,
+        dirty: false,
+        declaredRepositoryUrl,
+        declaredDefaultBranch,
+      });
+    }
+    const facts = await this.gitFacts(path);
+    return assessPreflight({
+      workspacePath: path,
+      folderExists: true,
+      ...facts,
+      declaredRepositoryUrl,
+      declaredDefaultBranch,
+    });
+  }
+
+  /**
+   * Gives a project a folder to work in: one it already has, or a fresh clone.
+   *
+   * Both paths keep the project. `projectId` never changes, its conversations
+   * and history stay attached to it, and no second project appears - which is
+   * what "o projeto GitHub e seu checkout local devem continuar sendo o MESMO
+   * projeto" means in code.
+   *
+   * Nothing here is destructive. Associating reads the folder and never
+   * writes to it; cloning refuses a destination that already exists rather
+   * than merging into or clearing it. Neither ever checks out, pulls or
+   * resets, so local changes cannot be lost.
+   */
+  async prepare(
+    input:
+      | { projectId: string; mode: 'associate'; localPath: string }
+      | { projectId: string; mode: 'clone'; parentPath: string; folderName?: string },
+    projects: ProjectService,
+  ): Promise<{ workspace: WorkspaceView; project: ProjectView; reusedWorkspace: boolean }> {
+    const project = projects.require(input.projectId);
+
+    if (input.mode === 'clone') {
+      const url = project.repository_url;
+      if (!url) {
+        throw new WorkspaceError(
+          'Este projeto não está ligado a um repositório, então não há o que clonar. ' +
+            'Associe uma pasta existente.',
+        );
+      }
+      const workspace = await this.clone({
+        repositoryUrl: url,
+        parentPath: input.parentPath,
+        name: input.folderName?.trim() || project.name,
+      });
+      // The clone already recorded the repository on the workspace. The
+      // default branch stays whatever GitHub reported for the project: it is
+      // never filled in with `main` on a guess.
+      return {
+        workspace,
+        project: projects.setWorkspace(project.id, workspace.id),
+        reusedWorkspace: false,
+      };
+    }
+
+    const resolved = resolve(input.localPath);
+    assertUsableDirectory(resolved);
+
+    // The identity check, and the reason this is not just `setWorkspace`. A
+    // project that declares a repository must not be pointed at a folder that
+    // is something else - which is precisely how a task for one repository
+    // came to run in a Desktop folder that only shared part of its name.
+    if (project.repository_url) {
+      const facts = await this.gitFacts(resolved);
+      const verdict = assessPreflight({
+        workspacePath: resolved,
+        folderExists: true,
+        ...facts,
+        declaredRepositoryUrl: project.repository_url,
+        declaredDefaultBranch: project.default_branch,
+      });
+      if (verdict.blocksCodeWork) {
+        throw new WorkspaceError(`${verdict.title} ${verdict.detail}`);
+      }
+    }
+
+    const key = folderKey(resolved);
+    const existing = this.database.workspaces.findByPathKey(key);
+    if (existing) {
+      // The folder is already known. Reuse it rather than making a second
+      // workspace for the same directory - unless another project owns it,
+      // in which case taking it would silently move somebody's work.
+      const owner = this.database.projects
+        .list()
+        .find((p) => p.workspace_id === existing.id && p.id !== project.id);
+      if (owner) {
+        throw new WorkspaceError(
+          `Esta pasta já pertence ao projeto "${owner.name}". Um projeto por pasta: ` +
+            'abra aquele projeto, ou escolha outra pasta.',
+        );
+      }
+      this.database.workspaces.touch(existing.id);
+      return {
+        workspace: this.toView(existing),
+        project: projects.setWorkspace(project.id, existing.id),
+        reusedWorkspace: true,
+      };
+    }
+
+    const record = this.database.workspaces.create({
+      id: newId('ws'),
+      name: project.name,
+      localPath: resolved,
+      pathKey: key,
+      repositoryUrl: project.repository_url,
+      defaultBranch: project.default_branch,
+    });
+    return {
+      workspace: this.toView(record),
+      project: projects.setWorkspace(project.id, record.id),
+      reusedWorkspace: false,
+    };
+  }
+
+  /** Git's own answers about a folder: is it a checkout, of what, on which branch. */
+  private async gitFacts(path: string): Promise<{
+    isGitRepository: boolean;
+    gitProblem: string | null;
+    remoteUrl: string | null;
+    branch: string | null;
+    dirty: boolean;
+  }> {
+    let git: string;
+    try {
+      git = await this.runtimes.executablePath('git');
+    } catch (error) {
+      return {
+        isGitRepository: false,
+        gitProblem: error instanceof Error ? error.message : String(error),
+        remoteUrl: null,
+        branch: null,
+        dirty: false,
+      };
+    }
+    const collector = new GitEvidenceCollector(path, this.processManager, git);
+    const probe = await collector.probeRepository();
+    if (!probe.isRepository) {
+      return {
+        isGitRepository: false,
+        gitProblem: probe.problem,
+        remoteUrl: null,
+        branch: null,
+        dirty: false,
+      };
+    }
+    const [remoteUrl, branch, status] = await Promise.all([
+      collector.originUrl(),
+      collector.git(['branch', '--show-current']),
+      collector.git(['status', '--porcelain']),
+    ]);
+    return {
+      isGitRepository: true,
+      gitProblem: null,
+      remoteUrl,
+      branch: branch.ok ? branch.stdout.trim() || null : null,
+      dirty: status.ok && status.stdout.trim().length > 0,
+    };
   }
 
   /**

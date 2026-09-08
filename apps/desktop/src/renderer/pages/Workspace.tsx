@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { AppSidebar } from "@/components/orch/AppSidebar";
 import { ProjectDialog } from "@/components/orch/ProjectDialog";
 import { ProjectContextDialog } from "@/components/orch/ProjectContextDialog";
+import { PrepareProjectDialog } from "@/components/orch/PrepareProjectDialog";
 import { PermissionDialog } from "@/components/orch/PermissionDialog";
 import { TopContextBar } from "@/components/orch/TopContextBar";
 import { TimelineView } from "@/components/orch/Timeline";
@@ -128,6 +129,7 @@ export function WorkspacePage({
   // paths that stay untouched.
   const [removalPlan, setRemovalPlan] = useState<ProjectRemovalPlanView | null>(null);
   const [contextProject, setContextProject] = useState<ProjectView | null>(null);
+  const [prepareProject, setPrepareProject] = useState<ProjectView | null>(null);
   // Authorisation requests raised by the run on screen. Loaded from the main
   // process rather than pushed, so reopening the app shows what is still
   // waiting instead of losing it with the window.
@@ -883,6 +885,7 @@ export function WorkspacePage({
           rename: (project) => setProjectDialog({ project }),
           settings: (project) => setProjectDialog({ project }),
           context: (project) => setContextProject(project),
+          prepare: (project) => setPrepareProject(project),
           archive: (project, archived) => void archiveProject(project, archived),
           remove: (project) => void askToRemoveProject(project),
           newSession: (project) => void newTask(project),
@@ -1145,6 +1148,18 @@ export function WorkspacePage({
       <ProjectContextDialog
         project={contextProject}
         onOpenChange={(open) => !open && setContextProject(null)}
+      />
+      <PrepareProjectDialog
+        project={prepareProject}
+        onOpenChange={(open) => !open && setPrepareProject(null)}
+        onPrepared={(workspaceId) => {
+          // The project kept its id and its conversations; what changed is
+          // where its runs execute. Reload so the tree shows the new folder
+          // under the same project rather than as a second one.
+          reload();
+          void loadSessions();
+          if (workspaceId !== workspace.id) onSelectWorkspace(workspaceId);
+        }}
       />
       <ConfirmDialog
         open={removalPlan !== null}

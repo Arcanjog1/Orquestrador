@@ -105,6 +105,8 @@ export const REQUEST_CHANNELS = [
   'permission.grants',
   'permission.revoke',
   'project.open',
+  'project.preflight',
+  'project.prepare',
   'project.connectRepository',
   'project.setRepository',
   'project.setArchived',
@@ -1026,6 +1028,34 @@ export interface RunEvidenceView {
  * Request/response map. One entry per channel; both sides use it.
  * ------------------------------------------------------------------ */
 
+/**
+ * What the application measured about a project's folder.
+ *
+ * A view of `PreflightResult`, restated here because the contract is the wire
+ * and must not depend on the engine's internal types.
+ */
+export interface PreflightResultView {
+  readonly kind:
+    | 'ready'
+    | 'ready-without-git'
+    | 'no-workspace'
+    | 'folder-missing'
+    | 'git-unavailable'
+    | 'not-a-repository'
+    | 'no-remote'
+    | 'remote-mismatch';
+  /** True when a delegation that changes code must not be sent. */
+  readonly blocksCodeWork: boolean;
+  readonly title: string;
+  readonly detail: string;
+  readonly actions: readonly ('clone-repository' | 'associate-folder')[];
+  /** Reported, never blocking. Nothing here overwrites local changes. */
+  readonly dirty: boolean;
+  readonly branch: string | null;
+  readonly remoteUrl: string | null;
+  readonly declaredRepositoryUrl: string | null;
+}
+
 export interface IpcMap {
   'app.info': { request: void; response: AppInfo };
   /** The OS login item, set by the shell; the answer is what the OS now says. */
@@ -1372,6 +1402,26 @@ export interface IpcMap {
       readonly workspaceId: string;
       /** True when this call had to create the workspace. */
       readonly workspaceCreated: boolean;
+    };
+  };
+  /** What the application measured about the project's folder, right now. */
+  'project.preflight': { request: { projectId: string }; response: PreflightResultView };
+  /**
+   * Gives the project a folder to work in - one it already has, or a clone.
+   *
+   * The project itself is never replaced and never duplicated: the same
+   * `projectId` comes back, with its conversations and history intact.
+   */
+  'project.prepare': {
+    request:
+      | { projectId: string; mode: 'associate'; localPath: string }
+      | { projectId: string; mode: 'clone'; parentPath: string; folderName?: string };
+    response: {
+      readonly project: ProjectView;
+      readonly workspaceId: string;
+      /** True when an existing workspace for that folder was reused. */
+      readonly reusedWorkspace: boolean;
+      readonly preflight: PreflightResultView;
     };
   };
   'project.connectRepository': {

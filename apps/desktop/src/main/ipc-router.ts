@@ -428,6 +428,21 @@ export class IpcRouter {
       if (!project) throw new Error('Este projeto não existe mais.');
       return { project, workspaceId: opened.workspace.id, workspaceCreated: opened.created };
     });
+    this.handlers.set('project.preflight', async (p) =>
+      s.workspaces.preflight((p as { projectId: string }).projectId, s.projects),
+    );
+    // One project, one identity. Preparing gives it a folder; it never makes
+    // a second project, and it never writes into the folder it is given.
+    this.handlers.set('project.prepare', async (p) => {
+      const input = p as IpcMap['project.prepare']['request'];
+      const prepared = await s.workspaces.prepare(input, s.projects);
+      return {
+        project: prepared.project,
+        workspaceId: prepared.workspace.id,
+        reusedWorkspace: prepared.reusedWorkspace,
+        preflight: await s.workspaces.preflight(input.projectId, s.projects),
+      };
+    });
     this.handlers.set('project.removalPlan', (p) =>
       s.projects.removalPlan((p as { projectId: string }).projectId),
     );

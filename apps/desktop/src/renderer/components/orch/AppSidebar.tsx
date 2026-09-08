@@ -21,6 +21,7 @@ import {
   Settings,
   Sparkles,
   Trash2,
+  FolderGit2,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -57,6 +58,8 @@ export interface ProjectActions {
   settings: (project: ProjectView) => void;
   /** What the agents are told about this project. */
   context: (project: ProjectView) => void;
+  /** Give the project a folder to work in: associate one, or clone. */
+  prepare: (project: ProjectView) => void;
   archive: (project: ProjectView, archived: boolean) => void;
   remove: (project: ProjectView) => void;
   /** A conversation born inside the project. */
@@ -408,6 +411,9 @@ export function AppSidebar({
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => projectActions.context(project)} data-testid={`context-project-${project.id}`}>
                   <NotebookPen className="size-3.5" /> Contexto do projeto
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => projectActions.prepare(project)} data-testid={`prepare-project-${project.id}`}>
+                  <FolderGit2 className="size-3.5" /> Preparar para codar
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={() => projectActions.archive(project, !project.archivedAt)}

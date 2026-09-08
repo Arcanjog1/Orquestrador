@@ -566,6 +566,26 @@ export const REQUEST_VALIDATORS: {
   'project.setArchived': obj({ projectId: id, archived: bool }),
   'project.removalPlan': obj({ projectId: id }),
   'project.open': obj({ projectId: id }),
+  'project.preflight': obj({ projectId: id }),
+  // Two shapes, one channel. Each is closed: `associate` cannot smuggle a
+  // parent path and `clone` cannot smuggle a folder to point at.
+  'project.prepare': ((value: unknown, path: string) => {
+    const mode = (value as { mode?: unknown } | null)?.mode;
+    return mode === 'clone'
+      ? obj(
+          {
+            projectId: id,
+            mode: oneOf(['clone'] as const),
+            parentPath: absolutePath(),
+            folderName: str({ min: 1, max: 120 }),
+          },
+          { optional: ['folderName'] },
+        )(value, path)
+      : obj({ projectId: id, mode: oneOf(['associate'] as const), localPath: absolutePath() })(
+          value,
+          path,
+        );
+  }) as Validator<IpcMap['project.prepare']['request']>,
   'permission.pending': noArgs,
   'permission.forRun': obj({ runId: id }),
   // The rule is bounded here and *validated* in the service against the

@@ -75,6 +75,11 @@ import {
   type FileCheckResult,
 } from '../../../../../src/verification/file-check.js';
 import { renderContext, selectContext } from '../../../../../src/context/project-context.js';
+import {
+  assessPreflight,
+  renderPreflight,
+  type PreflightResult,
+} from '../../../../../src/workspace/preflight.js';
 import type { ContextEntry } from '../../../../../src/context/project-context.js';
 import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
 import type { DeniedToolCall } from '../core.js';
@@ -717,6 +722,53 @@ export class OrchestrationService {
       }
     }
 
+    // Is this the folder the objective is about?
+    //
+    // The incident this answers: a task for `Arcanjog1/Orquestrador` ran in a
+    // Desktop folder whose name looked right and which was not a checkout of
+    // anything. The baseline said so and the run went ahead regardless - one
+    // delegation wrote a baseline document, the next died in 5.3s, and the
+    // router escalated on "no progress". No model could have helped: the code
+    // was not there.
+    //
+    // Blocking is deliberately narrow. It happens only when the project
+    // itself declares a repository and the folder is provably not it. A
+    // project that is only a folder is never measured against a repository,
+    // so creating `hello.txt` in a folder with no git keeps working exactly
+    // as before.
+    let preflight: PreflightResult | null = null;
+    if (!conversation && environment?.kind === 'local' && collector) {
+      const probe = await collector.probeRepository();
+      preflight = assessPreflight({
+        workspacePath: cwd,
+        // `describeWorkspaceProblem` above already refused a missing or
+        // unwritable folder, so reaching here means it is there.
+        folderExists: true,
+        isGitRepository: probe.isRepository,
+        gitProblem: probe.problem,
+        remoteUrl: probe.isRepository ? await collector.originUrl() : null,
+        branch: baseline.branch,
+        dirty: baseline.dirty,
+        declaredRepositoryUrl: workspace.repository_url,
+        declaredDefaultBranch: workspace.default_branch,
+      });
+      this.step(
+        runId,
+        0,
+        'preflight',
+        preflight.blocksCodeWork ? 'blocked' : 'ok',
+        `${preflight.title} ${preflight.detail}`.slice(0, 500),
+        { kind: preflight.kind, actions: [...preflight.actions] },
+      );
+      if (preflight.blocksCodeWork) {
+        const reason = `${preflight.title} ${preflight.detail}`;
+        this.database.runs.setStatus(runId, 'NEEDS_HUMAN', reason);
+        this.say(sessionId, runId, 'system', reason);
+        this.progress(runId, sessionId, 'needs-human', preflight.title, 'NEEDS_HUMAN');
+        return;
+      }
+    }
+
     const ledger = new AcceptanceCriteriaLedger();
     const iterations: IterationRecord[] = [];
     /** Every command actually resolved from an id, deduplicated. */
@@ -793,6 +845,7 @@ export class OrchestrationService {
         history,
         conversation,
         team,
+        preflight,
       });
       const asked = await this.askForDecision({
         runId,
@@ -1578,6 +1631,8 @@ export class OrchestrationService {
     /** True for a run with no workspace: no git, no commands, no evidence. */
     conversation: boolean;
     team: readonly WorkerSlot[];
+    /** What the application measured about the folder. Null for a conversation. */
+    preflight?: PreflightResult | null;
   }): string {
     const catalogue = input.conversation ? [] : this.database.verifications.list(input.workspace.id);
     const lines: string[] = [
@@ -1614,6 +1669,11 @@ export class OrchestrationService {
         : [
             `WORKSPACE: ${input.cwd}`,
             '',
+            // What the folder actually is, measured before the first
+            // delegation. Without this the supervisor cannot tell a checkout
+            // of the right repository from a same-named folder holding
+            // nothing, and it spends delegations finding out.
+            ...(input.preflight ? [renderPreflight(input.preflight), ''] : []),
             'BASELINE:',
             `  branch: ${input.baseline.branch ?? '(none)'}`,
             `  commit: ${input.baseline.commit ?? '(none)'}`,
