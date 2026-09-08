@@ -10,9 +10,9 @@ Estado ao fim da quarta sessão: a arquitetura de comunicação, inspirada no Bu
 | Branch desta sessão | `claude/ai-orchestrator-buzz-arch-vblrau` |
 | HEAD do início | `2e06ae5` (ponta de `claude/ai-orchestrator-reorientacao-ytlkw0`) |
 | Branch padrão real | `claude/new-session-3am7mo` — **não é `main`, e `main` não existe** |
-| Instalador | [`desktop-dev-8f08867`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8f08867) — `AI-Orchestrator-Setup.exe`, publicado com a CI verde |
-| CI | [run 96](https://github.com/Arcanjog1/Orquestrador/actions/runs/34186292468) — Windows e Linux **verdes** |
-| Instaladores anteriores | [`desktop-dev-61c622e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-61c622e), [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f) e [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — intactos; a tag é por commit |
+| Instalador | [`desktop-dev-32a94a1`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-32a94a1) — `AI-Orchestrator-Setup.exe`, 117 866 877 bytes, `sha256:6a62a842a67721a3bc2bd2f61ce35ef95c4fb9851bd369bf4fc69c6549e0ae40`, publicado com a CI verde |
+| CI | [run 103](https://github.com/Arcanjog1/Orquestrador/actions/runs/34198522747) — Windows e Linux **verdes** |
+| Instaladores anteriores | [`desktop-dev-645566c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-645566c), [`desktop-dev-8f08867`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8f08867), [`desktop-dev-61c622e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-61c622e), [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f) e [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — intactos; a tag é por commit |
 
 Sem reset, sem merge, sem force-push, sem apagar branch. Nenhuma release
 anterior foi sobrescrita: a tag é por commit. A branch desta sessão
@@ -96,11 +96,13 @@ Não havia probe de `--version` em lugar nenhum.
 ## O roteiro de reteste (único)
 
 1. instale por cima o
-   [`desktop-dev-8f08867`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8f08867)
+   [`desktop-dev-32a94a1`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-32a94a1)
    — `AI-Orchestrator-Setup.exe`, publicado pela
-   [run 96](https://github.com/Arcanjog1/Orquestrador/actions/runs/34186292468)
-   com a CI verde. Traz a exportação de diagnóstico e, agora, a sidebar
-   unificada e o caminho rápido das tarefas pequenas;
+   [run 103](https://github.com/Arcanjog1/Orquestrador/actions/runs/34198522747)
+   com a CI verde. Traz a exportação de diagnóstico, a sidebar unificada, o
+   caminho rápido das tarefas pequenas, o pedido de autorização de ferramenta
+   e a verificação direta de arquivos
+   ([`FILE_VERIFICATION.md`](FILE_VERIFICATION.md));
 2. abra o mesmo projeto e repita o **mesmo objetivo** que falhou;
 3. quando terminar (bem ou mal), abra **Detalhes**;
 4. clique em **Exportar diagnóstico** e depois em **Abrir pasta**;
@@ -515,16 +517,26 @@ Não existem contas Codex/Claude legítimas no CI, e este ambiente não tem
 Windows. O roteiro:
 
 1. baixar o `AI-Orchestrator-Setup.exe` de
-   [`desktop-dev-8f08867`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8f08867)
+   [`desktop-dev-32a94a1`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-32a94a1)
    e instalar por cima (o SmartScreen avisa: o build não é assinado);
 2. abrir o aplicativo — a base é migrada no lugar, nada é reautenticado;
 3. Configurações → Contas: confirmar Codex e Claude conectados;
 4. Equipe: orquestrador = Codex, Worker 1 = Claude;
 5. escolher um projeto **de código** com pasta local;
 6. enviar *"crie hello.txt com o texto pronto"*;
-7. se falhar de novo, abrir **Detalhes**: a falha classificada, as ferramentas
-   recusadas e o diretório de trabalho estarão ali. É essa tela que responde
-   "por que nada mudou?".
+7. o esperado agora: o worker escreve pela ferramenta `Write`, sem shell e sem
+   prompt; o próprio aplicativo abre `hello.txt` e compara os bytes; a run
+   termina **DONE** mesmo sem nenhuma verificação cadastrada no workspace;
+8. se alguma ferramenta ainda for recusada, aparece o **pedido de
+   autorização** — agente, conta, ferramenta, comando exato, argumentos, pasta
+   e motivo, com *Autorizar* e *Recusar*. Recusar é registrado e respeitado;
+9. se falhar de novo, abrir **Detalhes**: a falha classificada, as ferramentas
+   recusadas, as autorizações pedidas com o estado de cada uma e o diretório de
+   trabalho estarão ali. É essa tela que responde "por que nada mudou?".
+
+Este é o teste que decide. Nada nesta sessão o substitui: a correção foi
+executada contra um `claude` real de Linux, **não** contra Windows +
+2.1.252 + PowerShell, que é a combinação que falhou.
 
 Sem PowerShell. Sem instalar Node. Sem copiar credencial. Sem servidor. Sem
 API paga.
