@@ -6,4 +6,7 @@ export type {
   ProcessManager,
   ProcessRunner,
 } from '../core.js';
-export type { HealthStatus as HealthStatusCore } from '../../../../../src/core/types.js';
+export type {
+  HealthStatus as HealthStatusCore,
+  DeniedToolCall,
+} from '../../../../../src/core/types.js';

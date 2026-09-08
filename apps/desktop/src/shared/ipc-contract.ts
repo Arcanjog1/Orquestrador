@@ -98,6 +98,12 @@ export const REQUEST_CHANNELS = [
   'project.rename',
   'project.setWorkspace',
   'project.remove',
+  'permission.pending',
+  'permission.forRun',
+  'permission.approve',
+  'permission.deny',
+  'permission.grants',
+  'permission.revoke',
   'project.open',
   'project.connectRepository',
   'project.setRepository',
@@ -542,6 +548,67 @@ export type ProjectContextKind =
   | 'rule'
   | 'state'
   | 'evidence';
+
+/**
+ * One tool call the worker was refused, as a question a person can answer.
+ *
+ * Every field the CLI did not report is null, and the interface shows "não
+ * informado" for it. Nothing here is inferred: a request with no command is a
+ * request whose command the provider never named, and the dialog says so
+ * rather than guessing one.
+ */
+export interface PermissionRequestView {
+  readonly id: string;
+  readonly runId: string;
+  readonly sessionId: string;
+  readonly workspaceId: string;
+  readonly workspaceName: string | null;
+  readonly iteration: number;
+  /** Which agent asked, and on which connection. Null when not reported. */
+  readonly agentId: string | null;
+  readonly agentName: string | null;
+  readonly accountId: string | null;
+  readonly accountName: string | null;
+  readonly toolName: string;
+  readonly toolUseId: string | null;
+  /** The exact command or path, redacted. Null when the CLI named none. */
+  readonly command: string | null;
+  /** The remaining arguments as redacted JSON. Null when none were reported. */
+  readonly arguments: string | null;
+  readonly workingDirectory: string | null;
+  readonly reason: string;
+  readonly status: 'pending' | 'approved' | 'denied' | 'superseded';
+  /** The rule that was approved, once it was. */
+  readonly approvedRule: string | null;
+  /**
+   * The scopes this request may be approved at, computed in the main process.
+   *
+   * Empty means there is nothing safe to offer - a shell command the CLI did
+   * not name, where the only available rule would be the bare tool, and
+   * granting a bare shell is authorising every command in the project for
+   * ever. The dialog then offers only "Recusar".
+   */
+  readonly scopes: readonly PermissionScopeOption[];
+  readonly decidedAt: string | null;
+  readonly createdAt: string;
+}
+
+/** One thing the person can authorise, in the exact words of the rule sent. */
+export interface PermissionScopeOption {
+  /** The documented permission rule, e.g. `Bash(node check.mjs)`. */
+  readonly rule: string;
+  readonly label: string;
+  readonly detail: string;
+}
+
+/** A standing permission, scoped to one workspace. */
+export interface PermissionGrantView {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly rule: string;
+  readonly requestId: string | null;
+  readonly createdAt: string;
+}
 
 /** What removing a project would do, told before it is done. */
 export interface ProjectRemovalPlanView {
@@ -1282,6 +1349,22 @@ export interface IpcMap {
    * Opens a project: hands back the workspace its runs execute in, making one
    * when it has none. Never clones and never writes to a folder.
    */
+  /** Everything waiting on a person, across every run. */
+  'permission.pending': { request: void; response: readonly PermissionRequestView[] };
+  /** Every request of one run, decided ones included. */
+  'permission.forRun': { request: { runId: string }; response: readonly PermissionRequestView[] };
+  /**
+   * Authorises one request, at one of the scopes it published.
+   *
+   * The rule is validated in the main process against that request's own
+   * options, so an approval can never be for something the dialog did not show.
+   */
+  'permission.approve': { request: { requestId: string; rule: string }; response: PermissionRequestView };
+  /** Refuses a request. Nothing is granted and the refusal is recorded. */
+  'permission.deny': { request: { requestId: string }; response: PermissionRequestView };
+  'permission.grants': { request: { workspaceId: string }; response: readonly PermissionGrantView[] };
+  'permission.revoke': { request: { grantId: string }; response: { revoked: boolean } };
+
   'project.open': {
     request: { projectId: string };
     response: {

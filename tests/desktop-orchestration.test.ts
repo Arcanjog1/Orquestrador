@@ -1126,11 +1126,34 @@ test('a two-stage verification forces a second iteration from a worker that foll
     assert.doesNotMatch(first!, new RegExp(`${SECOND_STAGE.file}|${SECOND_STAGE.content}`));
 
     // -- and the second is the orchestrator's decision, verbatim ------------
+    //
+    // The application prepends a block stating the permission policy in force
+    // - which tools run without a prompt, which do not, and what to do when a
+    // command really is needed - because a worker that has to discover its own
+    // permissions spends a whole invocation being refused. What must never
+    // happen is the application *rewriting the task*, so this asserts the two
+    // halves separately: the policy block is labelled as coming from the
+    // application, and the orchestrator's task follows it unchanged.
     assert.equal(decisions[1]!.action, 'delegate');
-    assert.equal(second, decisions[1]!.task, 'the worker received decision.task unchanged');
+    assert.ok(
+      second!.startsWith('TOOL POLICY FOR THIS DELEGATION (from the application, not from the task):'),
+      'the policy block says whose words it is',
+    );
+    assert.ok(
+      second!.endsWith(decisions[1]!.task!),
+      'the orchestrator\'s task reaches the worker unchanged, at the end',
+    );
+    assert.equal(
+      second!.slice(second!.length - decisions[1]!.task!.length),
+      decisions[1]!.task,
+      'byte for byte',
+    );
     assert.equal(workers[1]!.task, decisions[1]!.task, 'and the database recorded the same');
     assert.notEqual(second, objective, 'not the objective handed down again');
-    assert.equal(second, `Crie ${SECOND_STAGE.file} contendo exatamente "${SECOND_STAGE.content}"`);
+    assert.ok(
+      second!.endsWith(`Crie ${SECOND_STAGE.file} contendo exatamente "${SECOND_STAGE.content}"`),
+      'and it is the second stage, spelled out by the orchestrator',
+    );
 
     // -- the verdicts that drove it: a failure, then a pass -----------------
     const verifications = db.runs.verifications(sent.run.id) as Array<{

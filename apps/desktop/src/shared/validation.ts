@@ -566,6 +566,15 @@ export const REQUEST_VALIDATORS: {
   'project.setArchived': obj({ projectId: id, archived: bool }),
   'project.removalPlan': obj({ projectId: id }),
   'project.open': obj({ projectId: id }),
+  'permission.pending': noArgs,
+  'permission.forRun': obj({ runId: id }),
+  // The rule is bounded here and *validated* in the service against the
+  // request's own published options: a length check cannot tell a safe rule
+  // from a wide one, and only the request knows what it offered.
+  'permission.approve': obj({ requestId: id, rule: str({ min: 1, max: 400 }) }),
+  'permission.deny': obj({ requestId: id }),
+  'permission.grants': obj({ workspaceId: id }),
+  'permission.revoke': obj({ grantId: id }),
   'project.listContext': obj({ projectId: id }),
   'project.addContext': obj(
     {

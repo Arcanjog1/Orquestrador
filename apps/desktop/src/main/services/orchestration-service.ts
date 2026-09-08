@@ -71,6 +71,7 @@ import { describeActivity } from '../../../../../src/agents/activity-monitor.js'
 import { renderContext, selectContext } from '../../../../../src/context/project-context.js';
 import type { ContextEntry } from '../../../../../src/context/project-context.js';
 import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
+import type { DeniedToolCall } from '../core.js';
 import { toMessageView, toRunDetailView, toRunView } from './views.js';
 import { BudgetLedger, isAgentProvider } from '../core.js';
 import type { BudgetLimits, ProviderCapabilities } from '../core.js';
@@ -885,10 +886,39 @@ export class OrchestrationService {
         // are not made better by another attempt, and each attempt may cost.
         const terminal = terminalFailure(delegated.record.failure);
         if (terminal) {
-          this.database.runs.setStatus(runId, 'NEEDS_HUMAN', terminal);
-          this.say(sessionId, runId, 'system', terminal);
-          this.step(runId, iteration, 'worker', 'needs-human', terminal);
-          this.progress(runId, sessionId, 'needs-human', terminal, 'NEEDS_HUMAN');
+          // A refused tool is the one terminal failure a person can actually
+          // resolve, so it gets a request they can answer rather than a
+          // sentence telling them to authorise something with no way to.
+          const requests =
+            delegated.record.failure === 'tool-permission-denied'
+              ? this.askForPermission({
+                  runId,
+                  sessionId,
+                  workspaceId: workspace.id,
+                  iteration,
+                  agentId: chosen.slot.agentId ?? workspace.worker_agent_id,
+                  accountId: chosen.slot.accountId,
+                  workingDirectory: cwd,
+                  calls: delegated.record.deniedCalls ?? [],
+                  tools: delegated.record.deniedTools ?? [],
+                })
+              : [];
+          const reason =
+            requests.length > 0
+              ? `${terminal} Há ${requests.length} pedido(s) de autorização aguardando você.`
+              : terminal;
+          this.database.runs.setStatus(runId, 'NEEDS_HUMAN', reason);
+          this.say(sessionId, runId, 'system', reason);
+          this.step(runId, iteration, 'worker', 'needs-human', reason, {
+            ...(requests.length > 0 ? { permissionRequests: requests.map((r) => r.id) } : {}),
+          });
+          this.progress(
+            runId,
+            sessionId,
+            requests.length > 0 ? 'awaiting-approval' : 'needs-human',
+            reason,
+            'NEEDS_HUMAN',
+          );
           return;
         }
         if (signal.aborted) return this.finishCancelled(runId, sessionId);
@@ -1586,6 +1616,97 @@ export class OrchestrationService {
     }
   }
 
+  /**
+   * Turns refused calls into requests somebody can answer.
+   *
+   * The gap this closes: the run said "autorize a operação" and offered
+   * nothing to authorise. Every field here comes from what the CLI actually
+   * reported - the tool, the exact command when it named one, the arguments,
+   * the directory - and a field it did not report is stored as NULL so the
+   * dialog can say "não informado" instead of showing a guess.
+   *
+   * A refusal the CLI described only by tool name still produces a request:
+   * the person can see *that* PowerShell was refused and deny it, or approve
+   * the tool for this workspace after reading what the task was. What they
+   * cannot do is approve a command nobody can name, and the dialog says so.
+   *
+   * Never throws into the loop. A run that has already failed must not fail
+   * differently because bookkeeping did.
+   */
+  private askForPermission(input: {
+    runId: string;
+    sessionId: string;
+    workspaceId: string;
+    iteration: number;
+    agentId: string | null;
+    accountId: string | null;
+    workingDirectory: string;
+    calls: readonly DeniedToolCall[];
+    tools: readonly string[];
+  }): Array<{ id: string; toolName: string }> {
+    try {
+      // Prefer the detailed calls. Fall back to the bare tool names only for
+      // tools the detailed list did not already cover, so one refusal never
+      // becomes two questions.
+      const described = new Set(input.calls.map((call) => call.toolName));
+      const entries: DeniedToolCall[] = [
+        ...input.calls,
+        ...input.tools.filter((tool) => !described.has(tool)).map((toolName) => ({ toolName })),
+      ];
+
+      const created: Array<{ id: string; toolName: string }> = [];
+      for (const call of entries.slice(0, 10)) {
+        // A question already waiting for this exact call is not asked twice.
+        const alreadyAsked = this.database.permissions
+          .forRun(input.runId)
+          .some(
+            (row) =>
+              row.status === 'pending' &&
+              row.tool_name === call.toolName &&
+              (row.command ?? '') === (call.command ?? ''),
+          );
+        if (alreadyAsked) continue;
+
+        const record = this.database.permissions.createRequest({
+          id: newId('perm'),
+          runId: input.runId,
+          sessionId: input.sessionId,
+          workspaceId: input.workspaceId,
+          iteration: input.iteration,
+          agentId: input.agentId,
+          accountId: input.accountId,
+          toolName: call.toolName,
+          toolUseId: call.toolUseId ?? null,
+          command: call.command ?? null,
+          arguments: call.arguments ?? null,
+          workingDirectory: input.workingDirectory,
+          reason:
+            `O Claude Code pediu para usar ${call.toolName} e a execução não é interativa, ` +
+            'então o pedido foi recusado automaticamente. Nada foi executado.',
+        });
+        created.push({ id: record.id, toolName: record.tool_name });
+      }
+      return created;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * The permission rules a person has approved for this workspace.
+   *
+   * Only what somebody actually approved. Nothing is inferred from a failure,
+   * and a grant never crosses to another workspace - which is what keeps one
+   * project's approval from quietly authorising another's.
+   */
+  private grantsFor(workspaceId: string): readonly string[] {
+    try {
+      return this.database.permissions.rulesFor(workspaceId);
+    } catch {
+      return [];
+    }
+  }
+
   private buildFeedback(
     evidence: GitEvidence,
     verification: readonly CommandResult[],
@@ -1784,7 +1905,7 @@ export class OrchestrationService {
 
       const invoke = (resumeSessionId: string | null) =>
         slot.runner.run({
-          prompt: task,
+          prompt: `${toolPolicyPreamble(this.grantsFor(workspace.id))}\n\n${task}`,
           workingDirectory: cwd,
           timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
           runId,
@@ -1877,6 +1998,9 @@ export class OrchestrationService {
         ...(result.failure ? { failure: result.failure } : {}),
         ...(result.permissionDenials && result.permissionDenials.length > 0
           ? { deniedTools: [...result.permissionDenials] }
+          : {}),
+        ...(result.deniedCalls && result.deniedCalls.length > 0
+          ? { deniedCalls: [...result.deniedCalls] }
           : {}),
       };
       this.database.runs.recordInvocation({
@@ -2681,4 +2805,39 @@ function contextKindOf(kind: string): ContextEntry['kind'] {
     default:
       return 'state';
   }
+}
+
+/**
+ * What the worker is allowed to do, said before the task.
+ *
+ * A worker that does not know its own permissions spends a turn discovering
+ * them: it reaches for a shell, is refused, and the run ends with nothing
+ * written. This is three sentences of fact - the tools that run without a
+ * prompt, the ones that do not, and what to do when it needs one - and it
+ * costs a few dozen tokens against a wasted 42-second invocation.
+ *
+ * It is deliberately not an instruction to avoid shells. A task that genuinely
+ * needs a command run should ask for one and be refused *visibly*, so a person
+ * can approve it. What this prevents is reaching for PowerShell to write six
+ * bytes that `Write` writes without asking anyone.
+ */
+export function toolPolicyPreamble(grants: readonly string[]): string {
+  const lines = [
+    'TOOL POLICY FOR THIS DELEGATION (from the application, not from the task):',
+    '- Read, Write, Edit, Glob and Grep run without asking, inside the working directory.',
+    '  Use them for file content. Creating or changing a file needs no shell.',
+    '- Bash and PowerShell are NOT pre-approved. This is a non-interactive run, so a',
+    '  permission prompt cannot be answered and the call is refused outright.',
+  ];
+  if (grants.length > 0) {
+    lines.push(
+      `- Approved by the person for this project, and only these: ${grants.join(', ')}.`,
+    );
+  }
+  lines.push(
+    '- If the task genuinely needs a command run, say so plainly in your answer and name',
+    '  the exact command. The application will ask the person to approve that command,',
+    '  and the task will be delegated again once they do. Do not work around a refusal.',
+  );
+  return lines.join('\n');
 }

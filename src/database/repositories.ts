@@ -1111,6 +1111,194 @@ export class ProjectContextRepository extends Repository {
   }
 }
 
+export interface ToolPermissionRequestRecord extends SqlRow {
+  id: string;
+  run_id: string;
+  session_id: string;
+  workspace_id: string;
+  iteration: number;
+  agent_id: string | null;
+  account_id: string | null;
+  tool_name: string;
+  tool_use_id: string | null;
+  command: string | null;
+  arguments: string | null;
+  working_directory: string | null;
+  reason: string;
+  status: string;
+  approved_rule: string | null;
+  decided_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspacePermissionGrantRecord extends SqlRow {
+  id: string;
+  workspace_id: string;
+  rule: string;
+  request_id: string | null;
+  created_at: string;
+}
+
+/**
+ * Tool permissions: what was refused, and what a person authorised.
+ *
+ * The rule this whole class exists to keep: **a grant is only ever created by
+ * a person answering a dialog.** Nothing here infers one from a failure,
+ * nothing widens one, and nothing carries one across workspaces. `approve`
+ * takes the rule that was shown and writes exactly that.
+ */
+export class PermissionRepository extends Repository {
+  /** Records a refused call, so somebody can be asked about it. */
+  createRequest(input: {
+    id: string;
+    runId: string;
+    sessionId: string;
+    workspaceId: string;
+    iteration?: number;
+    agentId?: string | null;
+    accountId?: string | null;
+    toolName: string;
+    toolUseId?: string | null;
+    command?: string | null;
+    arguments?: string | null;
+    workingDirectory?: string | null;
+    reason: string;
+  }): ToolPermissionRequestRecord {
+    const timestamp = now();
+    this.db.run(
+      `INSERT INTO tool_permission_requests
+         (id, run_id, session_id, workspace_id, iteration, agent_id, account_id,
+          tool_name, tool_use_id, command, arguments, working_directory, reason,
+          status, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)`,
+      [
+        input.id,
+        input.runId,
+        input.sessionId,
+        input.workspaceId,
+        input.iteration ?? 0,
+        input.agentId ?? null,
+        input.accountId ?? null,
+        input.toolName,
+        input.toolUseId ?? null,
+        input.command ?? null,
+        input.arguments ?? null,
+        input.workingDirectory ?? null,
+        input.reason,
+        timestamp,
+        timestamp,
+      ] as SqlValue[],
+    );
+    return this.requireRequest(input.id);
+  }
+
+  findRequest(id: string): ToolPermissionRequestRecord | undefined {
+    return this.db.get<ToolPermissionRequestRecord>(
+      'SELECT * FROM tool_permission_requests WHERE id = ?',
+      [id],
+    );
+  }
+
+  requireRequest(id: string): ToolPermissionRequestRecord {
+    const row = this.findRequest(id);
+    if (!row) throw new Error(`Permission request ${id} does not exist.`);
+    return row;
+  }
+
+  /** Everything still waiting on a person, newest first. */
+  pending(): ToolPermissionRequestRecord[] {
+    return this.db.all<ToolPermissionRequestRecord>(
+      "SELECT * FROM tool_permission_requests WHERE status = 'pending' ORDER BY created_at DESC",
+    );
+  }
+
+  /** Every request of one run, in the order it happened. */
+  forRun(runId: string): ToolPermissionRequestRecord[] {
+    return this.db.all<ToolPermissionRequestRecord>(
+      'SELECT * FROM tool_permission_requests WHERE run_id = ? ORDER BY created_at',
+      [runId],
+    );
+  }
+
+  /**
+   * Approves one request, writing the grant it produced.
+   *
+   * `rule` is what the dialog showed and nothing else. Both writes happen
+   * together: a request marked approved with no grant behind it would let the
+   * next delegation run with a permission the person believes they gave.
+   */
+  approve(input: { requestId: string; rule: string; grantId: string }): {
+    request: ToolPermissionRequestRecord;
+    grant: WorkspacePermissionGrantRecord;
+  } {
+    const request = this.requireRequest(input.requestId);
+    const timestamp = now();
+    return this.db.transaction(() => {
+      this.db.run(
+        `UPDATE tool_permission_requests
+            SET status = 'approved', approved_rule = ?, decided_at = ?, updated_at = ?
+          WHERE id = ?`,
+        [input.rule, timestamp, timestamp, input.requestId] as SqlValue[],
+      );
+      // Approving the same command twice is one grant, not two.
+      this.db.run(
+        `INSERT INTO workspace_permission_grants (id, workspace_id, rule, request_id, created_at)
+         VALUES (?,?,?,?,?)
+         ON CONFLICT (workspace_id, rule) DO NOTHING`,
+        [input.grantId, request.workspace_id, input.rule, input.requestId, timestamp] as SqlValue[],
+      );
+      const grant = this.db.get<WorkspacePermissionGrantRecord>(
+        'SELECT * FROM workspace_permission_grants WHERE workspace_id = ? AND rule = ?',
+        [request.workspace_id, input.rule],
+      );
+      if (!grant) throw new Error('A permissão aprovada não pôde ser gravada.');
+      return { request: this.requireRequest(input.requestId), grant };
+    });
+  }
+
+  /** Refuses one request. Nothing is granted, and the refusal is kept. */
+  deny(requestId: string): ToolPermissionRequestRecord {
+    const timestamp = now();
+    this.db.run(
+      `UPDATE tool_permission_requests
+          SET status = 'denied', decided_at = ?, updated_at = ?
+        WHERE id = ?`,
+      [timestamp, timestamp, requestId] as SqlValue[],
+    );
+    return this.requireRequest(requestId);
+  }
+
+  /**
+   * The rules approved for one workspace.
+   *
+   * What the adapter sends as `--allowedTools`. Scoped to the workspace, so
+   * an approval in one project can never authorise anything in another.
+   */
+  rulesFor(workspaceId: string): string[] {
+    return this.db
+      .all<WorkspacePermissionGrantRecord>(
+        'SELECT * FROM workspace_permission_grants WHERE workspace_id = ? ORDER BY created_at',
+        [workspaceId],
+      )
+      .map((row) => row.rule);
+  }
+
+  grantsFor(workspaceId: string): WorkspacePermissionGrantRecord[] {
+    return this.db.all<WorkspacePermissionGrantRecord>(
+      'SELECT * FROM workspace_permission_grants WHERE workspace_id = ? ORDER BY created_at',
+      [workspaceId],
+    );
+  }
+
+  /** Withdraws a grant. The requests that produced it keep their history. */
+  revoke(grantId: string): boolean {
+    return (
+      Number(this.db.run('DELETE FROM workspace_permission_grants WHERE id = ?', [grantId]).changes) > 0
+    );
+  }
+}
+
 export interface ChatSessionRecord extends SqlRow {
   id: string;
   workspace_id: string;

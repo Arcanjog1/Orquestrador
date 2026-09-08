@@ -34,6 +34,7 @@ import { AccountService, type UrlOpener } from './account-service.js';
 import { AgentService, workerAgentIdFor } from './agent-service.js';
 import { ChatService } from './chat-service.js';
 import { ProjectService } from './project-service.js';
+import { PermissionService } from './permission-service.js';
 import { RepositoryAnalysisService } from './repository-analysis-service.js';
 import {
   OrchestrationService,
@@ -133,6 +134,7 @@ export class AppServices {
   readonly orchestration: OrchestrationService;
   readonly chat: ChatService;
   readonly projects: ProjectService;
+  readonly permissions: PermissionService;
   readonly github: GitHubService;
   /** Provider connections: the vendors' official CLIs and the person's API keys. */
   readonly connections: ConnectionService;
@@ -193,6 +195,7 @@ export class AppServices {
     );
     this.chat = new ChatService(this.database, this.orchestration);
     this.projects = new ProjectService(this.database);
+    this.permissions = new PermissionService(this.database);
     this.workspaces.bindActivity((workspaceId) => this.orchestration.hasActiveRunInWorkspace(workspaceId));
     this.github = new GitHubService(
       this.database,

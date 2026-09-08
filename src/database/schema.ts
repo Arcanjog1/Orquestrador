@@ -843,6 +843,82 @@ CREATE INDEX idx_project_context_project ON project_context(project_id, kind, up
 ALTER TABLE run_steps ADD COLUMN duration_ms INTEGER;
 `,
   },
+  {
+    id: 16,
+    name: 'tool-permissions',
+    sql: `
+-- Asking a person to authorise one operation, and remembering their answer.
+--
+-- The run this exists for ended in NEEDS_HUMAN saying the person should
+-- authorise the operation, while offering nothing to authorise. The cause was
+-- documented all along: \`--permission-mode acceptEdits\` auto-approves file
+-- edits and a short list of filesystem commands, and "all other Bash commands
+-- except the built-in read-only set still prompt". In \`--print\` nobody can
+-- answer a prompt, so the call is refused and the CLI reports it in
+-- \`permission_denials\`.
+--
+-- Two tables, because they are two different things with two different
+-- lifetimes: a *request* is one refused call in one run, and a *grant* is a
+-- standing permission a person gave for one workspace.
+CREATE TABLE tool_permission_requests (
+  id                TEXT PRIMARY KEY,
+  run_id            TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  -- Where to show it. A request with no conversation would be a card with
+  -- nowhere to appear.
+  session_id        TEXT NOT NULL,
+  workspace_id      TEXT NOT NULL,
+  iteration         INTEGER NOT NULL DEFAULT 0,
+  -- Who asked, so the dialog can name the agent and the account rather than
+  -- "an agent". NULL where the CLI did not report one.
+  agent_id          TEXT,
+  account_id        TEXT,
+  -- What was refused. \`tool_name\` is what the CLI called it; the rest is
+  -- whatever it reported, redacted, and NULL where it reported nothing.
+  tool_name         TEXT NOT NULL,
+  tool_use_id       TEXT,
+  -- The exact command, when the tool is a shell and the CLI named it. This is
+  -- the field a person reads before approving, so it is stored verbatim
+  -- (after redaction) rather than summarised.
+  command           TEXT,
+  -- The remaining arguments as redacted JSON, capped.
+  arguments         TEXT,
+  working_directory TEXT,
+  -- Why the application is asking: the failure it came from, in words.
+  reason            TEXT NOT NULL,
+  -- 'pending' | 'approved' | 'denied' | 'superseded'
+  status            TEXT NOT NULL DEFAULT 'pending',
+  -- The rule the person approved, exactly as it will be sent to the CLI.
+  -- NULL until approved, and never wider than what the dialog showed.
+  approved_rule     TEXT,
+  decided_at        TEXT,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+);
+CREATE INDEX idx_permission_requests_run ON tool_permission_requests(run_id, created_at);
+CREATE INDEX idx_permission_requests_status
+  ON tool_permission_requests(status, created_at DESC);
+CREATE INDEX idx_permission_requests_workspace
+  ON tool_permission_requests(workspace_id, status);
+
+-- What a person has standing-approved, per workspace.
+--
+-- Scoped to one workspace on purpose, and UNIQUE on (workspace, rule) so
+-- approving the same command twice does not accumulate rows. A grant here is
+-- passed to the CLI as \`--allowedTools <rule>\`; nothing else in this
+-- application may add one, and nothing infers a grant from a failure.
+CREATE TABLE workspace_permission_grants (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  rule          TEXT NOT NULL,
+  -- The request it came from, so a grant can always be traced to the dialog
+  -- somebody actually answered.
+  request_id    TEXT,
+  created_at    TEXT NOT NULL,
+  UNIQUE (workspace_id, rule)
+);
+CREATE INDEX idx_permission_grants_workspace ON workspace_permission_grants(workspace_id);
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

@@ -404,6 +404,23 @@ export class IpcRouter {
       return s.projects.setWorkspace(input.projectId, input.workspaceId);
     });
     this.handlers.set('project.remove', (p) => s.projects.remove((p as { projectId: string }).projectId));
+    this.handlers.set('permission.pending', () => s.permissions.pending());
+    this.handlers.set('permission.forRun', (p) =>
+      s.permissions.forRun((p as { runId: string }).runId),
+    );
+    this.handlers.set('permission.approve', (p) => {
+      const input = p as IpcMap['permission.approve']['request'];
+      return s.permissions.approve(input.requestId, input.rule);
+    });
+    this.handlers.set('permission.deny', (p) =>
+      s.permissions.deny((p as { requestId: string }).requestId),
+    );
+    this.handlers.set('permission.grants', (p) =>
+      s.permissions.grants((p as { workspaceId: string }).workspaceId),
+    );
+    this.handlers.set('permission.revoke', (p) =>
+      s.permissions.revoke((p as { grantId: string }).grantId),
+    );
     this.handlers.set('project.open', (p) => {
       const { projectId } = p as IpcMap['project.open']['request'];
       const opened = s.workspaces.ensureWorkspaceForProject(projectId, s.projects);

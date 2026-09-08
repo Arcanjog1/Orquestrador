@@ -307,6 +307,16 @@ export interface AgentResult {
    */
   permissionDenials?: readonly string[];
   /**
+   * What was actually refused, with the detail a person needs to decide.
+   *
+   * Separate from `permissionDenials`, which is the list of tool *names* every
+   * existing caller already reads. This carries the exact command and the
+   * arguments where the CLI reported them - a name alone cannot be approved,
+   * because "approve PowerShell" is not a decision anybody should be asked to
+   * make. A field the CLI did not report is absent, never invented.
+   */
+  deniedCalls?: readonly DeniedToolCall[];
+  /**
    * The provider's own id for the session this invocation ran in.
    *
    * Recorded so the next delegation to the *same* connection can continue it.
@@ -477,6 +487,15 @@ export interface WorkerRecord {
   failure?: ProviderFailureKind;
   /** Tools this attempt was refused, as the worker's own tool reported them. */
   deniedTools?: readonly string[];
+  /**
+   * The same refusals with the command attached, when the provider named one.
+   *
+   * This is what an approval dialog is built from. A tool name alone is not a
+   * decision a person can make: "allow PowerShell" is a different question
+   * from "allow `Set-Content .\hello.txt`", and only the second one is the
+   * scope somebody should be asked to authorise.
+   */
+  deniedCalls?: readonly DeniedToolCall[];
 }
 
 /** Outcome of the independent DONE validation (spec 15). */
@@ -494,4 +513,21 @@ export interface WorkerSpec {
   agent: AgentKind;
   /** Claude Code profile id. `null` for agents without profiles. */
   profile: string | null;
+}
+
+/**
+ * One tool call a provider refused, as far as the provider described it.
+ *
+ * Every field but `toolName` is optional because the shape of a denial is not
+ * fully documented: the reader takes what is there and leaves the rest absent,
+ * so the interface can say "não informado" instead of showing a guess.
+ */
+export interface DeniedToolCall {
+  readonly toolName: string;
+  /** The provider's own id for the call, when it gave one. */
+  readonly toolUseId?: string;
+  /** The exact command, for a shell tool that reported one. */
+  readonly command?: string;
+  /** The remaining arguments, as JSON text. Redacted and capped by the caller. */
+  readonly arguments?: string;
 }

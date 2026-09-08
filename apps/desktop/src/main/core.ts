@@ -32,6 +32,8 @@ export type {
   ChatSessionRecord,
   ListSessionsOptions,
   ProjectRecord,
+  ToolPermissionRequestRecord,
+  WorkspacePermissionGrantRecord,
   MessageRecord,
   RunRecord,
   RunStepRecord,
@@ -112,6 +114,7 @@ export type {
 } from '../../../../src/providers/provider-types.js';
 export type {
   BillingModel,
+  DeniedToolCall,
   InvocationUsage,
   ProviderFailureKind,
 } from '../../../../src/core/types.js';

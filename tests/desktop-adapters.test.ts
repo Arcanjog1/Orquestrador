@@ -1227,7 +1227,15 @@ test('a streamed failure is still a failure, whatever the exit code was', async 
     is_error: true,
     result: '',
     session_id: 'sess-2',
-    permission_denials: [{ tool_name: 'Write', tool_input: { path: 'C:/segredo/hello.txt' } }],
+    permission_denials: [
+      {
+        tool_name: 'Write',
+        tool_use_id: 'toolu_01',
+        // A path *and* something that really is a secret, so the two can be
+        // told apart below: one must survive to be shown, the other must not.
+        tool_input: { file_path: 'C:/segredo/hello.txt', token: 'sk-ant-api03-NOTAREALKEY' },
+      },
+    ],
   });
   const streaming = {
     ...manager,
@@ -1254,7 +1262,27 @@ test('a streamed failure is still a failure, whatever the exit code was', async 
   assert.equal(result.exitCode, 1, 'an envelope that says it failed is a failure');
   assert.equal(result.failure, 'tool-permission-denied');
   assert.deepEqual(result.permissionDenials, ['Write']);
-  assert.ok(!JSON.stringify(result).includes('segredo'), 'tool arguments never leave the adapter');
+
+  // What a *refused* call carries out, and why this changed.
+  //
+  // This assertion used to be "tool arguments never leave the adapter". That
+  // guarantee was right for a call in flight and wrong for a refused one: a
+  // person cannot authorise a command they are not shown, and the run this
+  // work exists for ended by telling somebody to authorise an operation it
+  // declined to name. So a refusal now carries its target out, and only a
+  // refusal - `readStreamEvents` still reads tool names and never inputs, so
+  // nothing about a call that is *executing* is exposed.
+  const denied = result.deniedCalls ?? [];
+  assert.equal(denied.length, 1);
+  assert.equal(denied[0]!.toolName, 'Write');
+  assert.equal(denied[0]!.toolUseId, 'toolu_01');
+  assert.equal(denied[0]!.command, 'C:/segredo/hello.txt', 'the path is shown, so it can be approved');
+
+  // Redaction still applies, and it is what separates a path from a secret.
+  assert.ok(
+    !JSON.stringify(result).includes('sk-ant-api03-NOTAREALKEY'),
+    'a credential in the arguments is redacted before it leaves the adapter',
+  );
 });
 
 test('a build without stream-json is left on the buffered envelope, not sent a flag it lacks', async () => {

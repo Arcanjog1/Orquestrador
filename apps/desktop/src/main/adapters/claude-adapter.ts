@@ -16,8 +16,15 @@
  * either. What was actually sent comes back on `AgentResult.applied`.
  */
 
-import type { AgentInput, AgentResult, AgentRunner, HealthStatusCore, ProcessRunner } from './adapter-types.js';
-import { makeAgentResult, resolveFixedEffort } from '../core.js';
+import type {
+  AgentInput,
+  AgentResult,
+  AgentRunner,
+  DeniedToolCall,
+  HealthStatusCore,
+  ProcessRunner,
+} from './adapter-types.js';
+import { makeAgentResult, redact, resolveFixedEffort } from '../core.js';
 import { ActivityMonitor } from '../../../../../src/agents/activity-monitor.js';
 import type { InvocationUsage, ProviderFailureKind, WorkerRuntimeCapabilities } from '../core.js';
 import {
@@ -29,6 +36,22 @@ import {
   type CliProbe,
   type ProbeState,
 } from './cli-capabilities.js';
+
+/**
+ * The tools a worker uses to read and write files.
+ *
+ * Bare tool names, which is the documented form for "this tool runs without a
+ * prompt". They are the right tools for file work - `Write` creates a file,
+ * `Edit` changes one - and reaching for a shell to do the same thing is what
+ * turned "create a six-byte file" into a denied PowerShell call.
+ *
+ * `Bash` and `PowerShell` are deliberately **not** here. A command still needs
+ * its own approval, for the scope it names and nothing wider.
+ */
+const FILE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep'] as const;
+
+/** A bound on the command line, so a long grant list cannot break the spawn. */
+const MAX_ALLOWED_RULES = 64;
 
 export interface ClaudeAdapterOptions {
   processManager: ProcessRunner;
@@ -56,6 +79,16 @@ export interface ClaudeAdapterOptions {
    * created with `-p` are deliberately left out of the interactive picker.
    */
   resumeSessionId?: () => string | null;
+  /**
+   * Permission rules a person has explicitly approved for this workspace.
+   *
+   * Read at call time, because an approval can arrive between two delegations
+   * - which is the whole point of the approval flow. Each entry is a
+   * documented permission rule (`Bash(node check.mjs)`, `Write`), and the list
+   * carries only what somebody actually approved: nothing here is inferred
+   * from a failure, and nothing is added by the application on its own.
+   */
+  allowedTools?: () => readonly string[];
 }
 
 export class ClaudeCodeAdapter implements AgentRunner {
@@ -147,6 +180,9 @@ export class ClaudeCodeAdapter implements AgentRunner {
           ? classifyEnvelope(envelope)
           : null;
       const denials = envelope?.permissionDenials ?? [];
+      // The same refusals, with the command attached. This is what the
+      // approval dialog is built from: a tool name alone cannot be approved.
+      const deniedCalls = envelope?.deniedCalls ?? [];
       // What the CLI said, and which build said it. Both are read here rather
       // than reconstructed later, because after this function returns the
       // process is gone and nothing can be asked again.
@@ -187,6 +223,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
         ...(failureDetail ? { failureDetail } : {}),
         ...(version ? { version } : {}),
         ...(denials.length > 0 ? { permissionDenials: denials } : {}),
+        ...(deniedCalls.length > 0 ? { deniedCalls } : {}),
         activity: monitor.snapshot(),
         ...(result.error ? { error: result.error } : {}),
       });
@@ -289,6 +326,37 @@ export class ClaudeCodeAdapter implements AgentRunner {
     const args = ['--print'];
     if (capabilities.flags.has('--permission-mode')) {
       args.push('--permission-mode', 'acceptEdits');
+    }
+
+    // The tools a worker needs to do file work, named explicitly.
+    //
+    // This is the fix for the run that failed. `acceptEdits` is documented to
+    // auto-approve file edits and a *specific* list of filesystem shell
+    // commands - `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp`, `sed`, and the
+    // PowerShell content cmdlets - and then:
+    //
+    //   "all other Bash commands except the built-in read-only set still
+    //    prompt"
+    //   - https://code.claude.com/docs/en/permission-modes
+    //
+    // In `--print` there is nobody to answer a prompt, so those calls are
+    // denied. A worker asked to create a six-byte file reached for a shell,
+    // was prompted, and the prompt could not be answered.
+    //
+    // Naming the file tools here is not a way around that policy. It is the
+    // policy: `acceptEdits` exists precisely to let Claude write files in the
+    // working directory, and `--allowedTools` states it independently of the
+    // mode, so a mode change cannot silently take it away. It grants nothing
+    // outside these tools - a shell command still needs its own approval - and
+    // `--allowedTools` never widens the tool *set*, only what runs without a
+    // prompt (`--tools` is the flag that would restrict availability).
+    if (capabilities.flags.has('--allowedTools') || capabilities.flags.has('--allowed-tools')) {
+      const flag = capabilities.flags.has('--allowedTools') ? '--allowedTools' : '--allowed-tools';
+      const rules = [...FILE_TOOLS, ...(this.options.allowedTools?.() ?? [])];
+      // De-duplicated and bounded: a grant list that grew without limit would
+      // eventually build a command line the shell refuses.
+      const unique = [...new Set(rules.map((rule) => rule.trim()).filter((r) => r.length > 0))];
+      if (unique.length > 0) args.push(flag, ...unique.slice(0, MAX_ALLOWED_RULES));
     }
     // The documented structured envelope. Additive: a build without it keeps
     // answering as plain text and everything below still works.
@@ -407,6 +475,8 @@ interface ClaudeEnvelope {
   isError: boolean;
   /** Tools the run asked for and was refused, as the CLI reported them. */
   permissionDenials: string[];
+  /** The same refusals with their command and arguments, where reported. */
+  deniedCalls: DeniedToolCall[];
   /** A short line naming the failure, for stderr. Empty when there is none. */
   errorSummary: string;
 }
@@ -494,6 +564,7 @@ function readEnvelope(stdout: string): ClaudeEnvelope | null {
   const subtype = typeof parsed.subtype === 'string' ? parsed.subtype : null;
   const isError = parsed.is_error === true;
   const permissionDenials = readDenials(parsed.permission_denials);
+  const deniedCalls = readDeniedCalls(parsed.permission_denials);
   const errorSummary = isError
     ? `A execução do Claude Code terminou em erro${subtype ? ` (${subtype})` : ''}.`
     : '';
@@ -517,7 +588,7 @@ function readEnvelope(stdout: string): ClaudeEnvelope | null {
           costUsd: cost,
           costReported: cost !== null,
         };
-  return { text, sessionId, usage, subtype, isError, permissionDenials, errorSummary };
+  return { text, sessionId, usage, subtype, isError, permissionDenials, deniedCalls, errorSummary };
 }
 
 /**
@@ -528,17 +599,71 @@ function readEnvelope(stdout: string): ClaudeEnvelope | null {
  * may contain anything the person typed.
  */
 function readDenials(value: unknown): string[] {
+  return [...new Set(readDeniedCalls(value).map((call) => call.toolName))];
+}
+
+/**
+ * The refused calls, with whatever detail the provider attached to them.
+ *
+ * The exact shape of a `permission_denials` entry is not published, so this
+ * reads defensively: a bare string is a tool name; an object is searched for
+ * the names the CLI and the SDK use (`tool_name`/`name`, `tool_use_id`/`id`,
+ * `tool_input`/`input`). Anything it does not find stays absent, and the
+ * interface says "não informado" rather than showing something invented.
+ *
+ * The input is read **only here**, and only for a call that was refused. The
+ * activity monitor still never reads tool inputs: those belong to work in
+ * progress and can carry the person's own text. A refused call is different -
+ * it is about to be shown to the owner of the machine so they can decide
+ * whether to allow it, and a decision needs the command.
+ */
+export function readDeniedCalls(value: unknown): DeniedToolCall[] {
   if (!Array.isArray(value)) return [];
-  const names: string[] = [];
+  const calls: DeniedToolCall[] = [];
+  const seen = new Set<string>();
   for (const entry of value.slice(0, 20)) {
-    if (typeof entry === 'string') names.push(entry.slice(0, 80));
-    else if (entry && typeof entry === 'object') {
-      const name = (entry as { tool_name?: unknown; name?: unknown }).tool_name ??
-        (entry as { name?: unknown }).name;
-      if (typeof name === 'string') names.push(name.slice(0, 80));
-    }
+    const call = readDeniedCall(entry);
+    if (!call) continue;
+    // One row per (tool, command): a provider that reports the same refusal
+    // twice must not produce two dialogs asking the same question.
+    const key = `${call.toolName}\u0000${call.command ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    calls.push(call);
   }
-  return [...new Set(names)];
+  return calls;
+}
+
+function readDeniedCall(entry: unknown): DeniedToolCall | null {
+  if (typeof entry === 'string') {
+    const name = entry.trim().slice(0, 80);
+    return name.length > 0 ? { toolName: name } : null;
+  }
+  if (!entry || typeof entry !== 'object') return null;
+  const row = entry as Record<string, unknown>;
+  const name = str(row.tool_name) ?? str(row.name) ?? str(row.tool);
+  if (!name) return null;
+
+  const input = (row.tool_input ?? row.input ?? row.parameters) as unknown;
+  const fields = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+  // `command` for Bash and PowerShell, `file_path` for the file tools: the one
+  // thing a person most needs to see, promoted out of the argument blob.
+  const command = str(fields.command) ?? str(fields.file_path) ?? str(row.command);
+
+  return {
+    toolName: name.slice(0, 80),
+    ...(str(row.tool_use_id) ?? str(row.id)
+      ? { toolUseId: (str(row.tool_use_id) ?? str(row.id))!.slice(0, 120) }
+      : {}),
+    ...(command ? { command: redact(command).slice(0, 2000) } : {}),
+    ...(Object.keys(fields).length > 0
+      ? { arguments: redact(JSON.stringify(fields)).slice(0, 4000) }
+      : {}),
+  };
+}
+
+function str(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
 
 function numberOrNull(value: unknown): number | null {
