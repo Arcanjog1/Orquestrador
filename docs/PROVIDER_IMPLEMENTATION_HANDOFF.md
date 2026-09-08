@@ -10,9 +10,9 @@ Estado ao fim da quarta sessão: a arquitetura de comunicação, inspirada no Bu
 | Branch desta sessão | `claude/ai-orchestrator-buzz-arch-vblrau` |
 | HEAD do início | `2e06ae5` (ponta de `claude/ai-orchestrator-reorientacao-ytlkw0`) |
 | Branch padrão real | `claude/new-session-3am7mo` — **não é `main`, e `main` não existe** |
-| Instalador | [`desktop-dev-8391fdb`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8391fdb) — `AI-Orchestrator-Setup.exe`, 117 868 961 bytes, `sha256:499cd70402f15db667c408a18d1256ca0798722bd4f117f541b07d866a251dd2`, publicado com a CI verde |
-| CI | [run 107](https://github.com/Arcanjog1/Orquestrador/actions/runs/34205162140) — Windows e Linux **verdes** |
-| Instaladores anteriores | [`desktop-dev-1650c9c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-1650c9c), [`desktop-dev-32a94a1`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-32a94a1), [`desktop-dev-645566c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-645566c), [`desktop-dev-8f08867`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8f08867), [`desktop-dev-61c622e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-61c622e), [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f) e [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — intactos; a tag é por commit |
+| Instalador | [`desktop-dev-ff70680`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-ff70680) — `AI-Orchestrator-Setup.exe`, 117 886 003 bytes, `sha256:6915186b9f3e59cfcd805d90d6be3eeb70f2b818a282b09a26050773effc1579`, publicado com a CI verde |
+| CI | [run 112](https://github.com/Arcanjog1/Orquestrador/actions/runs/34221051201) — Windows e Linux **verdes** |
+| Instaladores anteriores | [`desktop-dev-8391fdb`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8391fdb), [`desktop-dev-1650c9c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-1650c9c), [`desktop-dev-32a94a1`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-32a94a1), [`desktop-dev-645566c`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-645566c), [`desktop-dev-8f08867`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8f08867), [`desktop-dev-61c622e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-61c622e), [`desktop-dev-24b557f`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-24b557f) e [`desktop-dev-225559e`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-225559e) — intactos; a tag é por commit |
 
 Sem reset, sem merge, sem force-push, sem apagar branch. Nenhuma release
 anterior foi sobrescrita: a tag é por commit. A branch desta sessão
@@ -96,9 +96,9 @@ Não havia probe de `--version` em lugar nenhum.
 ## O roteiro de reteste (único)
 
 1. instale por cima o
-   [`desktop-dev-8391fdb`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8391fdb)
+   [`desktop-dev-ff70680`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-ff70680)
    — `AI-Orchestrator-Setup.exe`, publicado pela
-   [run 107](https://github.com/Arcanjog1/Orquestrador/actions/runs/34205162140)
+   [run 112](https://github.com/Arcanjog1/Orquestrador/actions/runs/34221051201)
    com a CI verde. Traz a exportação de diagnóstico, a sidebar unificada, o
    caminho rápido das tarefas pequenas, o pedido de autorização de ferramenta
    e a verificação direta de arquivos
@@ -517,7 +517,7 @@ Não existem contas Codex/Claude legítimas no CI, e este ambiente não tem
 Windows. O roteiro:
 
 1. baixar o `AI-Orchestrator-Setup.exe` de
-   [`desktop-dev-8391fdb`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-8391fdb)
+   [`desktop-dev-ff70680`](https://github.com/Arcanjog1/Orquestrador/releases/tag/desktop-dev-ff70680)
    e instalar por cima (o SmartScreen avisa: o build não é assinado);
 2. abrir o aplicativo — a base é migrada no lugar, nada é reautenticado;
 3. Configurações → Contas: confirmar Codex e Claude conectados;
