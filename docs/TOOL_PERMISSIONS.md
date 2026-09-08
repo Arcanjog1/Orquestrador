@@ -120,6 +120,51 @@ O worker também recebe, antes da tarefa, um bloco curto dizendo qual política
 está em vigor. Um worker que precisa descobrir as próprias permissões gasta uma
 invocação inteira sendo recusado; são quatro linhas contra 42 segundos.
 
+### a2. Por que **não** foi usado `--permission-prompt-tool`
+
+Você pediu, com todas as letras: *"Se o CLI não oferecer um mecanismo apropriado
+para encaminhar aprovações ao aplicativo no modo atual, explique a limitação e
+implemente uma alternativa oficial suportada."*
+
+O mecanismo **existe**, e é este:
+
+> `--permission-prompt-tool` — Specify an MCP tool to handle permission prompts
+> in non-interactive mode. Claude Code waits for that tool's MCP server to
+> connect before running the first turn.
+>
+> — <https://code.claude.com/docs/en/cli-reference>
+
+Ele é literalmente "encaminhar aprovações ao aplicativo". E não foi usado, por
+três motivos — o primeiro é decisivo:
+
+**1. O contrato não é publicado.** A documentação diz *que* uma ferramenta MCP
+recebe os pedidos, e não diz **qual JSON ela recebe nem o que deve devolver**.
+O que está documentado é o `canUseTool` do *Agent SDK* — `{behavior: "allow",
+updatedInput}` / `{behavior: "deny", message}` — que é outro caminho, de outra
+biblioteca. Implementar o prompt-tool hoje seria adivinhar o formato e chamar o
+palpite de conserto. Você escreveu: *"Não invente uma API privada nem simule uma
+autorização que o CLI não recebeu."*
+
+**2. No 2.1.263 a flag nem aparece como opção própria.** No `--help` dessa
+versão ela é citada apenas dentro da descrição de `--permission-prompts`. Não
+consigo afirmar como o 2.1.252 a expõe na sua máquina.
+
+**3. Ele prende o processo esperando você.** O modelo do prompt-tool é: o CLI
+para e fica aguardando a resposta — *"The callback can stay pending
+indefinitely"* — e a própria documentação recomenda um hook `defer` quando a
+pessoa pode demorar. Num aplicativo de desktop, onde você pode simplesmente não
+estar na frente da máquina, um processo do Claude Code parado por horas é pior
+do que terminar e retomar a sessão depois.
+
+**A alternativa usada é oficial e documentada**: `--allowedTools`, com a
+[sintaxe de regras publicada](https://code.claude.com/docs/en/settings-reference#permission-rule-syntax).
+A troca é honesta e está dita na interface: a autorização não desbloqueia uma
+execução em espera — ela vale para a **próxima** delegação, que continua a mesma
+sessão do Claude Code pelo `--resume`.
+
+Se a Anthropic publicar o contrato do prompt-tool, ele passa a ser uma melhoria
+possível: aprovar sem precisar reenviar a tarefa. Nada aqui impede isso.
+
 ### b. A recusa vira um pedido que você pode responder
 
 Cada chamada recusada vira uma linha em `tool_permission_requests`, com o que o
