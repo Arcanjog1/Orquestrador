@@ -23,6 +23,9 @@
 
 import { createHash } from 'node:crypto';
 
+/** The credential the device flow hands out. Never a real one. */
+export const FAKE_TOKEN = 'gho_faketoken0000000000000000000000000000';
+
 interface Blob {
   readonly content: Buffer;
 }
@@ -139,7 +142,19 @@ export class FakeRepository {
     }
     const url = new URL(typeof input === 'string' ? input : input.toString());
     const method = (init?.method ?? 'GET').toUpperCase();
-    const body = init?.body ? (JSON.parse(String(init.body)) as unknown) : null;
+    // The REST API is JSON; the device flow is form-encoded. Parsing both as
+    // JSON is how this fake used to answer a perfectly good login request with
+    // a parse error.
+    const contentType = String(
+      (init?.headers as Record<string, string> | undefined)?.['Content-Type'] ?? '',
+    );
+    const raw = init?.body ? String(init.body) : null;
+    const body: unknown =
+      raw === null
+        ? null
+        : contentType.includes('json')
+          ? (JSON.parse(raw) as unknown)
+          : Object.fromEntries(new URLSearchParams(raw));
     const path = url.pathname;
     this.calls.push({ method, path: `${path}${url.search}`, body });
 
@@ -147,6 +162,38 @@ export class FakeRepository {
       const failure = this.failNext;
       this.failNext = null;
       return this.json({ message: failure.message ?? 'falhou' }, failure.status);
+    }
+
+    // The device flow, so a test can connect the account through the real
+    // service instead of reaching into its storage. Writing to a repository
+    // needs a credential, and a test that faked one would not be testing the
+    // thing that refuses without it.
+    if (method === 'POST' && path === '/login/device/code') {
+      return this.json({
+        device_code: 'device-code-fake',
+        user_code: 'ABCD-EFGH',
+        verification_uri: 'https://github.com/login/device',
+        expires_in: 900,
+        interval: 0,
+      });
+    }
+    if (method === 'POST' && path === '/login/oauth/access_token') {
+      return this.json({ access_token: FAKE_TOKEN, token_type: 'bearer', scope: 'repo' });
+    }
+    if (method === 'GET' && path === '/user/repos') {
+      return this.json([
+        {
+          full_name: `${this.options.owner}/${this.options.repo}`,
+          name: this.options.repo,
+          private: this.options.isPrivate === true,
+          default_branch: this.options.defaultBranch,
+          html_url: `https://github.com/${this.options.owner}/${this.options.repo}`,
+          permissions: { push: this.options.canWrite !== false, admin: false },
+        },
+      ]);
+    }
+    if (method === 'GET' && path === '/user') {
+      return this.json({ login: 'arcanjo', name: 'Arcanjo', avatar_url: '', html_url: '' });
     }
 
     const prefix = `/repos/${this.options.owner}/${this.options.repo}`;

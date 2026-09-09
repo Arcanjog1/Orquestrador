@@ -45,6 +45,47 @@ export interface VerifierOptions {
   resolveCommand?: (command: string) => Promise<string | null>;
 }
 
+/**
+ * A verifier for a project with nowhere to run anything.
+ *
+ * A GitHub-backed project can read and edit its code through the API, and
+ * cannot execute it: the API is not an executor. So a verification command in
+ * that mode is not "failed" and certainly not "passed" - it is **refused, and
+ * never ran**, which is exactly what `CommandResult.refused` means and exactly
+ * what the DoneGate must see.
+ *
+ * The alternative would be to skip the command silently, and a criterion that
+ * a skipped test was supposed to prove would then be certified by nothing at
+ * all. The person asked for the opposite: "Se não houver executor para rodar
+ * testes, mantenha os critérios funcionais sem prova... Não invente PASS."
+ */
+export function verifierWithoutExecutor(reason: string): Verifier {
+  return {
+    async runAll(commands: readonly string[]): Promise<CommandResult[]> {
+      return commands.map((command) => ({
+        command,
+        exitCode: null,
+        stdout: '',
+        stderr: '',
+        durationMs: 0,
+        timedOut: false,
+        refused: reason,
+      }));
+    },
+    async runOne(command: string): Promise<CommandResult> {
+      return {
+        command,
+        exitCode: null,
+        stdout: '',
+        stderr: '',
+        durationMs: 0,
+        timedOut: false,
+        refused: reason,
+      };
+    },
+  } as unknown as Verifier;
+}
+
 export class Verifier {
   constructor(private readonly options: VerifierOptions) {}
 

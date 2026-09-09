@@ -230,6 +230,48 @@ export class RepositoryOperations {
   // -- Reading ---------------------------------------------------------------
 
   /**
+   * The repository itself: its canonical name, its real default branch, and
+   * whether the credential in hand may write to it.
+   *
+   * One request that answers the three questions the interface has to ask
+   * before offering anything. `canPush` is null for an anonymous read, because
+   * GitHub only reports permissions to a caller it recognises - and "I do not
+   * know" is a different answer from "you may not".
+   */
+  async repository(
+    ref: RepositoryRef,
+    token: string | null,
+    signal?: AbortSignal,
+  ): Promise<{
+    fullName: string;
+    defaultBranch: string | null;
+    isPrivate: boolean;
+    canPush: boolean | null;
+  }> {
+    const body = await this.send<{
+      full_name?: unknown;
+      private?: unknown;
+      default_branch?: unknown;
+      permissions?: { push?: unknown; admin?: unknown; maintain?: unknown };
+    }>('GET', `/repos/${enc(ref.owner)}/${enc(ref.repo)}`, token, null, signal);
+    const permissions = body.permissions;
+    return {
+      fullName: typeof body.full_name === 'string' ? body.full_name : `${ref.owner}/${ref.repo}`,
+      // Null, never 'main'. A caller shows "não informado" and asks; it does
+      // not act on a name this application made up.
+      defaultBranch:
+        typeof body.default_branch === 'string' && body.default_branch.length > 0
+          ? body.default_branch
+          : null,
+      isPrivate: body.private === true,
+      canPush:
+        permissions && typeof permissions === 'object'
+          ? permissions.push === true || permissions.admin === true || permissions.maintain === true
+          : null,
+    };
+  }
+
+  /**
    * The commit a ref points at, whatever kind of ref it is.
    *
    * A branch name, a tag, a sha or `HEAD`: the commits endpoint resolves all

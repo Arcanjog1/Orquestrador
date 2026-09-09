@@ -447,6 +447,21 @@ export const REQUEST_VALIDATORS: {
     },
     { optional: ['name', 'repositoryPrivate', 'endpoint'] },
   ),
+  'workspace.createGitHub': obj(
+    {
+      repository: repositoryFullName,
+      branch: nullable(branchName),
+      name: str({ min: 1, max: 120 }),
+      repositoryPrivate: bool,
+    },
+    { optional: ['branch', 'name', 'repositoryPrivate'] },
+  ),
+  'workspace.githubCapabilities': obj({ workspaceId: id }),
+  'workspace.githubTree': obj({ workspaceId: id, ref: nullable(str({ min: 1, max: 255 })) }, { optional: ['ref'] }),
+  'workspace.githubFile': obj(
+    { workspaceId: id, path: str({ min: 1, max: 400 }), ref: nullable(str({ min: 1, max: 255 })) },
+    { optional: ['ref'] },
+  ),
   'workspace.createConversation': obj({ name: str({ min: 1, max: 120 }) }),
   'workspace.setBudget': obj({
     workspaceId: id,

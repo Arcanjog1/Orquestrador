@@ -62,6 +62,10 @@ export const REQUEST_CHANNELS = [
   'workspace.openProject',
   'workspace.create',
   'workspace.createCloud',
+  'workspace.createGitHub',
+  'workspace.githubCapabilities',
+  'workspace.githubTree',
+  'workspace.githubFile',
   'workspace.createConversation',
   'workspace.setPublish',
   'workspace.setBudget',
@@ -630,6 +634,26 @@ export interface PermissionScopeOption {
   readonly rule: string;
   readonly label: string;
   readonly detail: string;
+}
+
+/**
+ * What a GitHub-backed project can actually do.
+ *
+ * Three capabilities, kept apart because they are genuinely different: reading
+ * and editing happen through the documented API with no folder anywhere, and
+ * running code does not happen there at all. `execution` never says "nuvem"
+ * for something that would run on this computer.
+ */
+export interface RepositoryCapabilitiesView {
+  readonly fullName: string | null;
+  readonly defaultBranch: string | null;
+  readonly isPrivate: boolean | null;
+  readonly canRead: boolean;
+  /** Null means "not known": an anonymous read is told nothing about this. */
+  readonly canWrite: boolean | null;
+  readonly problem: string | null;
+  /** `none` | `local-temporary`. Never the GitHub API. */
+  readonly execution: string;
 }
 
 /** A standing permission, scoped to one workspace. */
@@ -1273,6 +1297,48 @@ export interface IpcMap {
       endpoint?: string | null;
     };
     response: WorkspaceView;
+  };
+  /**
+   * A project whose code lives on GitHub and nowhere on this computer.
+   *
+   * No folder, no clone, no coordinator. The application reads and edits the
+   * repository through the documented API; running code is a separate
+   * capability the interface names on its own.
+   */
+  'workspace.createGitHub': {
+    request: {
+      repository: string;
+      /** Where work starts. Omitted means the repository's real default. */
+      branch?: string | null;
+      name?: string;
+      repositoryPrivate?: boolean;
+    };
+    response: WorkspaceView;
+  };
+  /** What this project can read, change and run - measured, not assumed. */
+  'workspace.githubCapabilities': {
+    request: { workspaceId: string };
+    response: RepositoryCapabilitiesView;
+  };
+  'workspace.githubTree': {
+    request: { workspaceId: string; ref?: string | null };
+    response: {
+      readonly ref: string;
+      readonly commitSha: string;
+      readonly truncated: boolean;
+      readonly entries: ReadonlyArray<{ path: string; type: string; size: number | null }>;
+    };
+  };
+  'workspace.githubFile': {
+    request: { workspaceId: string; path: string; ref?: string | null };
+    response: {
+      readonly path: string;
+      readonly commitSha: string;
+      readonly bytes: number;
+      readonly text: string | null;
+      readonly isBinary: boolean;
+      readonly truncated: boolean;
+    };
   };
   /** A project with no folder, no repository and no server. */
   'workspace.createConversation': {

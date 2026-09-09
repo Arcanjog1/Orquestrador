@@ -739,6 +739,57 @@ export class WorkspaceService {
    * here would quietly break it - which is exactly what the first version of
    * this did.
    */
+  /**
+   * A project whose code lives on GitHub and nowhere on this computer.
+   *
+   * One project per repository, deliberately - not one per branch. A branch is
+   * where a piece of work starts, and the person changes it; the repository is
+   * what the project *is*. Three entries in the sidebar for one repository is
+   * exactly what the request said not to build.
+   *
+   * `default_branch` stays unset here. It is a fact about the repository that
+   * only GitHub can state, and writing the chosen branch into it would make a
+   * pull request open against the branch it came from.
+   */
+  createGitHub(input: {
+    name?: string;
+    /** `owner/name`, as GitHub names it. */
+    repository: string;
+    /** Where work starts. Null means the repository's real default branch. */
+    branch?: string | null;
+    repositoryPrivate?: boolean;
+  }): WorkspaceView {
+    const repository = input.repository.trim();
+    if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repository)) {
+      throw new WorkspaceError('Escolha um repositório no formato dono/nome.');
+    }
+    const existing = this.database.workspaces
+      .list()
+      .find(
+        (w) =>
+          w.environment === 'github' &&
+          (w.repository_full_name ?? '').toLowerCase() === repository.toLowerCase(),
+      );
+    if (existing) {
+      // The same repository is the same project. Opening it again opens the
+      // one that is already there, with its conversations and its history.
+      return this.toView(existing);
+    }
+    const record = this.database.workspaces.create({
+      id: newId('ws'),
+      name: input.name?.trim() || repository,
+      // Deliberately empty. Nothing on this computer belongs to this project,
+      // which is the whole point: no clone, no folder to choose, no PATH.
+      localPath: '',
+      environment: 'github',
+      repositoryFullName: repository,
+      repositoryPrivate: input.repositoryPrivate ?? null,
+      branch: input.branch?.trim() || null,
+      repositoryUrl: `https://github.com/${repository}`,
+    });
+    return this.toView(record);
+  }
+
   createCloud(input: {
     name?: string;
     /** `owner/name`, as GitHub names it. */

@@ -14,6 +14,7 @@ import {
   describeFileCheck,
   runFileChecks,
   type FileCheckRequest,
+  type FileCheckResult,
 } from '../verification/file-check.js';
 
 export interface DoneGateInput {
@@ -41,6 +42,16 @@ export interface DoneGateInput {
   fileChecks?: readonly FileCheckRequest[];
   /** Where the file checks resolve against. Required when there are any. */
   workspaceRoot?: string;
+  /**
+   * Where the gate re-reads files from, when it is not this computer.
+   *
+   * A project working straight against GitHub has no folder for
+   * `workspaceRoot` to name, and the files it must re-check live at a commit.
+   * Supplying this replaces *where* the gate looks and nothing else: it still
+   * re-reads every check from scratch, still compares the same bytes with the
+   * same rule, and still refuses to certify a criterion nothing proved.
+   */
+  readFileChecks?: (requests: readonly FileCheckRequest[]) => Promise<FileCheckResult[]>;
 }
 
 export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult> {
@@ -67,8 +78,12 @@ export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult
   //     commands above: nothing is taken on trust from an earlier iteration,
   //     because the gate certifies the state of the workspace *now*.
   const fileChecks =
-    input.fileChecks && input.fileChecks.length > 0 && input.workspaceRoot
-      ? await runFileChecks(input.workspaceRoot, input.fileChecks)
+    input.fileChecks && input.fileChecks.length > 0
+      ? input.readFileChecks
+        ? await input.readFileChecks(input.fileChecks)
+        : input.workspaceRoot
+          ? await runFileChecks(input.workspaceRoot, input.fileChecks)
+          : []
       : [];
   for (const check of fileChecks) {
     if (check.passed) continue;

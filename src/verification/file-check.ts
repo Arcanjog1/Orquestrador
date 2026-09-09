@@ -130,7 +130,7 @@ export async function runFileCheck(
     problem,
   });
 
-  const invalid = describeInvalid(request);
+  const invalid = describeInvalidCheck(request);
   if (invalid) return fail('invalid-request', invalid);
 
   const target = resolveInside(workspaceRoot, request.path);
@@ -218,7 +218,7 @@ export async function runFileCheck(
     sizeBytes: bytes.byteLength,
     sha256: createHash('sha256').update(bytes).digest('hex'),
   };
-  const problem = compare(request, bytes);
+  const problem = compareFileBytes(request, bytes);
   if (problem) return { ...base, ...found, passed: false, outcome: problem.outcome, problem: problem.text };
   return { ...base, ...found, passed: true, outcome: 'ok', problem: null };
 }
@@ -373,7 +373,7 @@ export function describeFileCheck(result: FileCheckResult): string {
     : `FAIL ${result.request.path} — ${result.problem ?? result.outcome}`;
 }
 
-function compare(
+export function compareFileBytes(
   request: FileCheckRequest,
   bytes: Buffer,
 ): { outcome: FileCheckOutcome; text: string } | null {
@@ -440,7 +440,7 @@ function hexOf(bytes: Buffer): string {
  * Validated before anything is opened, so a malformed request is refused
  * rather than half-executed.
  */
-function describeInvalid(request: FileCheckRequest): string | null {
+export function describeInvalidCheck(request: FileCheckRequest): string | null {
   if (typeof request.path !== 'string' || request.path.trim().length === 0) {
     return 'A verificação de arquivo veio sem caminho.';
   }

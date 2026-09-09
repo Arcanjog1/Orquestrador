@@ -217,6 +217,45 @@ export class IpcRouter {
     this.handlers.set('workspace.create', (p) =>
       this.withProject(s.workspaces.create(p as { name: string; localPath: string; repositoryUrl?: string })),
     );
+    this.handlers.set('workspace.createGitHub', (p) =>
+      this.withProject(s.workspaces.createGitHub(p as IpcMap['workspace.createGitHub']['request'])),
+    );
+    this.handlers.set('workspace.githubCapabilities', async (p) =>
+      s.githubWorkspaces.capabilities((p as { workspaceId: string }).workspaceId),
+    );
+    this.handlers.set('workspace.githubTree', async (p) => {
+      const input = p as IpcMap['workspace.githubTree']['request'];
+      const tree = await s.githubWorkspaces.tree(
+        input.workspaceId,
+        input.ref?.trim() || (await defaultRefFor(s, input.workspaceId)),
+      );
+      return {
+        ref: tree.ref,
+        commitSha: tree.commitSha,
+        truncated: tree.truncated,
+        entries: tree.entries.map((entry) => ({
+          path: entry.path,
+          type: entry.type,
+          size: entry.size,
+        })),
+      };
+    });
+    this.handlers.set('workspace.githubFile', async (p) => {
+      const input = p as IpcMap['workspace.githubFile']['request'];
+      const file = await s.githubWorkspaces.readFile(
+        input.workspaceId,
+        input.path,
+        input.ref?.trim() || (await defaultRefFor(s, input.workspaceId)),
+      );
+      return {
+        path: file.path,
+        commitSha: file.commitSha,
+        bytes: file.bytes,
+        text: file.text,
+        isBinary: file.isBinary,
+        truncated: file.truncated,
+      };
+    });
     this.handlers.set('workspace.createCloud', (p) =>
       this.withProject(s.workspaces.createCloud(p as IpcMap['workspace.createCloud']['request'])),
     );
@@ -595,4 +634,25 @@ function describe(error: unknown): { code: string; message: string } {
     return { code, message };
   }
   return { code: 'ERROR', message: 'Algo deu errado.' };
+}
+
+/**
+ * The ref a GitHub read defaults to when the caller names none.
+ *
+ * The project's chosen branch, then the repository's real default. Never
+ * `main`: a branch this application invented is a branch that may not exist,
+ * and the person would be shown "not found" for a repository that is fine.
+ */
+async function defaultRefFor(
+  services: { githubWorkspaces: { capabilities(id: string): Promise<{ defaultBranch: string | null }> } ; database: { workspaces: { require(id: string): { branch: string | null } } } },
+  workspaceId: string,
+): Promise<string> {
+  const chosen = services.database.workspaces.require(workspaceId).branch?.trim();
+  if (chosen) return chosen;
+  const capabilities = await services.githubWorkspaces.capabilities(workspaceId);
+  if (capabilities.defaultBranch) return capabilities.defaultBranch;
+  throw new Error(
+    'O GitHub não informou a branch padrão deste repositório. Escolha a branch de origem nas ' +
+      'configurações do projeto.',
+  );
 }

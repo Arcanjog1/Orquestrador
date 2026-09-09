@@ -102,6 +102,22 @@ import { buildWorkerPrompt } from '../../../../../src/orchestrator/worker-prompt
 import type { ContextEntry } from '../../../../../src/context/project-context.js';
 import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
 import type { DeniedToolCall, ResumptionDecision } from '../core.js';
+import {
+  readChangeProposal,
+  proposalInstructions,
+} from '../../../../../src/github/change-proposal.js';
+import { collectGitHubEvidence } from '../../../../../src/github/github-evidence.js';
+import {
+  runGitHubFileChecks,
+  runGitHubFileReads,
+  type GitHubFileSource,
+} from '../../../../../src/github/github-file-checks.js';
+import { verifierWithoutExecutor } from '../../../../../src/orchestrator/verifier.js';
+import {
+  RepositoryConflictError,
+  UnsupportedChangeError,
+} from '../../../../../src/github/repository-operations.js';
+import type { GitHubWorkspaceService } from './github-workspace-service.js';
 import { toMessageView, toRunDetailView, toRunView } from './views.js';
 import { BudgetLedger, isAgentProvider } from '../core.js';
 import type { BudgetLimits, ProviderCapabilities } from '../core.js';
@@ -171,6 +187,32 @@ const NO_CAPABILITIES: WorkerRuntimeCapabilities = {
 
 /** Refused models are retried on the next candidate at most this many times per delegation. */
 const MODEL_RETRIES = 2;
+
+/**
+ * What one run knows about the repository it is working on.
+ *
+ * Created once, at the top of a GitHub run, and carried through every phase.
+ * `baseCommit` is resolved before anything else and never re-read: it is what
+ * every later comparison measures against, so a push that lands on the base
+ * branch mid-run shows up as a conflict rather than being silently absorbed.
+ *
+ * `workBranch` is null until the first change is actually applied. A question
+ * about a repository must not leave a branch behind.
+ */
+interface GitHubRunContext {
+  readonly service: GitHubWorkspaceService;
+  readonly workspaceId: string;
+  readonly fullName: string;
+  readonly baseBranch: string;
+  readonly baseCommit: string;
+  /** Null until something has been committed. */
+  workBranch: string | null;
+  /** The commit the work is at. The base commit until something lands. */
+  headCommit: string;
+  /** Every commit this run created, oldest first. */
+  readonly commits: string[];
+  pullRequestUrl: string | null;
+}
 
 export interface OrchestrationOptions {
   /**
@@ -391,6 +433,20 @@ export class OrchestrationService {
   }
 
   /** True while a run is still cancellable. */
+  /**
+   * Where a GitHub-backed project reads and writes its code.
+   *
+   * Bound after construction because the service that holds the GitHub token
+   * is built after this one, and because a test that never touches a
+   * repository should not have to supply one. Absent means GitHub mode is
+   * simply not available, which the loop reports rather than working around.
+   */
+  private githubWorkspaces: GitHubWorkspaceService | null = null;
+
+  bindGitHub(service: GitHubWorkspaceService): void {
+    this.githubWorkspaces = service;
+  }
+
   isActive(runId: string): boolean {
     return this.active.has(runId);
   }
@@ -759,12 +815,25 @@ export class OrchestrationService {
     // forces a person to clone a repository before they can ask a question.
     const conversation = isConversation(workspace);
 
+    // A project that works straight against GitHub. Resolved before anything
+    // else, because everything below measures against the commit it names -
+    // and because a repository that cannot be reached is a fact the person
+    // needs at the start, not fifteen minutes into a run.
+    let github: GitHubRunContext | null = null;
+    if (isGitHubProject(workspace)) {
+      const problem = await this.openGitHubProject(runId, sessionId, workspace);
+      if (problem === null) return;
+      github = problem;
+    }
+
     // Where this run executes. Everything below - evidence, verification, both
     // agents - goes through this one environment, so the loop never mixes a
     // remote workspace's path with a local runner or the other way round.
-    // A conversation run resolves none: there is nothing to provision, so
-    // nothing is provisioned and nothing is charged for.
-    const environment = conversation ? null : await this.resolveEnvironment(workspace, signal);
+    // A conversation run resolves none, and neither does a GitHub run: there
+    // is no folder to provision, which is the whole point of working through
+    // the API. Code that must actually *run* is a separate capability, and the
+    // interface says so rather than a run discovering it.
+    const environment = conversation || github ? null : await this.resolveEnvironment(workspace, signal);
     if (environment) this.environments.set(runId, environment);
     // A conversation run still gives its agents a real directory - an empty
     // one the application owns. See `conversationDirectory`.
@@ -792,13 +861,13 @@ export class OrchestrationService {
       ? undefined
       : await this.options.gitCommand?.().catch(() => undefined);
     const collector =
-      environment && !conversation
+      environment && !conversation && !github
         ? gitCommand
           ? new GitEvidenceCollector(cwd, environment.processes, gitCommand)
           : new GitEvidenceCollector(cwd, environment.processes)
         : null;
     const verifier =
-      environment && !conversation
+      environment && !conversation && !github
         ? new Verifier({
             cwd,
             timeoutMs: this.options.verificationTimeoutMs ?? DEFAULTS.verificationTimeoutMs,
@@ -921,6 +990,15 @@ export class OrchestrationService {
     let feedback: string | null = resumptionNote
       ? `A EXECUÇÃO FOI RETOMADA. ${resumptionNote}`
       : null;
+    /**
+     * What happened to a change the worker proposed, when it did not land.
+     *
+     * Carried separately from `feedback` because it must reach the supervisor
+     * *in addition to* whatever the evidence says - a proposal refused for a
+     * bad path and a round that changed nothing look identical in a diff, and
+     * only one of them is something the next round can fix.
+     */
+    let proposalFeedback: string | null = null;
 
     // Routing state for this run: what each worker's CLI can take (read once
     // per worker), the attempts so far as the router reads them, the models a
@@ -1098,10 +1176,28 @@ export class OrchestrationService {
           unavailableModels,
           signal,
           budget,
+          github,
         });
         record.worker = delegated.record;
         iterationAnswer = delegated.answer;
         if (delegated.answer.trim()) lastWorkerAnswer = delegated.answer;
+
+        // The worker described a change; the application performs it. This is
+        // the line that keeps a paragraph about an edit from being counted as
+        // an edit - and it is where the change becomes real, before any
+        // evidence is collected, so the measurement below sees the commit.
+        if (github) {
+          const applied = await this.applyProposal({
+            runId,
+            sessionId,
+            iteration,
+            github,
+            answer: delegated.answer,
+            objective,
+            signal,
+          });
+          if (applied.feedback) proposalFeedback = applied.feedback;
+        }
 
         // A provider that will keep refusing must stop the run rather than be
         // asked again eight times: an empty balance and a rejected credential
@@ -1169,7 +1265,7 @@ export class OrchestrationService {
       // A conversation run collects none, and says so by having none: it must
       // never report a diff or a changed file, because there is no working
       // copy for one to have happened in.
-      if (!collector) {
+      if (!collector && !github) {
         // In a conversation run there is no command to run, so the check is
         // the orchestrator's own review of an answer a *different* agent
         // produced. That is still not self-certification: a worker cannot
@@ -1212,7 +1308,12 @@ export class OrchestrationService {
       }
 
       this.progress(runId, sessionId, 'evidence', 'Coletando alterações...', 'RUNNING');
-      const evidence: GitEvidence = await collector.collectEvidence(baseline);
+      // The measurement, from whichever thing actually holds the code. Same
+      // record either way, so the ledger, the report and the gate below do not
+      // know or care which mode this run is.
+      const evidence: GitEvidence = collector
+        ? await collector.collectEvidence(baseline)
+        : await this.collectGitHubEvidence(github!, signal);
       record.evidence = evidence;
       // Progress is measured against the tree the previous attempt left,
       // not against the baseline: an iteration that changes nothing after
@@ -1289,7 +1390,12 @@ export class OrchestrationService {
         const resolution = this.database.verifications.resolve(workspace.id, requested);
         unknownIds = resolution.unknown;
         for (const command of resolution.commands) resolvedCommands.add(command);
-        verification = await verifier!.runAll(resolution.commands);
+        // With no executor the command is refused and never runs, and that is
+        // what the round reports. Silence here would leave a criterion the
+        // command was meant to prove certified by nothing at all.
+        verification = await (verifier ?? verifierWithoutExecutor(NO_EXECUTOR)).runAll(
+          resolution.commands,
+        );
         record.verification = verification;
         for (const result of verification) {
           this.database.runs.recordVerification({
@@ -1332,18 +1438,30 @@ export class OrchestrationService {
       // supervisor stated was marked failed, and a failed criterion blocks the
       // gate for ever. A six-byte file was created correctly and the run still
       // died at the iteration limit.
+      // The same mechanism against a commit when the project has no folder:
+      // the application opens the file at the commit the work is at and
+      // compares the same bytes with the same rule. A read is not a check and
+      // neither is a functional test, in either mode.
       const fileChecks =
-        environment?.kind === 'local' && decision.fileChecks.length > 0
-          ? await runFileChecks(cwd, decision.fileChecks)
-          : [];
+        decision.fileChecks.length === 0
+          ? []
+          : github
+            ? await this.githubChecks(github, decision.fileChecks, signal)
+            : environment?.kind === 'local'
+              ? await runFileChecks(cwd, decision.fileChecks)
+              : [];
       // Files the supervisor asked to *see*. The application opens them, so
       // nobody has to ask a worker to copy a file into an answer - which is
       // what the run that prompted this did, four files at a time, getting
       // truncated copies back and going round again.
       const fileReads =
-        environment?.kind === 'local' && decision.fileReads.length > 0
-          ? await runFileReads(cwd, decision.fileReads)
-          : [];
+        decision.fileReads.length === 0
+          ? []
+          : github
+            ? await runGitHubFileReads(await this.githubSource(github, signal), decision.fileReads)
+            : environment?.kind === 'local'
+              ? await runFileReads(cwd, decision.fileReads)
+              : [];
       if (fileReads.length > 0) {
         record.fileReads = fileReads;
         this.step(
@@ -1527,17 +1645,23 @@ export class OrchestrationService {
       if (fastPathEligible) {
         fastPathTried = true;
         this.progress(runId, sessionId, 'review', 'Validação independente...', 'RUNNING');
-        const fresh = await collector.collectEvidence(baseline);
+        const fresh = collector
+          ? await collector.collectEvidence(baseline)
+          : await this.collectGitHubEvidence(github!, signal);
         const gate = await evaluateDone({
           ledger,
           verificationCommands: [...resolvedCommands],
           iterations,
           baseline,
           evidence: fresh,
-          verifier: verifier!,
+          // With no executor a verification command is refused and never runs,
+          // which the gate reads as no proof at all. That is the honest answer
+          // and the one the person asked for: never an invented PASS.
+          verifier: verifier ?? verifierWithoutExecutor(NO_EXECUTOR),
           allowNoChanges: this.options.allowNoChanges ?? false,
           fileChecks: [...requestedFileChecks.values()],
           workspaceRoot: cwd,
+          ...(github ? { readFileChecks: (requests) => this.githubChecks(github!, requests, signal) } : {}),
         });
         this.step(
           runId,
@@ -1550,6 +1674,11 @@ export class OrchestrationService {
         );
         if (gate.passed) {
           record.doneRejection = undefined;
+          // The work is on a branch and the person needs somewhere to review
+          // it. A pull request is offered, never a merge - and only when this
+          // run actually committed something, so a run that changed nothing
+          // does not open an empty PR to look productive.
+          if (github) await this.publishGitHubWork(runId, sessionId, github, objective, signal);
           this.database.runs.setStatus(runId, 'DONE', 'Validação independente aprovada.');
           this.say(
             sessionId,
@@ -1573,22 +1702,33 @@ export class OrchestrationService {
       // 5. `done` is a request. The gate decides.
       if (decision.action === 'done') {
         this.progress(runId, sessionId, 'review', 'Codex revisando...', 'RUNNING');
-        const fresh = await collector.collectEvidence(baseline);
+        const fresh = collector
+          ? await collector.collectEvidence(baseline)
+          : await this.collectGitHubEvidence(github!, signal);
         const gate = await evaluateDone({
           ledger,
           verificationCommands: [...resolvedCommands],
           iterations,
           baseline,
           evidence: fresh,
-          verifier: verifier!,
+          // With no executor a verification command is refused and never runs,
+          // which the gate reads as no proof at all. That is the honest answer
+          // and the one the person asked for: never an invented PASS.
+          verifier: verifier ?? verifierWithoutExecutor(NO_EXECUTOR),
           allowNoChanges: this.options.allowNoChanges ?? false,
           fileChecks: [...requestedFileChecks.values()],
           workspaceRoot: cwd,
+          ...(github ? { readFileChecks: (requests) => this.githubChecks(github!, requests, signal) } : {}),
         });
         record.doneRejection = gate.passed ? undefined : gate;
         this.step(runId, iteration, 'done-gate', gate.passed ? 'passed' : 'rejected', gate.failures.join('; ').slice(0, 500));
 
         if (gate.passed) {
+          // The work is on a branch and the person needs somewhere to review
+          // it. A pull request is offered, never a merge - and only when this
+          // run actually committed something, so a run that changed nothing
+          // does not open an empty PR to look productive.
+          if (github) await this.publishGitHubWork(runId, sessionId, github, objective, signal);
           this.database.runs.setStatus(runId, 'DONE', 'Validação independente aprovada.');
           this.say(sessionId, runId, 'orchestrator', 'Tarefa concluída e verificada.');
           this.sayCost(sessionId, runId, budget);
@@ -1680,6 +1820,13 @@ export class OrchestrationService {
       previousEvidence = evidence;
 
       feedback = this.buildFeedback(evidence, verification, unknownIds, record, ledger);
+      // A proposal that was refused says something the diff cannot: the next
+      // round has to hear *why* nothing landed, or it proposes the same thing
+      // again. Consumed here so one refusal is reported once.
+      if (proposalFeedback) {
+        feedback = `${proposalFeedback}\n\n${feedback}`;
+        proposalFeedback = null;
+      }
     }
 
     this.database.runs.setStatus(runId, 'FAILED', `Limite de ${maxIterations} iterações atingido.`);
@@ -1902,6 +2049,8 @@ export class OrchestrationService {
     history?: string | null;
     /** True for a run with no workspace: no git, no commands, no evidence. */
     conversation: boolean;
+    /** Set when the project works straight against GitHub. */
+    github?: GitHubRunContext | null;
     team: readonly WorkerSlot[];
     /** What the application measured about the folder. Null for a conversation. */
     preflight?: PreflightResult | null;
@@ -1947,6 +2096,32 @@ export class OrchestrationService {
             '  A refused tool is never evidence about the repository. If a worker reports a',
             '  refusal, that says the worker lacked a permission - nothing about whether the',
             '  repository, a branch or a file exists.',
+            '',
+          ]
+        : []),
+      ...(input.github
+        ? [
+            'THIS PROJECT WORKS DIRECTLY ON GITHUB. There is no checkout on this computer.',
+            `  base branch: ${input.github.baseBranch}`,
+            `  base commit: ${input.github.baseCommit}`,
+            `  work branch: ${input.github.workBranch ?? '(ainda não criada; será criada na primeira alteração)'}`,
+            `  current commit: ${input.github.headCommit}`,
+            '',
+            'What the application can do here, and what it cannot:',
+            '  - READ the repository for you: use "fileReads" exactly as you would locally. The',
+            '    application opens the file at the commit above and puts its contents in front of',
+            '    you. Never ask a worker to fetch or paste a file.',
+            '  - PROVE file contents: use "fileChecks" exactly as you would locally. The',
+            '    application opens the file at that commit and compares the bytes itself.',
+            '  - CHANGE files: delegate the change. The worker proposes it as structured data and',
+            '    the application performs it through the GitHub API - one commit on the work',
+            '    branch, never on the base branch, never a merge.',
+            '  - RUN code: it CANNOT. The GitHub API is not an executor. A verification command',
+            '    here is refused and never runs, so a criterion that needs a test executed stays',
+            '    unproven and DONE is refused. Do not ask for one, and do not claim a test passed.',
+            '',
+            'The evidence you will be shown is the diff GitHub itself computes between the base',
+            'commit and the work branch. It is a measurement, not a report from the worker.',
             '',
           ]
         : []),
@@ -2303,6 +2478,286 @@ export class OrchestrationService {
   }
 
   /**
+   * Opens the repository a GitHub-backed project points at.
+   *
+   * Returns the context, or **null** having already ended the run: a project
+   * that cannot reach its repository is a configuration problem with a clear
+   * fix, and finding that out before the first model call is the difference
+   * between a sentence and fifteen wasted minutes.
+   *
+   * Nothing is created here. The work branch is cut the first time a change is
+   * actually applied, so asking a question about a repository leaves no branch
+   * behind.
+   */
+  private async openGitHubProject(
+    runId: string,
+    sessionId: string,
+    workspace: WorkspaceWithAgents,
+  ): Promise<GitHubRunContext | null> {
+    const service = this.githubWorkspaces;
+    const stop = (reason: string): null => {
+      this.database.runs.setStatus(runId, 'NEEDS_HUMAN', reason);
+      this.step(runId, 0, 'repository', 'unavailable', reason.slice(0, 500));
+      this.say(sessionId, runId, 'system', reason);
+      this.progress(runId, sessionId, 'needs-human', 'Repositório indisponível.', 'NEEDS_HUMAN');
+      return null;
+    };
+    if (!service) {
+      return stop(
+        'Este projeto trabalha direto no GitHub, e a integração com o GitHub não está disponível ' +
+          'nesta instalação.',
+      );
+    }
+    const capabilities = await service.capabilities(workspace.id).catch((error: unknown) => ({
+      canRead: false,
+      problem: error instanceof Error ? error.message : String(error),
+      fullName: null,
+      defaultBranch: null,
+    }));
+    if (!capabilities.canRead) {
+      return stop(
+        `Não consegui ler ${workspace.repository_url ?? 'o repositório deste projeto'}: ` +
+          `${capabilities.problem ?? 'motivo não informado'}`,
+      );
+    }
+    const baseBranch =
+      workspace.branch?.trim() || workspace.default_branch?.trim() || capabilities.defaultBranch;
+    if (!baseBranch) {
+      // Never `main`. A branch this application invented is a branch that may
+      // not exist, and every later comparison would be against nothing.
+      return stop(
+        'O GitHub não informou a branch padrão deste repositório. Escolha a branch de origem nas ' +
+          'configurações do projeto antes de continuar.',
+      );
+    }
+    let baseCommit: string;
+    try {
+      const resolved = await service.api.resolveRef(
+        service.refFor(workspace.id).ref,
+        baseBranch,
+        await service.readToken(),
+      );
+      baseCommit = resolved.commitSha;
+    } catch (error) {
+      return stop(
+        `A branch "${baseBranch}" não pôde ser resolvida no GitHub: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    this.step(
+      runId,
+      0,
+      'repository',
+      'ready',
+      `${capabilities.fullName ?? workspace.repository_url}: ${baseBranch} em ${baseCommit.slice(0, 12)}`,
+      { baseBranch, baseCommit },
+    );
+    return {
+      service,
+      workspaceId: workspace.id,
+      fullName: capabilities.fullName ?? String(workspace.repository_url),
+      baseBranch,
+      baseCommit,
+      workBranch: null,
+      headCommit: baseCommit,
+      commits: [],
+      pullRequestUrl: null,
+    };
+  }
+
+  /** Where a GitHub run reads files from: one commit, named. */
+  private async githubSource(
+    github: GitHubRunContext,
+    signal: AbortSignal,
+  ): Promise<GitHubFileSource> {
+    return {
+      operations: github.service.api,
+      ref: github.service.refFor(github.workspaceId).ref,
+      // The commit the work is actually at, never a branch name that could
+      // move between the read and the claim about it.
+      at: github.headCommit,
+      token: await github.service.readToken(),
+      signal,
+    };
+  }
+
+  private async githubChecks(
+    github: GitHubRunContext,
+    requests: readonly FileCheckRequest[],
+    signal: AbortSignal,
+  ): Promise<FileCheckResult[]> {
+    return runGitHubFileChecks(await this.githubSource(github, signal), requests);
+  }
+
+  /**
+   * Offers the work for review, and never merges it.
+   *
+   * A pull request is the deliverable of a run in this mode: the branch is
+   * already there, the commits are already there, and the person decides what
+   * happens next. Failing to open it does not fail the run - the commits are
+   * published either way, and saying "the PR could not be opened, here is the
+   * branch" is more useful than throwing away a finished piece of work.
+   */
+  private async publishGitHubWork(
+    runId: string,
+    sessionId: string,
+    github: GitHubRunContext,
+    objective: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (github.workBranch === null || github.commits.length === 0) {
+      this.step(runId, 0, 'pull-request', 'skipped', 'Nada foi commitado; nenhum PR foi aberto.');
+      return;
+    }
+    if (github.pullRequestUrl) return;
+    try {
+      const pull = await github.service.openPullRequest(
+        {
+          workspaceId: github.workspaceId,
+          head: github.workBranch,
+          base: github.baseBranch,
+          title: objective.split('\n')[0]!.slice(0, 120) || 'Alteração do Orquestrador',
+          body: [
+            `Objetivo: ${redact(objective).slice(0, 1000)}`,
+            '',
+            `Base: \`${github.baseBranch}\` em ${github.baseCommit.slice(0, 12)}`,
+            `Commits desta execução: ${github.commits.map((sha) => sha.slice(0, 12)).join(', ')}`,
+            '',
+            'Aberto pelo Orquestrador. Nada foi mesclado.',
+          ].join('\n'),
+        },
+        signal,
+      );
+      github.pullRequestUrl = pull.htmlUrl;
+      this.step(runId, 0, 'pull-request', 'opened', `#${pull.number} ${pull.htmlUrl}`);
+      this.say(sessionId, runId, 'system', `Pull request aberto: ${pull.htmlUrl}`);
+    } catch (error) {
+      const problem = describeGitHubProblem(error);
+      this.step(runId, 0, 'pull-request', 'failed', problem.slice(0, 500));
+      this.say(
+        sessionId,
+        runId,
+        'system',
+        `O trabalho está publicado em \`${github.workBranch}\`, mas o pull request não pôde ser ` +
+          `aberto: ${problem}`,
+      );
+    }
+  }
+
+  /** The measurement, taken at GitHub rather than in a folder. */
+  private async collectGitHubEvidence(
+    github: GitHubRunContext,
+    signal: AbortSignal,
+  ): Promise<GitEvidence> {
+    return collectGitHubEvidence({
+      operations: github.service.api,
+      ref: github.service.refFor(github.workspaceId).ref,
+      branch: github.workBranch ?? '(sem branch de trabalho)',
+      baseCommit: github.baseCommit,
+      token: await github.service.readToken(),
+      signal,
+    });
+  }
+
+  /**
+   * Turns a worker's proposal into a commit, or says why it did not.
+   *
+   * The line this keeps: the worker **describes** a change and the application
+   * **performs** it. A proposal that does not parse, names a path outside the
+   * repository, or was written against a different commit is not applied and
+   * is not reported as applied - it comes back as feedback the next round can
+   * act on, which is what makes the loop converge instead of repeating.
+   */
+  private async applyProposal(input: {
+    runId: string;
+    sessionId: string;
+    iteration: number;
+    github: GitHubRunContext;
+    answer: string;
+    objective: string;
+    signal: AbortSignal;
+  }): Promise<{ applied: boolean; feedback: string | null }> {
+    const github = input.github;
+    const result = readChangeProposal(input.answer, github.headCommit);
+    if (result.kind === 'none') return { applied: false, feedback: null };
+    if (result.kind === 'invalid') {
+      this.step(input.runId, input.iteration, 'proposal', 'rejected', result.problem.slice(0, 500));
+      this.say(input.sessionId, input.runId, 'system', `Alteração não aplicada. ${result.problem}`);
+      return { applied: false, feedback: `A ALTERAÇÃO PROPOSTA NÃO FOI APLICADA. ${result.problem}` };
+    }
+
+    // The branch is cut here, on the first change, and not before: a run that
+    // only answered a question must leave no branch behind.
+    if (github.workBranch === null) {
+      try {
+        const session = await github.service.startWork(
+          { workspaceId: github.workspaceId, baseBranch: github.baseBranch, runId: input.runId },
+          input.signal,
+        );
+        github.workBranch = session.workBranch;
+        this.step(input.runId, input.iteration, 'branch', 'created', session.workBranch, {
+          baseBranch: session.baseBranch,
+          baseCommit: session.baseCommit,
+        });
+        this.say(
+          input.sessionId,
+          input.runId,
+          'system',
+          `Criei a branch \`${session.workBranch}\` a partir de \`${session.baseBranch}\`.`,
+        );
+      } catch (error) {
+        const problem = describeGitHubProblem(error);
+        this.step(input.runId, input.iteration, 'branch', 'failed', problem.slice(0, 500));
+        this.say(input.sessionId, input.runId, 'system', problem);
+        return { applied: false, feedback: `NÃO FOI POSSÍVEL CRIAR A BRANCH DE TRABALHO. ${problem}` };
+      }
+    }
+
+    try {
+      const commit = await github.service.apply(
+        {
+          workspaceId: github.workspaceId,
+          branch: github.workBranch,
+          expectedHeadSha: github.headCommit,
+          message: result.proposal.message,
+          changes: result.proposal.changes,
+        },
+        input.signal,
+      );
+      if (!commit.committed) {
+        // The tree came back identical. Not a failure, and not a commit: the
+        // content proposed was already the content in the repository.
+        this.step(input.runId, input.iteration, 'commit', 'no-change', commit.note ?? 'sem alteração');
+        this.say(input.sessionId, input.runId, 'system', commit.note ?? 'Nada mudou; nenhum commit foi criado.');
+        return {
+          applied: false,
+          feedback:
+            'A ALTERAÇÃO PROPOSTA NÃO MUDOU NADA: o conteúdo enviado já era o conteúdo do ' +
+            'repositório, então nenhum commit foi criado. Se a tarefa já está feita, diga isso; ' +
+            'se não, proponha a alteração que falta.',
+        };
+      }
+      github.headCommit = commit.commitSha!;
+      github.commits.push(commit.commitSha!);
+      const summary =
+        `${commit.commitSha!.slice(0, 12)} em \`${commit.branch}\`: ` +
+        `${commit.written.length} escrito(s), ${commit.deleted.length} removido(s)`;
+      this.step(input.runId, input.iteration, 'commit', 'created', summary, {
+        commit: commit.commitSha,
+        written: [...commit.written],
+        deleted: [...commit.deleted],
+      });
+      this.say(input.sessionId, input.runId, 'system', `Commit aplicado: ${summary}.`);
+      return { applied: true, feedback: null };
+    } catch (error) {
+      const problem = describeGitHubProblem(error);
+      this.step(input.runId, input.iteration, 'commit', 'failed', problem.slice(0, 500));
+      this.say(input.sessionId, input.runId, 'system', `Alteração não aplicada. ${problem}`);
+      return { applied: false, feedback: `A ALTERAÇÃO PROPOSTA NÃO FOI APLICADA. ${problem}` };
+    }
+  }
+
+  /**
    * Assembles, records and shows the account of one delegation.
    *
    * Called from two places on purpose: after the evidence is in, which is the
@@ -2594,6 +3049,8 @@ export class OrchestrationService {
     unavailableModels: string[];
     signal: AbortSignal;
     budget: BudgetLedger;
+    /** Set when the project has no checkout and changes go through the API. */
+    github?: GitHubRunContext | null;
   }): Promise<{ record: NonNullable<IterationRecord['worker']>; answer: string }> {
     const { runId, sessionId, workspace, cwd, runners, slot, iteration, task } = input;
     let last: NonNullable<IterationRecord['worker']> | null = null;
@@ -2606,11 +3063,26 @@ export class OrchestrationService {
     // with no list, three times in one run. The criteria existed: they were in
     // the decision, in the ledger and in the gate. They were simply never sent.
     const workerPrompt = buildWorkerPrompt({
-      preamble: toolPolicyPreamble(
-        this.grantsFor(workspace.id),
-        this.refusalsFor(workspace.id),
-        workspace.repository_url,
-      ),
+      preamble: [
+        toolPolicyPreamble(
+          this.grantsFor(workspace.id),
+          this.refusalsFor(workspace.id),
+          workspace.repository_url,
+        ),
+        // Without a checkout the worker cannot write a file, and must not say
+        // that it did. The contract for proposing a change lives beside the
+        // parser that reads it, so the instruction and the code enforcing it
+        // cannot drift apart.
+        input.github
+          ? proposalInstructions({
+              fullName: input.github.fullName,
+              branch: input.github.workBranch ?? input.github.baseBranch,
+              commitSha: input.github.headCommit,
+            })
+          : null,
+      ]
+        .filter((part): part is string => part !== null)
+        .join('\n\n'),
       task,
       criteria: input.decision.acceptanceCriteria,
     });
@@ -3377,6 +3849,19 @@ export function isConversation(workspace: WorkspaceWithAgents): boolean {
 }
 
 /**
+ * A project whose code lives on GitHub and nowhere on this computer.
+ *
+ * Not a third kind of project in the sidebar - the same project, with a
+ * different way of reaching its code. The loop is the same loop: the
+ * orchestrator plans, the worker proposes, the application performs the
+ * change, and evidence is measured rather than believed. What changes is where
+ * the measurement comes from: GitHub instead of a folder.
+ */
+export function isGitHubProject(workspace: WorkspaceWithAgents): boolean {
+  return workspace.environment === 'github' && Boolean(workspace.repository_url);
+}
+
+/**
  * The environment handed to `createRunners` for a conversation run.
  *
  * A factory still needs *something* to build against, and this says plainly
@@ -3837,6 +4322,37 @@ export function toolPolicyPreamble(
   );
   return lines.join('\n');
 }
+
+/**
+ * A GitHub failure, in the words that name which of the four things went wrong.
+ *
+ * Authentication, repository access, write permission and a branch conflict
+ * have four different fixes, and "erro do GitHub" sends a person to the wrong
+ * setting. A conflict in particular is not an error the run should retry
+ * blindly: somebody else's work is there, and it stays.
+ */
+export function describeGitHubProblem(error: unknown): string {
+  if (error instanceof RepositoryConflictError) {
+    return (
+      `${error.message} Outra pessoa (ou outra execução) publicou nessa branch. ` +
+      'Releia o estado atual antes de propor a alteração de novo; nada foi sobrescrito.'
+    );
+  }
+  if (error instanceof UnsupportedChangeError) return error.message;
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Why a command did not run in a project that has no executor.
+ *
+ * Said in one place so the gate, the report and the screen all give the person
+ * the same sentence - and so it names the alternative rather than stopping at
+ * "não deu".
+ */
+const NO_EXECUTOR =
+  'Este projeto trabalha direto no GitHub, e a API do GitHub não executa código: ' +
+  'este comando não foi executado. Para rodar testes ou ferramentas, use um executor ' +
+  'temporário neste computador.';
 
 /** True when a file check already decided this criterion, either way. */
 function settledByFileCheck(checks: readonly FileCheckResult[], criterion: string): boolean {

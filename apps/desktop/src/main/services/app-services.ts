@@ -35,6 +35,7 @@ import { AgentService, workerAgentIdFor } from './agent-service.js';
 import { ChatService } from './chat-service.js';
 import { ProjectService } from './project-service.js';
 import { PermissionService } from './permission-service.js';
+import { GitHubWorkspaceService } from './github-workspace-service.js';
 import { RepositoryAnalysisService } from './repository-analysis-service.js';
 import {
   OrchestrationService,
@@ -55,6 +56,7 @@ import type { GitHubClientOptions } from '../core.js';
 import { CodexAdapter } from '../adapters/codex-adapter.js';
 import { DECISION_JSON_SCHEMA } from '../core.js';
 import { ClaudeCodeAdapter } from '../adapters/claude-adapter.js';
+import { RepositoryOperations } from '../../../../../src/github/repository-operations.js';
 
 export interface AppServicesOptions {
   paths?: AppPaths;
@@ -135,6 +137,8 @@ export class AppServices {
   readonly chat: ChatService;
   readonly projects: ProjectService;
   readonly permissions: PermissionService;
+  /** Reading and editing a repository straight through the GitHub API. */
+  readonly githubWorkspaces: GitHubWorkspaceService;
   readonly github: GitHubService;
   /** Provider connections: the vendors' official CLIs and the person's API keys. */
   readonly connections: ConnectionService;
@@ -207,6 +211,22 @@ export class AppServices {
       options.github ?? {},
     );
     this.workspaces.bindGitHub(this.github);
+    // Reading and editing a repository with no checkout on this computer. The
+    // token stays inside this service; the orchestrator gets the service, not
+    // the credential.
+    this.githubWorkspaces = new GitHubWorkspaceService(
+      this.database,
+      this.github,
+      // A test points the whole GitHub surface at its own fake; the same
+      // endpoints and transport that serve the client serve this.
+      options.github?.fetchImpl || options.github?.endpoints
+        ? new RepositoryOperations({
+            ...(options.github.fetchImpl ? { fetchImpl: options.github.fetchImpl } : {}),
+            ...(options.github.endpoints ? { endpoints: options.github.endpoints } : {}),
+          })
+        : undefined,
+    );
+    this.orchestration.bindGitHub(this.githubWorkspaces);
     // Reads a public repository over the documented API. Uses the GitHub
     // connection's token when there is one, and works without it when there
     // is not - a public repository must never be made to ask for a login.
