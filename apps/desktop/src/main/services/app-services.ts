@@ -588,7 +588,7 @@ export class AppServices {
     let capabilities:import('../../../../../src/routing/provider-policy.js').WorkerRuntimeCapabilities;
     try {capabilities=await adapter.describeCapabilities();} catch {return decorate(knownAgentModels(account.provider_id as 'openai'|'anthropic'));}
     const cached=adapter instanceof CodexAdapter?adapter.cachedModels():[];
-    return decorate(capabilities.declaredModels?.length?capabilities.declaredModels.map(id=>({id,displayName:cached.find(m=>m.id===id)?.displayName,provider:account.provider_id as 'openai'|'anthropic',source:'runtime' as const,reasoning:[...(cached.find(m=>m.id===id)?.reasoning??capabilities.declaredEfforts??[])],accountAllowed:null})):knownAgentModels(account.provider_id as 'openai'|'anthropic'));
+    return decorate(capabilities.declaredModels?.length?capabilities.declaredModels.map(id=>({id,displayName:cached.find(m=>m.id===id)?.displayName,provider:account.provider_id as 'openai'|'anthropic',source:'runtime' as const,reasoning:[...(cached.find(m=>m.id===id)?.reasoning??capabilities.declaredEfforts??[])],accountAllowed:null})):knownAgentModels(account.provider_id as 'openai'|'anthropic',capabilities));
   }
 
   /** All renderer saves re-read the selected account's catalog; no trust in submitted labels/capabilities. */

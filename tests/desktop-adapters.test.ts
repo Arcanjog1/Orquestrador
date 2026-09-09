@@ -650,6 +650,7 @@ test('Claude Code takes the model and effort of each invocation, and only values
     modelFlag: true,
     effortFlag: true,
     declaredModels: null, // Help aliases are examples; full canonical IDs are accepted too.
+    modelEfforts: {'claude-fable-5-1':['low','medium','high','xhigh','max'],'claude-opus-5':['low','medium','high','xhigh','max'],'claude-sonnet-5':['low','medium','high','xhigh','max'],'claude-haiku-4-5-20251001':[]},
     declaredEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   });
   // The help was read in the account's environment.

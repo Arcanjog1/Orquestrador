@@ -26,6 +26,6 @@ export function decorateAgentModels(rows:ModelCatalogEntry[],account:CatalogAcco
  });
 }
 /** A labelled fallback, only when the runtime cannot enumerate. Never advertised as confirmed access. */
-export function knownAgentModels(provider:'openai'|'anthropic'):ModelCatalogEntry[] {
- return OFFICIAL_MODELS[provider].map(model=>({id:model.id,provider,source:'catalog',displayName:model.name,reasoning:[],accountAllowed:null}));
+export function knownAgentModels(provider:'openai'|'anthropic',capabilities?:{effortFlag:boolean;modelEfforts?:Readonly<Record<string,readonly string[]>>}):ModelCatalogEntry[] {
+ return OFFICIAL_MODELS[provider].map(model=>({id:model.id,provider,source:'catalog',displayName:model.name,reasoning:capabilities?.effortFlag?[...(capabilities.modelEfforts?.[model.id]??[])]:[],accountAllowed:null}));
 }

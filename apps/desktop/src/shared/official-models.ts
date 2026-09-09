@@ -18,3 +18,13 @@ export const OFFICIAL_MODELS = {
   {id:'claude-haiku-4-5-20251001',name:'Claude Haiku 4.5'},
  ],
 } as const;
+
+/** Claude Code model-specific effort support: https://code.claude.com/docs/en/model-config
+ * Intersected with the installed CLI's declared flag values, never used to infer account access.
+ */
+export const CLAUDE_MODEL_EFFORTS:Readonly<Record<string,readonly string[]>> = {
+ 'claude-fable-5-1':['low','medium','high','xhigh','max'],
+ 'claude-opus-5':['low','medium','high','xhigh','max'],
+ 'claude-sonnet-5':['low','medium','high','xhigh','max'],
+ 'claude-haiku-4-5-20251001':[],
+};

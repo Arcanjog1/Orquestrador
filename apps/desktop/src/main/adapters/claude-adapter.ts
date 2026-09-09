@@ -1,3 +1,4 @@
+import {CLAUDE_MODEL_EFFORTS} from '../../shared/official-models.js';
 /**
  * Claude Code as the coding worker.
  *
@@ -277,6 +278,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
       effortFlag: capabilities.flags.has('--effort'),
       declaredModels: null, // --help gives examples/aliases, not an exhaustive account catalog.
       declaredEfforts: optionValues(capabilities.help, '--effort'),
+      modelEfforts: Object.fromEntries(Object.entries(CLAUDE_MODEL_EFFORTS).map(([id,levels])=>[id,levels.filter(level=>(optionValues(capabilities.help,'--effort')??[]).includes(level))])),
     };
   }
 

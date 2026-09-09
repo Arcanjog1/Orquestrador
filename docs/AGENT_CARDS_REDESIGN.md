@@ -33,3 +33,5 @@ Catálogo de referência oficial em `official-models.ts`, verificado em 09/09/20
 O `--help` do Claude lista exemplos de aliases, não todos os modelos aceitos. A capacidade deixou de tratar exemplos como allowlist exaustiva; `--model` aceita os IDs canônicos conforme https://code.claude.com/docs/en/model-config. Autorização e limites continuam sendo verificados.
 
 O runner do pacote exige relatórios persistidos e completos das duas execuções; timeout, encerramento antecipado ou ausência do novo teste são falhas. A recarga do teste usa webContents.reload no processo principal, respeitando a proteção de navegação.
+
+Os IDs canônicos do Claude cruzam níveis documentados por modelo com o --effort aceito pelo CLI instalado. Haiku 4.5 não oferece effort; sem verificação do runtime, o catálogo continua oferecendo apenas Automático.

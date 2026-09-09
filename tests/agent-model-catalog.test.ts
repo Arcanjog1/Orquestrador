@@ -47,3 +47,10 @@ test('legacy family blocks still cover canonical model choices in catalog and ex
  const blocked=decorateAgentModels(knownAgentModels('anthropic'),account,{...config,defaults:{blockedModels:['fable']}});
  assert.match(blocked.find(m=>m.id==='claude-fable-5-1')!.blockedReason!,/global/);
 });
+
+test('canonical Claude choices expose only model efforts confirmed by the installed CLI',()=>{
+ const catalog=knownAgentModels('anthropic',{effortFlag:true,modelEfforts:{'claude-sonnet-5':['low','medium','high'],'claude-haiku-4-5-20251001':[]}});
+ assert.deepEqual(catalog.find(m=>m.id==='claude-sonnet-5')!.reasoning,['low','medium','high']);
+ assert.deepEqual(catalog.find(m=>m.id==='claude-haiku-4-5-20251001')!.reasoning,[]);
+ assert.deepEqual(knownAgentModels('anthropic',{effortFlag:false,modelEfforts:{'claude-sonnet-5':['high']}}).find(m=>m.id==='claude-sonnet-5')!.reasoning,[]);
+});
