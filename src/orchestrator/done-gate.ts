@@ -10,6 +10,7 @@
 import type { Baseline, DoneGateResult, GitEvidence, IterationRecord } from '../core/types.js';
 import { AcceptanceCriteriaLedger } from './acceptance-criteria.js';
 import { commandPassed, Verifier } from './verifier.js';
+import type { ObjectiveIntent } from './objective-intent.js';
 import {
   describeFileCheck,
   runFileChecks,
@@ -18,6 +19,10 @@ import {
 } from '../verification/file-check.js';
 
 export interface DoneGateInput {
+  /** The desktop derives this once from the user's objective, never from a model. */
+  objectiveIntent?: ObjectiveIntent;
+  /** Independent read-proof evaluation. An omitted evaluation is not a PASS. */
+  objectiveProofProblems?: readonly string[];
   ledger: AcceptanceCriteriaLedger;
   /** Every verification command seen across the run, deduplicated. */
   verificationCommands: readonly string[];
@@ -56,10 +61,14 @@ export interface DoneGateInput {
 
 export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult> {
   const failures: string[] = [];
+  if(input.objectiveIntent?.readProofs.length) {
+    failures.push(...(input.objectiveProofProblems ?? ['Read obligations were not independently checked.']));
+  }
 
   // 1. Re-run every verification command from scratch. Nothing is taken on
   //    trust from an earlier iteration.
   const verification = await input.verifier.runAll(input.verificationCommands);
+  if(input.objectiveIntent?.requiresExecution && verification.length===0)failures.push('Execution was requested, but no command was independently executed.');
   for (const result of verification) {
     if (commandPassed(result)) continue;
     if (result.refused) {
@@ -107,14 +116,13 @@ export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult
   //    demanding a pointless rewrite to manufacture one.
   const provenByReading = fileChecks.length > 0 && fileChecks.every((check) => check.passed);
   if (
-    !input.allowNoChanges &&
+    (input.objectiveIntent ? input.objectiveIntent.requiresChanges : !input.allowNoChanges) &&
     !provenByReading &&
-    input.evidence.isGitRepository &&
+    (input.evidence.isGitRepository || input.objectiveIntent?.requiresChanges) &&
     !input.evidence.changedSinceBaseline
   ) {
     failures.push(
-      'No file changed relative to the baseline. If the objective genuinely requires no code ' +
-        'changes, re-run with --allow-no-changes.',
+      'No file changed relative to the baseline. A change objective needs a measured change or a matching independent file check.',
     );
   }
 
@@ -167,8 +175,9 @@ export function formatDoneRejection(result: DoneGateResult): string {
     '',
     ...result.failures.map((f, i) => `${i + 1}. ${f}`),
     '',
-    'Do not answer `done` again until these are addressed. Delegate the work needed to fix them,',
-    'or answer `blocked` with a reason if they cannot be fixed.',
+    'Do not answer `done` again without new evidence. Check the objective-specific proof requirements.',
+    'A query needs reading evidence, never manufactured edits. Delegate changes only when requested.',
+    'If the application cannot supply the required proof, report the concrete blocker; a stronger model does not fix infrastructure.',
   ].join('\n');
 }
 

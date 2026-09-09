@@ -58,7 +58,7 @@ export const DECISION_JSON_SCHEMA = {
     } },
     queryProof: {
       type: ['object', 'null'], additionalProperties: false, required: ['criteria', 'citations'],
-      description: 'Read-only query proof. Exact quotes from delivered files and criteria reviewed by supervisor. Summary must cite paths. Never proves code changes or tests.',
+      description: 'Read obligations: exact quotes from delivered files for content questions. Access, metadata, tree and commit queries may use empty citations when backed by MEASURED QUERY EVIDENCE. Never proves code changes or execution. Mixed requests retain all proof requirements.',
       properties: {
         criteria: { type: 'array', items: { type: 'string' } },
         citations: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['path', 'quote'], properties: { path: { type: 'string' }, quote: { type: 'string' } } } },

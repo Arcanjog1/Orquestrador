@@ -54,7 +54,9 @@ export function classifyObjective(objective: string): ObjectiveIntent {
   if(has(/\b(pr|pull request)\b/))proofs.add('PR');
   if(has(/\b(existe|existir|exists|exist|existencia)\b/))proofs.add('FILE_EXISTENCE');
   if(has(/\b(arquivos|files|arvore|tree|diretorios|directories)\b/)||has(/\bo que (?:tem|ha)\b/))proofs.add('REPOSITORY_TREE');
-  if(has(/\b(leia|ler|read|explique|explicar|explain|analise|analisar|review|audit|logica|logic|codigo|code|conteudo|contents)\b/))proofs.add('FILE_CONTENT');
+  const listingCapability=has(/\b(?:consegue|pode|can)\b.*\b(?:ler|read)\b.*\b(?:arquivos|files)\b/)
+    && !has(/\b(?:conteudo|contents|logica|logic|codigo|code|readme)\b|\.[a-z]{1,5}\b/);
+  if(!listingCapability&&has(/\b(leia|ler|read|explique|explicar|explain|analise|analisar|review|audit|logica|logic|codigo|code|conteudo|contents)\b/))proofs.add('FILE_CONTENT');
   if(!proofs.size&&has(/\b(repo|repositorio|repository|github|projeto|project)\b/) && !operations.has('execute'))proofs.add('REPOSITORY_ACCESS');
   if(!proofs.size&&has(/\b(abra|abrir|open|ver|veja)\b/)&&!browserRequested)proofs.add('FILE_EXISTENCE');
   const interrogative=objective.trim().endsWith('?')||tokens.some(t=>questions.has(t));
