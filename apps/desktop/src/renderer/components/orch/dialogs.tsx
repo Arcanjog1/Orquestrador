@@ -34,6 +34,7 @@ import type {
   GitHubBranchView,
   GitHubRepositoryView,
   ProjectView,
+  RepositoryCapabilitiesView,
   WorkspaceView,
 } from "@shared/ipc-contract";
 import { api, messageOf } from "@/lib/api";
@@ -601,10 +602,17 @@ export function AddProjectDialog({
   const [repoQuery, setRepoQuery] = useState("");
   // What connecting a repository actually reported back, shown before the
   // dialog closes so the person sees the real branch rather than a promise.
-  const [connected, setConnected] = useState<{
-    project: ProjectView;
-    created: boolean;
-    metadataError: string | null;
+  /**
+   * What the project can actually do, measured before it is offered.
+   *
+   * Three separate answers, because they are three separate things: reading
+   * and editing happen through the API with no folder anywhere, and running
+   * code does not happen there at all. Shown before the dialog closes so
+   * nobody finds out mid-run.
+   */
+  const [capabilities, setCapabilities] = useState<{
+    workspaceId: string;
+    view: RepositoryCapabilitiesView;
   } | null>(null);
 
   // The person's repositories, read once per opening, private ones included.
@@ -628,7 +636,9 @@ export function AddProjectDialog({
   // The chosen repository's branches, read from GitHub - a cloud project has
   // no working copy on this computer to read them from.
   useEffect(() => {
-    if (mode !== "cloud" || !cloudRepo) {
+    // Both repository-backed modes need the branch list, and both must get it
+    // from GitHub: neither has a working copy on this computer to read it from.
+    if ((mode !== "cloud" && mode !== "repository") || !cloudRepo) {
       setBranches(null);
       setBranchesError(null);
       return;
@@ -658,7 +668,7 @@ export function AddProjectDialog({
       setBranch("");
       setUrl("");
       setName("");
-      setConnected(null);
+      setCapabilities(null);
       setError(null);
     }
   }, [open]);
@@ -681,24 +691,6 @@ export function AddProjectDialog({
     onAdded(opened.workspaceId);
   };
 
-  /** Connects a repository. Reads its metadata; never clones it. */
-  const connectRepository = async (repositoryUrl: string, suggestedName?: string) => {
-    if (!repositoryUrl.trim()) return;
-    setBusy("repository");
-    setError(null);
-    try {
-      const result = await api.project.connectRepository({
-        url: repositoryUrl.trim(),
-        ...(suggestedName?.trim() ? { name: suggestedName.trim() } : {}),
-      });
-      setConnected(result);
-    } catch (e) {
-      fail(e);
-    } finally {
-      setBusy(null);
-    }
-  };
-
   /** A project with nothing attached yet. The repository or folder comes later. */
   const createEmpty = async () => {
     if (!name.trim()) return;
@@ -707,6 +699,38 @@ export function AddProjectDialog({
     try {
       const project = await api.project.create({ name: name.trim() });
       await finish(project.id);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Creates the project that works straight on GitHub, and measures it.
+   *
+   * No folder is chosen, nothing is cloned, and the capabilities come back
+   * from GitHub rather than from a promise: what this project can read, what
+   * it can change, and - separately - where code would run if a task needed
+   * code run.
+   */
+  const createGitHub = async () => {
+    const repository = cloudRepo?.fullName ?? fullNameOf(url);
+    if (!repository) {
+      setError('Escolha um repositório da lista, ou informe um endereço como "dono/nome".');
+      return;
+    }
+    setBusy("repository");
+    setError(null);
+    try {
+      const created = await api.workspace.createGitHub({
+        repository,
+        ...(branch.trim() ? { branch: branch.trim() } : {}),
+        ...(cloudRepo?.name ? { name: cloudRepo.name } : {}),
+        ...(cloudRepo ? { repositoryPrivate: cloudRepo.private } : {}),
+      });
+      const view = await api.workspace.githubCapabilities({ workspaceId: created.id });
+      setCapabilities({ workspaceId: created.id, view });
     } catch (e) {
       fail(e);
     } finally {
@@ -793,7 +817,7 @@ export function AddProjectDialog({
                 key={choice}
                 onClick={() => {
                   setMode(choice);
-                  setConnected(null);
+                  setCapabilities(null);
                   setError(null);
                 }}
                 disabled={busy !== null}
@@ -811,79 +835,129 @@ export function AddProjectDialog({
             ))}
           </div>
 
-          {/* ---- Repository: connect, do not clone ---- */}
-          {mode === "repository" && !connected && (
+          {/* ---- Repository: work on it where it is ---- */}
+          {mode === "repository" && !capabilities && (
             <div className="space-y-3" data-testid="repository-project">
               <label className="block space-y-1.5">
-                <span className="text-xs text-muted-foreground">Endereço do repositório</span>
+                <span className="text-xs text-muted-foreground">
+                  Repositório {githubConnected ? "(ou escolha na lista abaixo)" : ""}
+                </span>
                 <Input
                   value={url}
                   autoFocus
-                  onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://github.com/dono/nome"
+                  onChange={(e) => {
+                    setUrl(e.target.value);
+                    setCloudRepo(null);
+                  }}
+                  placeholder="dono/nome ou https://github.com/dono/nome"
                   data-testid="repository-url"
                 />
               </label>
+              {cloudRepo && (
+                <div data-testid="repository-branch">
+                  <SectionLabel>Branch de origem</SectionLabel>
+                  {branchesError && <p className="mt-2 text-xs text-danger">{branchesError}</p>}
+                  {branches === null && !branchesError && (
+                    <p className="mt-2 text-xs text-muted-foreground">Lendo as branches…</p>
+                  )}
+                  {branches !== null && (
+                    <div className="mt-2 max-h-28 space-y-0.5 overflow-y-auto">
+                      {branches.map((b) => (
+                        <button
+                          key={b.name}
+                          onClick={() => setBranch(b.name)}
+                          className={cn(
+                            "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
+                            branch === b.name && "bg-accent",
+                          )}
+                          data-testid={`base-branch-${b.name}`}
+                        >
+                          <span className="truncate font-mono">{b.name}</span>
+                          {b.isDefault && (
+                            <span className="ml-auto shrink-0 rounded bg-muted px-1 text-[10px] uppercase text-muted-foreground">
+                              padrão
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               <Button
                 className="w-full"
-                disabled={busy !== null || url.trim().length === 0}
-                onClick={() => void connectRepository(url)}
+                disabled={busy !== null || (!cloudRepo && url.trim().length === 0)}
+                onClick={() => void createGitHub()}
                 data-testid="repository-connect"
               >
                 {busy === "repository" ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
-                  "Conectar repositório"
+                  "Usar este repositório"
                 )}
               </Button>
               <p className="text-[11px] text-muted-foreground">
-                O repositório <strong>não</strong> é clonado. O aplicativo lê os arquivos pela API
-                do GitHub — sem login para um repositório público — e usa a sua conexão do GitHub
-                para os privados. Para alterar código, associe uma pasta depois.
+                Nada é clonado e nenhuma pasta é criada. O aplicativo lê e altera o repositório
+                pela API oficial do GitHub — branch de trabalho, commit e PR. Rodar testes ou
+                ferramentas é outra coisa, e o projeto vai dizer onde isso aconteceria.
               </p>
             </div>
           )}
 
-          {/* What GitHub actually said, before anything is claimed about it. */}
-          {mode === "repository" && connected && (
-            <div className="space-y-3 rounded-lg border border-border p-3" data-testid="repository-connected">
+          {/* What GitHub actually answered, before anything is claimed. */}
+          {mode === "repository" && capabilities && (
+            <div
+              className="space-y-3 rounded-lg border border-border p-3"
+              data-testid="repository-capabilities"
+            >
               <div className="text-xs">
-                {connected.created
-                  ? `Projeto "${connected.project.name}" criado.`
-                  : `Este repositório já era o projeto "${connected.project.name}". Abri esse.`}
+                Projeto pronto: <strong>{capabilities.view.fullName ?? "não informado"}</strong>
               </div>
               <dl className="space-y-1 text-[11px]">
                 <div className="flex gap-2">
-                  <dt className="w-28 shrink-0 text-muted-foreground">Repositório</dt>
-                  <dd className="font-mono">{connected.project.repositoryFullName ?? "não informado"}</dd>
-                </div>
-                <div className="flex gap-2">
-                  <dt className="w-28 shrink-0 text-muted-foreground">Branch padrão</dt>
+                  <dt className="w-32 shrink-0 text-muted-foreground">Branch padrão</dt>
                   <dd className="font-mono" data-testid="connected-default-branch">
-                    {connected.project.defaultBranch ?? "não informado"}
+                    {capabilities.view.defaultBranch ?? "não informado"}
                   </dd>
                 </div>
                 <div className="flex gap-2">
-                  <dt className="w-28 shrink-0 text-muted-foreground">Visibilidade</dt>
-                  <dd>
-                    {connected.project.repositoryPrivate === null
-                      ? "não informado"
-                      : connected.project.repositoryPrivate
-                        ? "privado"
-                        : "público"}
+                  <dt className="w-32 shrink-0 text-muted-foreground">Consultar</dt>
+                  <dd data-testid="capability-read">
+                    {capabilities.view.canRead ? "sim, pela API do GitHub" : "não"}
+                  </dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="w-32 shrink-0 text-muted-foreground">Editar, branch e PR</dt>
+                  <dd data-testid="capability-write">
+                    {capabilities.view.canWrite === null
+                      ? "não informado — conecte o GitHub para alterar código"
+                      : capabilities.view.canWrite
+                        ? "sim, em uma branch de trabalho"
+                        : "não: esta conta não tem permissão de escrita"}
+                  </dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="w-32 shrink-0 text-muted-foreground">Executar código</dt>
+                  {/* Never "the API", and never "nuvem" for something that
+                      would run on this computer. */}
+                  <dd data-testid="capability-execute">
+                    {capabilities.view.execution === "local-temporary"
+                      ? "em um espaço temporário neste computador, só quando a tarefa exigir"
+                      : "indisponível: a API do GitHub não executa código"}
                   </dd>
                 </div>
               </dl>
-              {connected.metadataError && (
-                <p className="text-[11px] text-attention" data-testid="metadata-error">
-                  O projeto foi criado, mas não consegui ler os dados do GitHub:{" "}
-                  {connected.metadataError} A branch padrão fica como “não informado” até uma
-                  próxima leitura — o aplicativo não vai supor que ela se chama <code>main</code>.
+              {capabilities.view.problem && (
+                <p className="text-[11px] text-attention" data-testid="capability-problem">
+                  {capabilities.view.problem}
                 </p>
               )}
               <Button
                 className="w-full"
-                onClick={() => void finish(connected.project.id)}
+                onClick={() => {
+                  onOpenChange(false);
+                  onAdded(capabilities.workspaceId);
+                }}
                 data-testid="repository-open"
               >
                 Abrir projeto
@@ -969,8 +1043,13 @@ export function AddProjectDialog({
                   <button
                     key={repo.fullName}
                     onClick={() => {
-                      if (mode === "cloud") {
+                      // Both repository-backed modes pick a repository the
+                      // same way; only what happens next differs.
+                      if (mode === "cloud" || mode === "repository") {
                         setCloudRepo(repo);
+                        setUrl(repo.cloneUrl);
+                        setName(repo.name);
+                        setCapabilities(null);
                         return;
                       }
                       setUrl(repo.cloneUrl);
@@ -978,8 +1057,9 @@ export function AddProjectDialog({
                     }}
                     className={cn(
                       "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent",
-                      (mode === "cloud" ? cloudRepo?.fullName === repo.fullName : url === repo.cloneUrl) &&
-                        "bg-accent",
+                      (mode === "cloud" || mode === "repository"
+                        ? cloudRepo?.fullName === repo.fullName
+                        : url === repo.cloneUrl) && "bg-accent",
                     )}
                     data-testid={`repo-${repo.fullName}`}
                   >
@@ -1046,18 +1126,6 @@ export function AddProjectDialog({
             </div>
           )}
 
-          {mode === "repository" && !connected && githubConnected && url.trim() && (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="w-full"
-              disabled={busy !== null}
-              onClick={() => void connectRepository(url, name)}
-            >
-              Conectar o repositório selecionado
-            </Button>
-          )}
-
           {mode === "folder" && (
             <div className="border-t border-border pt-4">
               <SectionLabel>{githubConnected ? "Ou informe a URL" : "Ou clonar do GitHub"}</SectionLabel>
@@ -1094,6 +1162,25 @@ export function AddProjectDialog({
 }
 
 /** The four ways a project starts, in the order they are offered. */
+/**
+ * `dono/nome` from whatever the person pasted, or null.
+ *
+ * Accepts the shapes people actually paste - a full URL, an SSH remote, a
+ * `.git` suffix, a `/tree/branch` tail - and returns null rather than guessing
+ * for anything else. A wrong repository is worse than a refused one.
+ */
+export function fullNameOf(input: string): string | null {
+  const text = input.trim().replace(/\.git$/, "").replace(/\/+$/, "");
+  if (text.length === 0) return null;
+  const bare = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/.exec(text);
+  if (bare) return `${bare[1]}/${bare[2]}`;
+  const ssh = /^git@github\.com:([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/.exec(text);
+  if (ssh) return `${ssh[1]}/${ssh[2]}`;
+  const https = /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)(?:\/.*)?$/.exec(text);
+  if (https) return `${https[1]}/${https[2]}`;
+  return null;
+}
+
 const MODES = ["repository", "folder", "empty", "cloud"] as const;
 type Mode = (typeof MODES)[number];
 type Busy = "folder" | "clone" | "cloud" | "empty" | "repository" | null;
@@ -1107,7 +1194,7 @@ const MODE_LABEL: Record<Mode, string> = {
 
 const MODE_BLURB: Record<Mode, string> = {
   repository:
-    "O código fica no GitHub. O aplicativo lê os arquivos pela API oficial, sem clonar nada e sem login para repositórios públicos.",
+    "O código fica no GitHub e o aplicativo trabalha nele por lá: lê, altera, cria branch, commit e PR pela API oficial. Nada é clonado e nenhuma pasta é criada.",
   folder:
     "O Orquestrador trabalha dentro de uma pasta do seu computador. É o modo que altera arquivos de verdade.",
   empty:

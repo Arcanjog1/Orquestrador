@@ -134,10 +134,15 @@ export function TopContextBar({
   // A conversation project has no working copy anywhere, so the git chip and
   // its actions would be offering something that cannot happen.
   const isConversation = workspace?.environment === "conversation";
+  // A GitHub project has no working copy on this computer either - but it does
+  // have a repository, and the application reads and changes it through the
+  // API. The local git actions do not apply; the project is far from inert.
+  const isGitHub = workspace?.environment === "github";
   const branch = workspace?.branch ?? workspace?.defaultBranch ?? "—";
   // A cloud project's repository is the one it was created for, named as
   // GitHub names it; a local project's is inferred from its remote.
-  const repository = isCloud ? workspace?.repository ?? null : repoOf(workspace?.repositoryUrl ?? null);
+  const repository =
+    isCloud || isGitHub ? (workspace?.repository ?? null) : repoOf(workspace?.repositoryUrl ?? null);
   const filtered = workspaces.filter((w) =>
     w.name.toLowerCase().includes(query.toLowerCase()),
   );
@@ -152,27 +157,33 @@ export function TopContextBar({
         // whether sending this task can change a file on this computer, and
         // whether closing the application ends it.
         title={
-          isCloud
-            ? "Nuvem: a execução acontece no coordenador conectado e continua com o aplicativo fechado. Nenhum arquivo deste computador é alterado."
-            : isConversation
-              ? "Conversa: os agentes analisam, planejam e revisam. Nenhum arquivo é alterado, em lugar nenhum. Associe uma pasta para alterar código."
-              : `Local: o Codex e o Claude Code rodam neste computador e alteram arquivos em ${workspace?.localPath || "esta pasta"}. Fechar o aplicativo encerra a execução.`
+          isGitHub
+            ? `GitHub: o aplicativo lê e altera ${workspace?.repository ?? "o repositório"} pela API oficial — branch de trabalho, commit e PR. ` +
+              "Nenhuma pasta é criada neste computador, e nada é mesclado. Rodar testes ou ferramentas exige um executor, " +
+              "e a tarefa vai dizer quando precisar de um."
+            : isCloud
+              ? "Nuvem: a execução acontece no coordenador conectado e continua com o aplicativo fechado. Nenhum arquivo deste computador é alterado."
+              : isConversation
+                ? "Conversa: os agentes analisam, planejam e revisam. Nenhum arquivo é alterado, em lugar nenhum. Associe uma pasta para alterar código."
+                : `Local: o Codex e o Claude Code rodam neste computador e alteram arquivos em ${workspace?.localPath || "esta pasta"}. Fechar o aplicativo encerra a execução.`
         }
       >
-        {isCloud ? (
+        {isGitHub ? (
+          <ProviderIcon provider="github" className="size-3" />
+        ) : isCloud ? (
           <Cloud className="size-3" />
         ) : isConversation ? (
           <MessageSquare className="size-3" />
         ) : (
           <HardDrive className="size-3" />
         )}
-        {isCloud ? "Nuvem" : isConversation ? "Conversa" : "Local"}
+        {isGitHub ? "GitHub" : isCloud ? "Nuvem" : isConversation ? "Conversa" : "Local"}
       </Chip>
       {/* GitHub chip: who is signed in, this project's remote, and the git
           actions. Absent for a conversation project: there is no working copy
           to commit, push or open a pull request from, and offering the buttons
           would promise something the project cannot do. */}
-      {!isConversation && (
+      {!isConversation && !isGitHub && (
       <Popover onOpenChange={(open) => open && onRefreshPullRequest()}>
         <PopoverTrigger asChild>
           <button data-testid="github-chip">

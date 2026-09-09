@@ -1487,6 +1487,54 @@ test('a conversation project is created with no folder, and offers no git action
   assert.equal(gitChip, true, 'a conversation project must not offer git actions');
 });
 
+test('a GitHub project is created from the interface, with no folder and no clone', async () => {
+  // The whole point of this mode, exercised through the real bridge: pick a
+  // repository, get a project, and never be asked for a folder. Nothing here
+  // reaches github.com - creating the project writes a row; reading the
+  // repository is a separate call this case deliberately does not make.
+  const window = await openWindow();
+  await window.webContents.executeJavaScript(`(() => { location.hash = '#/'; return true; })()`);
+  await reloadWindow(window);
+  await waitForText(window, /Pular onboarding/, 15_000);
+  await click(window, 'skip-onboarding');
+  await waitForText(window, /Adicionar projeto|projeto/, 15_000);
+
+  await click(window, 'add-workspace');
+  await waitForText(window, /Adicionar projeto/, 10_000);
+  await click(window, 'environment-repository');
+  // The copy says what this mode is now: it works on the repository where it
+  // is, and it does not ask for a folder.
+  const blurb = await window.webContents.executeJavaScript('document.body.innerText');
+  assert.match(blurb, /Nada é clonado e nenhuma pasta é criada/);
+
+  await type(window, 'repository-url', 'arcanjog1/repositorio-de-teste');
+  await click(window, 'repository-connect');
+  // Reading the repository needs the network, which this case has no business
+  // using; what it checks is that the project exists with no folder attached.
+  const project = await waitFor(
+    async () => {
+      const list = await window.webContents.executeJavaScript('window.api.project.list()');
+      return list.find((p) => p.repositoryFullName === 'arcanjog1/repositorio-de-teste') ?? null;
+    },
+    20_000,
+    'the GitHub project to appear',
+  );
+  assert.equal(project.localPath, '', 'no folder on this computer');
+
+  const workspaces = await window.webContents.executeJavaScript('window.api.workspace.list()');
+  const created = workspaces.find((w) => w.id === project.workspaceId);
+  assert.ok(created, 'the workspace its runs execute in exists');
+  assert.equal(created.environment, 'github');
+  assert.equal(created.localPath, '');
+  assert.equal(created.repository, 'arcanjog1/repositorio-de-teste');
+
+  // Choosing the same repository again is the same project, not a second one.
+  const again = await window.webContents.executeJavaScript(
+    `window.api.workspace.createGitHub(${JSON.stringify({ repository: 'arcanjog1/repositorio-de-teste' })})`,
+  );
+  assert.equal(again.id, created.id);
+});
+
 test('the project menu really works: archive, restore and remove, in the packaged interface', async () => {
   const window = await openWindow();
   const dir = mkdtempSync(join(tmpdir(), 'lao-electron-projmenu-'));

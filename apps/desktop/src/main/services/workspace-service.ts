@@ -202,10 +202,12 @@ export class WorkspaceService {
     return Promise.all(
       records.map(async (record) => ({
         ...this.toView(record),
-        // A cloud project's branch is the one it was created for; there is no
-        // working copy on this computer to read it from.
+        // A cloud or GitHub project's branch is the one it was created for:
+        // there is no working copy on this computer to read it from, and
+        // running `git` in a folder that does not exist would answer about
+        // nothing.
         branch:
-          record.environment === 'cloud'
+          record.environment === 'cloud' || record.environment === 'github'
             ? record.branch
             : record.environment === 'conversation'
               ? null
@@ -1265,12 +1267,17 @@ export class WorkspaceService {
     return {
       id: record.id,
       name: record.display_name,
+      // Every kind this application knows, named. Anything else falls back to
+      // `local`, which is the only one that could touch a file on this
+      // computer - the safe way round for a value nobody recognises.
       environment:
         record.environment === 'cloud'
           ? 'cloud'
           : record.environment === 'conversation'
             ? 'conversation'
-            : 'local',
+            : record.environment === 'github'
+              ? 'github'
+              : 'local',
       localPath: record.local_path,
       repository: record.repository_full_name,
       repositoryPrivate: record.repository_private === 1,

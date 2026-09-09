@@ -470,7 +470,7 @@ export interface WorkspaceView {
    * repository and no server, which is what lets a person start by writing an
    * objective instead of by choosing a directory.
    */
-  readonly environment: 'local' | 'cloud' | 'conversation';
+  readonly environment: 'local' | 'cloud' | 'conversation' | 'github';
   /** Empty for a cloud or conversation project. Read `environment` first. */
   readonly localPath: string;
   /** `owner/name` for a cloud project; null for a local one. */
@@ -543,7 +543,7 @@ export interface ProjectView {
    * that assumes a folder: a `conversation` project has none anywhere, and a
    * `cloud` one has none on this computer.
    */
-  readonly environment: 'local' | 'cloud' | 'conversation' | null;
+  readonly environment: 'local' | 'cloud' | 'conversation' | 'github' | null;
   /** `owner/name`, in the casing the person supplied. Null when not a repository. */
   readonly repositoryFullName: string | null;
   readonly repositoryUrl: string | null;
