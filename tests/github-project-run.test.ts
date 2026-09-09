@@ -164,6 +164,50 @@ test('selecionar o repositório cria UM projeto, sem pasta e sem clone', async (
   }
 });
 
+test('o aplicativo cria um repositório descartável pela conexão já autorizada', async () => {
+  const prepared = await prepare({ orchestratorScript: [done()], workerScript: ['ok'] });
+  try {
+    const created = value<{ fullName: string; defaultBranch: string | null; isPrivate: boolean }>(
+      await prepared.fixture.router.handle('github.createRepository', {
+        name: 'descartavel',
+        private: true,
+      }),
+    );
+    assert.equal(created.fullName, `${OWNER}/descartavel`);
+    assert.equal(created.isPrivate, true, 'privado por padrão, nunca público por descuido');
+    // Criado com um primeiro commit, senão não haveria branch padrão nem
+    // árvore de onde tirar a branch de trabalho.
+    assert.ok(created.defaultBranch, 'tem branch padrão');
+  } finally {
+    await prepared.cleanup();
+  }
+});
+
+test('uma conexão que não pode criar repositórios diz o motivo e o caminho oficial', async () => {
+  // A recusa mais importante desta tela: um GitHub App não cria repositório em
+  // conta pessoal, e isso é o tipo da conexão, não uma configuração esquecida.
+  // A resposta precisa dizer isso e apontar o caminho — nunca pedir um token.
+  const prepared = await prepare({ orchestratorScript: [done()], workerScript: ['ok'] });
+  prepared.github.failNext = {
+    method: 'POST',
+    pathIncludes: '/user/repos',
+    status: 403,
+    message: 'Resource not accessible by integration',
+  };
+  try {
+    const refused = await prepared.fixture.router.handle('github.createRepository', {
+      name: 'descartavel',
+    });
+    assert.equal(refused.ok, false);
+    const message = (refused as { ok: false; error: { message: string } }).error.message;
+    assert.match(message, /não pode criar repositórios/);
+    assert.match(message, /github\.com\/new/);
+    assert.match(message, /Nenhum token precisa ser informado/);
+  } finally {
+    await prepared.cleanup();
+  }
+});
+
 test('as capacidades são medidas: lê, escreve, e NÃO executa código', async () => {
   const prepared = await prepare({ orchestratorScript: [done()], workerScript: ['ok'] });
   try {

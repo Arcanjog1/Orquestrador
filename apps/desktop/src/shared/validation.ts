@@ -447,6 +447,14 @@ export const REQUEST_VALIDATORS: {
     },
     { optional: ['name', 'repositoryPrivate', 'endpoint'] },
   ),
+  'github.createRepository': obj(
+    {
+      name: str({ min: 1, max: 100 }),
+      private: bool,
+      description: str({ min: 1, max: 300 }),
+    },
+    { optional: ['private', 'description'] },
+  ),
   'workspace.createGitHub': obj(
     {
       repository: repositoryFullName,

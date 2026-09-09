@@ -513,6 +513,61 @@ export class RepositoryOperations {
   // -- Writing ---------------------------------------------------------------
 
   /**
+   * Creates a repository in the signed-in account.
+   *
+   * Offered because a person testing this needs somewhere disposable to test
+   * it, and being sent to a browser to make one by hand is the kind of errand
+   * this application exists to remove.
+   *
+   * Whether it works depends on what the connection *is*, and the answer is
+   * measured rather than assumed: an OAuth App authorised with the `repo`
+   * scope may create repositories, and a GitHub App may not - GitHub answers
+   * the latter with 403 "Resource not accessible by integration". That
+   * distinction is passed back intact, because the fix for it is a different
+   * fix, and it is never "paste a token".
+   */
+  async createRepository(
+    input: { name: string; private?: boolean; description?: string; autoInit?: boolean },
+    token: string,
+    signal?: AbortSignal,
+  ): Promise<{ fullName: string; defaultBranch: string | null; htmlUrl: string; isPrivate: boolean }> {
+    const body = await this.send<{
+      full_name?: unknown;
+      default_branch?: unknown;
+      html_url?: unknown;
+      private?: unknown;
+    }>(
+      'POST',
+      '/user/repos',
+      token,
+      {
+        name: input.name,
+        // Private unless somebody says otherwise: a repository created for a
+        // test should not become public because a default said so.
+        private: input.private !== false,
+        ...(input.description ? { description: input.description } : {}),
+        // With no commit there is no default branch, no tree and nothing to
+        // cut a work branch from - so the repository would be created and
+        // still unusable.
+        auto_init: input.autoInit !== false,
+      },
+      signal,
+    );
+    if (typeof body.full_name !== 'string' || typeof body.html_url !== 'string') {
+      throw new GitHubError('O GitHub não devolveu um repositório utilizável.', 502, 'api');
+    }
+    return {
+      fullName: body.full_name,
+      defaultBranch:
+        typeof body.default_branch === 'string' && body.default_branch.length > 0
+          ? body.default_branch
+          : null,
+      htmlUrl: body.html_url,
+      isPrivate: body.private === true,
+    };
+  }
+
+  /**
    * Creates a branch at a commit.
    *
    * Refused, not overwritten, when the branch already exists: taking over a

@@ -614,6 +614,8 @@ export function AddProjectDialog({
     workspaceId: string;
     view: RepositoryCapabilitiesView;
   } | null>(null);
+  /** Set while the person is naming a repository for the application to create. */
+  const [newRepoName, setNewRepoName] = useState<string | null>(null);
 
   // The person's repositories, read once per opening, private ones included.
   useEffect(() => {
@@ -714,6 +716,43 @@ export function AddProjectDialog({
    * it can change, and - separately - where code would run if a task needed
    * code run.
    */
+  /**
+   * Creates a repository through the connection already authorised, and
+   * selects it.
+   *
+   * The application asks GitHub with the login the person connected; it never
+   * asks the person for a token. When the connection cannot create
+   * repositories the refusal says so and names the official way, which is a
+   * page on github.com and a selection here - not a credential in a chat.
+   */
+  const createRepository = async () => {
+    const name = (newRepoName ?? '').trim();
+    if (!name) return;
+    setBusy("repository");
+    setError(null);
+    try {
+      const created = await api.github.createRepository({
+        name,
+        private: true,
+        description: "Repositório criado pelo Orquestrador.",
+      });
+      setUrl(created.fullName);
+      setBranch(created.defaultBranch ?? "");
+      setNewRepoName(null);
+      const workspace = await api.workspace.createGitHub({
+        repository: created.fullName,
+        ...(created.defaultBranch ? { branch: created.defaultBranch } : {}),
+        repositoryPrivate: created.isPrivate,
+      });
+      const view = await api.workspace.githubCapabilities({ workspaceId: workspace.id });
+      setCapabilities({ workspaceId: workspace.id, view });
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const createGitHub = async () => {
     const repository = cloudRepo?.fullName ?? fullNameOf(url);
     if (!repository) {
@@ -901,6 +940,56 @@ export function AddProjectDialog({
                 pela API oficial do GitHub — branch de trabalho, commit e PR. Rodar testes ou
                 ferramentas é outra coisa, e o projeto vai dizer onde isso aconteceria.
               </p>
+              {githubConnected && newRepoName === null && (
+                <button
+                  className="text-[11px] text-primary underline-offset-2 hover:underline"
+                  disabled={busy !== null}
+                  onClick={() => setNewRepoName("orquestrador-teste")}
+                  data-testid="new-repository"
+                >
+                  Ou criar um repositório privado novo
+                </button>
+              )}
+              {newRepoName !== null && (
+                <div className="space-y-2 rounded-lg border border-border p-3" data-testid="new-repository-form">
+                  <label className="block space-y-1.5">
+                    <span className="text-xs text-muted-foreground">
+                      Nome do novo repositório (privado, com README)
+                    </span>
+                    <Input
+                      value={newRepoName}
+                      autoFocus
+                      onChange={(e) => setNewRepoName(e.target.value)}
+                      data-testid="new-repository-name"
+                    />
+                  </label>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      className="flex-1"
+                      disabled={busy !== null || newRepoName.trim().length === 0}
+                      onClick={() => void createRepository()}
+                      data-testid="new-repository-create"
+                    >
+                      {busy === "repository" && <Loader2 className="size-3.5 animate-spin" />}
+                      Criar e usar
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy !== null}
+                      onClick={() => setNewRepoName(null)}
+                    >
+                      Cancelar
+                    </Button>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Criado com a conexão do GitHub que você já autorizou. Nenhum token é pedido
+                    aqui. Se a conexão não puder criar repositórios, eu digo o motivo e o caminho
+                    oficial para criar um em github.com.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

@@ -43,6 +43,7 @@ export const REQUEST_CHANNELS = [
   'github.cancelConnect',
   'github.disconnect',
   'github.repositories',
+  'github.createRepository',
   'github.branches',
   'github.pullRequestStatus',
   'github.createPullRequest',
@@ -1232,6 +1233,23 @@ export interface IpcMap {
   'github.cancelConnect': { request: void; response: { cancelled: boolean } };
   'github.disconnect': { request: void; response: GitHubStatusView };
   'github.repositories': { request: void; response: readonly GitHubRepositoryView[] };
+  /**
+   * Creates a repository through the connection already authorised.
+   *
+   * Offered so a person testing this does not have to leave the application to
+   * make somewhere disposable to test it. Refused - with the official fix
+   * named - when the connection is a kind that cannot; never by asking for a
+   * token.
+   */
+  'github.createRepository': {
+    request: { name: string; private?: boolean; description?: string };
+    response: {
+      readonly fullName: string;
+      readonly defaultBranch: string | null;
+      readonly htmlUrl: string;
+      readonly isPrivate: boolean;
+    };
+  };
   'github.branches': {
     request: { repository: string };
     response: readonly GitHubBranchView[];

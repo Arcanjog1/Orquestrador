@@ -170,6 +170,61 @@ export class GitHubWorkspaceService {
     }
   }
 
+  /**
+   * Creates a repository through the connection the person already authorised.
+   *
+   * The point is to remove an errand, not to add a credential: this uses the
+   * same login already connected in Contas e integrações, and asks for nothing
+   * else. No token is ever requested, pasted or stored by this path.
+   *
+   * When the connection cannot do it, the refusal says which of the two
+   * reasons it is and what the official fix is. A GitHub App genuinely cannot
+   * create a repository in a personal account - that is a property of the app
+   * kind, not a setting somebody forgot - and pretending otherwise would send
+   * a person hunting through settings for a switch that does not exist.
+   */
+  async createRepository(
+    input: { name: string; private?: boolean; description?: string },
+    signal?: AbortSignal,
+  ): Promise<{ fullName: string; defaultBranch: string | null; htmlUrl: string; isPrivate: boolean }> {
+    const token = await this.writeToken();
+    try {
+      return await this.operations.createRepository(
+        {
+          name: input.name,
+          private: input.private !== false,
+          ...(input.description ? { description: input.description } : {}),
+          // With a first commit, so the repository has a default branch and a
+          // tree to cut a work branch from. Without one it would be created
+          // and still unusable.
+          autoInit: true,
+        },
+        token,
+        signal,
+      );
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if (status === 403) {
+        throw new GitHubWorkspaceError(
+          'A conexão do GitHub que você autorizou não pode criar repositórios. Isso costuma ser o ' +
+            'tipo da conexão, não uma configuração esquecida: um GitHub App não cria repositórios ' +
+            'em uma conta pessoal, e um OAuth App só cria com o escopo "repo". ' +
+            'Crie o repositório em github.com/new — privado, com README — e depois selecione-o aqui ' +
+            'em Adicionar projeto → Repositório. Nenhum token precisa ser informado em lugar nenhum.',
+          'NOT_CONNECTED',
+        );
+      }
+      if (status === 422) {
+        throw new GitHubWorkspaceError(
+          `Já existe um repositório com o nome "${input.name}" nesta conta, ou o nome não é aceito ` +
+            'pelo GitHub. Escolha outro nome.',
+          'BAD_REPOSITORY',
+        );
+      }
+      throw error;
+    }
+  }
+
   // -- Reading ---------------------------------------------------------------
 
   async tree(workspaceId: string, ref: string, signal?: AbortSignal): Promise<RepositoryTree> {

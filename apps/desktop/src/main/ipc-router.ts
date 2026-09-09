@@ -217,6 +217,9 @@ export class IpcRouter {
     this.handlers.set('workspace.create', (p) =>
       this.withProject(s.workspaces.create(p as { name: string; localPath: string; repositoryUrl?: string })),
     );
+    this.handlers.set('github.createRepository', (p) =>
+      s.githubWorkspaces.createRepository(p as IpcMap['github.createRepository']['request']),
+    );
     this.handlers.set('workspace.createGitHub', (p) =>
       this.withProject(s.workspaces.createGitHub(p as IpcMap['workspace.createGitHub']['request'])),
     );

@@ -180,6 +180,23 @@ export class FakeRepository {
     if (method === 'POST' && path === '/login/oauth/access_token') {
       return this.json({ access_token: FAKE_TOKEN, token_type: 'bearer', scope: 'repo' });
     }
+    // Creating a repository, as `POST /user/repos` does. The fake keeps only
+    // what the application reads back; a second repository is not modelled,
+    // because nothing here works on two at once.
+    if (method === 'POST' && path === '/user/repos') {
+      const input = body as { name?: string; private?: boolean; auto_init?: boolean };
+      const name = String(input.name ?? '');
+      return this.json(
+        {
+          full_name: `${this.options.owner}/${name}`,
+          name,
+          private: input.private !== false,
+          default_branch: input.auto_init === false ? null : this.options.defaultBranch,
+          html_url: `https://github.com/${this.options.owner}/${name}`,
+        },
+        201,
+      );
+    }
     if (method === 'GET' && path === '/user/repos') {
       return this.json([
         {
