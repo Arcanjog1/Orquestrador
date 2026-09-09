@@ -9,6 +9,8 @@
  * Nothing in this file, or anything it constructs, imports Electron.
  */
 
+import {selectionProblem} from '../../shared/model-display.js';
+import {decorateAgentModels,knownAgentModels} from './agent-model-catalog.js';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -567,18 +569,43 @@ export class AppServices {
       buildEnvironment:()=>({...this.runtimeManager.childEnvironmentOverlay('codex'),...(connectionId?this.codexAccountManager.buildEnvironment(connectionId):{})})});
   }
 
-  async agentModels(accountId:string):Promise<import('../../shared/agent-policy.js').ModelCatalogEntry[]> {
+  async agentModels(accountId:string,role?:string):Promise<import('../../shared/agent-policy.js').ModelCatalogEntry[]> {
     const account=this.database.accounts.require(accountId);
+    const decorate=(rows:import('../../shared/agent-policy.js').ModelCatalogEntry[])=>decorateAgentModels(rows,account,this.agents.policies(),role);
     if(account.connection_kind==='api') {
       const api=this.apiProviderFor(accountId,'');
-      if(!api) return [];
+      if(!api) return decorate(knownAgentModels(account.provider_id as 'openai'|'anthropic'));
       const models=await api.getAvailableModels();
-      return models.map(m=>({id:m.id,provider:account.provider_id as 'openai'|'anthropic',source:'provider' as const,reasoning:[],accountAllowed:null}));
+      return decorate(models.map(m=>({id:m.id,displayName:m.displayName,provider:account.provider_id as 'openai'|'anthropic',source:'provider' as const,reasoning:[],accountAllowed:true})));
     }
     const adapter=account.provider_id==='openai'?this.codexAdapterFor(accountId):this.claudeAdapterFor({local_path:'',id:''} as WorkspaceWithAgents,accountId,null);
-    const capabilities=await adapter.describeCapabilities();
+    let capabilities:import('../../../../../src/routing/provider-policy.js').WorkerRuntimeCapabilities;
+    try {capabilities=await adapter.describeCapabilities();} catch {return decorate(knownAgentModels(account.provider_id as 'openai'|'anthropic'));}
     const cached=adapter instanceof CodexAdapter?adapter.cachedModels():[];
-    return (capabilities.declaredModels??[]).map(id=>({id,provider:account.provider_id as 'openai'|'anthropic',source:'runtime' as const,reasoning:[...(cached.find(m=>m.id===id)?.reasoning??capabilities.declaredEfforts??[])],accountAllowed:null}));
+    return decorate(capabilities.declaredModels?.length?capabilities.declaredModels.map(id=>({id,displayName:cached.find(m=>m.id===id)?.displayName,provider:account.provider_id as 'openai'|'anthropic',source:'runtime' as const,reasoning:[...(cached.find(m=>m.id===id)?.reasoning??capabilities.declaredEfforts??[])],accountAllowed:null})):knownAgentModels(account.provider_id as 'openai'|'anthropic'));
+  }
+
+  /** All renderer saves re-read the selected account's catalog; no trust in submitted labels/capabilities. */
+  async saveAgent(input:import('../../shared/ipc-contract.js').AgentInputView,id?:string) {
+    if(input.policy&&input.model&&input.policy.primaryModel!==input.model)throw new Error('O modelo principal deve corresponder à seleção salva.');
+    const previous=id?this.agents.manage().find(a=>a.id===id):undefined;
+    const unchangedModel=previous&&previous.accountId===input.accountId&&previous.provider===input.provider&&previous.role===input.role&&previous.model===input.model&&previous.reasoning===input.reasoning&&JSON.stringify(previous.policy)===JSON.stringify(input.policy)&&previous.maxCapability===input.maxCapability&&previous.maxReasoning===input.maxReasoning;
+    // A disconnected/missing model must not prevent deactivation or a name-only edit.
+    if(!unchangedModel&&(input.policy||input.model)) {
+      const rows=await this.agentModels(input.accountId,input.role);
+      const ids=input.policy?.allowedModels??(input.model?[input.model]:[]);
+      for(const model of ids) {
+        const row=rows.find(m=>m.id===model&&m.provider===input.provider);
+        if(!row)throw new Error('O modelo selecionado não está no catálogo desta conta. Atualize os modelos.');
+        if(row.blockedReason)throw new Error(row.displayName+': '+row.blockedReason);
+      }
+      const policy=input.policy;
+      if(policy){const problem=selectionProblem(policy,rows,input.maxCapability,input.maxReasoning);if(problem)throw new Error(problem);}
+      const reasoning=policy?.reasoning??input.reasoning;
+      const candidates=policy?(policy.modelMode==='FIXED'?[policy.primaryModel]:[policy.primaryModel,...policy.fallbackModels]):[input.model];
+      if(reasoning&&candidates.some(model=>!rows.find(m=>m.id===model)?.reasoning.includes(reasoning)))throw new Error('Este raciocínio não é compatível com os modelos selecionados nesta conta.');
+    }
+    return id?this.agents.update(id,input):this.agents.create(input);
   }
 
   /** One Claude Code adapter, bound to one connection's isolated profile. */

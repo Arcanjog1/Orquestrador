@@ -88,12 +88,12 @@ export class CodexAdapter implements AgentRunner {
       declaredEfforts:codexSupportedEfforts(await this.readVersion(executable,cwd))};
   }
 
-  cachedModels():Array<{id:string;reasoning:string[]}> {
+  cachedModels():Array<{id:string;displayName?:string;reasoning:string[]}> {
     const home=this.environment().CODEX_HOME;
     if(!home) return [];
     try {
-      const data=JSON.parse(readFileSync(join(home,'models_cache.json'),'utf8')) as {models?:Array<{slug?:string;supported_reasoning_levels?:Array<{effort?:string}>}>};
-      return (data.models??[]).filter(m=>typeof m.slug==='string').map(m=>({id:m.slug!,reasoning:(m.supported_reasoning_levels??[]).flatMap(r=>r.effort?[r.effort]:[])}));
+      const data=JSON.parse(readFileSync(join(home,'models_cache.json'),'utf8')) as {models?:Array<{slug?:string;display_name?:string;supported_reasoning_levels?:Array<{effort?:string}>}>};
+      return (data.models??[]).filter(m=>typeof m.slug==='string').map(m=>({id:m.slug!,displayName:m.display_name,reasoning:(m.supported_reasoning_levels??[]).flatMap(r=>r.effort?[r.effort]:[])}));
     } catch { return []; }
   }
 

@@ -330,7 +330,7 @@ export interface AgentInputView {
   readonly provider: ProviderName;
   readonly accountId: string;
   readonly model: string | null;
-  readonly reasoning: ReasoningLevel | null;
+  readonly reasoning: string | null;
   readonly maxCapability: (typeof ACCOUNT_CAPABILITY_TIERS)[number] | null;
   readonly maxReasoning: (typeof ACCOUNT_REASONING_TIERS)[number] | null;
   readonly enabled: boolean;
@@ -1334,7 +1334,7 @@ export interface IpcMap {
 
   'agents.manage': { request: void; response: readonly ManagedAgentView[] };
   'agents.roles': {request:void;response:readonly import('./agent-policy.js').RoleDefinition[]};
-  'agents.models': {request:{accountId:string};response:import('./agent-policy.js').ModelCatalogEntry[]};
+  'agents.models': {request:{accountId:string;role?:string};response:import('./agent-policy.js').ModelCatalogEntry[]};
   'agents.policies': {request:void;response:import('./agent-policy.js').PolicyConfiguration};
   'agents.savePolicies': {request:import('./agent-policy.js').PolicyConfiguration;response:import('./agent-policy.js').PolicyConfiguration};
   'agents.projectPolicy': {request:{workspaceId:string};response:import('./agent-policy.js').PolicyLayer};

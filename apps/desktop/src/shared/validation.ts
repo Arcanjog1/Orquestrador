@@ -287,7 +287,7 @@ const globalPolicy=obj<PolicyConfiguration>({defaultTeam:obj({orchestrator:id,ag
 const agentInput = obj<AgentInputView>({
   name: sessionTitle, role: roleName,
   provider: oneOf(['openai', 'anthropic'] as const), accountId: id,
-  model: nullable(modelName), reasoning: nullable(oneOf(REASONING_LEVELS)),
+  model: nullable(modelName), reasoning: nullable(oneOf(EFFORT_ORDER)),
   maxCapability: nullable(oneOf(ACCOUNT_CAPABILITY_TIERS)),
   maxReasoning: nullable(oneOf(ACCOUNT_REASONING_TIERS)), enabled: bool,policy:advancedPolicy,
 },{optional:['policy']});
@@ -440,7 +440,7 @@ export const REQUEST_VALIDATORS: {
 
   'agents.manage': noArgs,
   'agents.roles':noArgs,
-  'agents.models':obj({accountId:id}),
+  'agents.models':obj({accountId:id,role:str({min:1,max:80})},{optional:['role']}),
   'agents.policies':noArgs,
   'agents.savePolicies':globalPolicy,
   'agents.projectPolicy':obj({workspaceId:id}),

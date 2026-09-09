@@ -69,8 +69,8 @@ export class AgentService {
         accountId:row.account_id!, model:row.model, reasoning:config.reasoning ?? null,
         maxCapability:config.maxCapability ?? null, maxReasoning:config.maxReasoning ?? null, enabled:row.enabled===1,
         ...(config.policy?{policy:config.policy}:{}),
-        availability:row.enabled!==1?'DISABLED':roleDefinition(row.role)?.requiresImage?'UNAVAILABLE':'ACTIVE',
-        unavailableReason:roleDefinition(row.role)?.requiresImage?'Nenhum runtime de imagem conectado.':null };
+        availability:row.enabled!==1?'DISABLED':this.database.accounts.find(row.account_id!)?.auth_state!=='connected'||roleDefinition(row.role)?.requiresImage?'UNAVAILABLE':'ACTIVE',
+        unavailableReason:this.database.accounts.find(row.account_id!)?.auth_state!=='connected'?'Conta desconectada.':roleDefinition(row.role)?.requiresImage?'Nenhum runtime de imagem conectado.':null };
     });
   }
 
@@ -110,7 +110,7 @@ export class AgentService {
     if (!account || account.provider_id!==provider) throw new Error('Escolha uma conta do provedor correto.');
     if(input.policy) validateAgentPolicy(input.policy,input.role);
     if (input.model && !input.policy && !modelCapability(provider,input.model)) throw new Error('Modelo desconhecido nesta política. Use um alias reconhecido.');
-    if (input.reasoning && !['low','medium','high','xhigh','max'].includes(input.reasoning)) throw new Error('Raciocínio inválido.');
+    if (input.reasoning && !(EFFORT_ORDER as readonly string[]).includes(input.reasoning)) throw new Error('Raciocínio inválido.');
     if (input.maxCapability && !['FAST','BALANCED','STRONG','MAX'].includes(input.maxCapability)) throw new Error('Teto de modelo inválido.');
     if (input.maxReasoning && !['LOW','MEDIUM','HIGH','MAX'].includes(input.maxReasoning)) throw new Error('Teto de raciocínio inválido.');
   }

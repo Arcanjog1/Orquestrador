@@ -53,8 +53,9 @@ export interface PolicyConfiguration {
   routing: Partial<Record<TaskKind, string[]>>;
 }
 export interface ModelCatalogEntry {
-  id:string; provider:'openai'|'anthropic'; source:'runtime'|'provider';
+  id:string; provider:'openai'|'anthropic'; source:'runtime'|'provider'|'catalog';
   reasoning:string[]; accountAllowed:boolean | null;
+  displayName?:string; premium?:boolean; blockedReason?:string|null; capability?:ModelPolicy['capability'];
 }
 export const EFFORT_ORDER = ['none','minimal','low','medium','high','xhigh','max','ultra'] as const;
 export const DEFAULT_POLICY_CONFIGURATION: PolicyConfiguration = { models:[], defaults:{}, routing:{} };

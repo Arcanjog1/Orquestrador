@@ -186,15 +186,15 @@ export class IpcRouter {
     );
     this.handlers.set('agents.manage', () => s.agents.manage());
     this.handlers.set('agents.roles', () => s.agents.roles());
-    this.handlers.set('agents.models', p => s.agentModels((p as IpcMap['agents.models']['request']).accountId));
+    this.handlers.set('agents.models', p => {const input=p as IpcMap['agents.models']['request'];return s.agentModels(input.accountId,input.role);});
     this.handlers.set('agents.policies', () => s.agents.policies());
     this.handlers.set('agents.savePolicies', p => s.agents.savePolicies(p as IpcMap['agents.savePolicies']['request']));
     this.handlers.set('agents.projectPolicy', p => s.agents.projectPolicy((p as IpcMap['agents.projectPolicy']['request']).workspaceId));
     this.handlers.set('agents.saveProjectPolicy', p => {const input=p as IpcMap['agents.saveProjectPolicy']['request'];return s.agents.saveProjectPolicy(input.workspaceId,input.policy);});
     this.handlers.set('agents.calls', async p => {const {AgentExecutionPolicy}=await import('./services/agent-execution-policy.js');return new AgentExecutionPolicy(s.database).calls((p as IpcMap['agents.calls']['request']).runId);});
     this.handlers.set('agents.confirmModel', async p => {const input=p as IpcMap['agents.confirmModel']['request'];const {AgentExecutionPolicy}=await import('./services/agent-execution-policy.js');await s.orchestration.waitFor(input.runId,5000);new AgentExecutionPolicy(s.database).confirm(input.runId,input.agentId,input.model);return s.orchestration.resumeAfterModelConfirmation(input.runId);});
-    this.handlers.set('agents.create', p => s.agents.create(p as import('../shared/ipc-contract.js').AgentInputView));
-    this.handlers.set('agents.update', p => { const input=p as {agentId:string; agent:import('../shared/ipc-contract.js').AgentInputView};return s.agents.update(input.agentId,input.agent); });
+    this.handlers.set('agents.create', p => s.saveAgent(p as import('../shared/ipc-contract.js').AgentInputView));
+    this.handlers.set('agents.update', p => { const input=p as {agentId:string; agent:import('../shared/ipc-contract.js').AgentInputView};return s.saveAgent(input.agent,input.agentId); });
     this.handlers.set('agents.remove', p => s.agents.remove((p as {agentId:string}).agentId));
     this.handlers.set('agents.list', () => s.agents.list());
     this.handlers.set('agents.status', () => s.agents.status());
