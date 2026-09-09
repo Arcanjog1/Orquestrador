@@ -2508,6 +2508,32 @@ async function waitForText(window, pattern, timeoutMs) {
   throw new Error(`timed out waiting for ${pattern}; body was:\n${text}`);
 }
 
+
+test('phase2: role provider independence and fixed model policy persist through the real renderer',async()=>{
+ const window=await openWindow();
+ await window.webContents.executeJavaScript("window.api.accounts.create({name:'Phase2 OpenAI',provider:'openai'})");
+ await window.webContents.executeJavaScript("location.hash='#/configuracoes?tab=agents'");await reloadWindow(window);
+ if(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=skip-onboarding]')"))await click(window,'skip-onboarding');
+ await click(window,'agent-create');
+ const input=async(id,value,tag='HTMLInputElement')=>window.webContents.executeJavaScript('(()=>{const e=document.querySelector('+JSON.stringify('[data-testid='+id+']')+');Object.getOwnPropertyDescriptor('+tag+'.prototype,"value").set.call(e,'+JSON.stringify(value)+');e.dispatchEvent(new Event('+JSON.stringify(tag==='HTMLSelectElement'?'change':'input')+',{bubbles:true}));})()');
+ await input('agent-name','Phase2 Reviewer');await input('agent-role','ANALYST','HTMLSelectElement');await input('agent-provider','openai','HTMLSelectElement');await input('agent-model','gpt-test');
+ await waitUntil(async()=>window.webContents.executeJavaScript("!!document.querySelector('[data-testid=agent-policy-fields]')"),5000,'policy fields');
+ await nativeClick(window,'agent-save');
+ const agent=await waitFor(async()=>window.webContents.executeJavaScript("window.api.agents.manage().then(list=>list.find(a=>a.name==='Phase2 Reviewer'))"),10000,'phase2 agent');
+ assert.equal(agent.role,'ANALYST');assert.equal(agent.provider,'openai');assert.equal(agent.policy.modelMode,'FIXED');assert.equal(agent.policy.primaryModel,'gpt-test');assert.equal(agent.policy.tools.includes('write'),false);
+ await reloadWindow(window);
+ assert.equal((await window.webContents.executeJavaScript('window.api.agents.manage().then(list=>list.find(a=>a.id==='+JSON.stringify(agent.id)+'))')).policy.primaryModel,'gpt-test');
+ await waitForText(window,/Phase2 Reviewer/,10000);
+ await window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+ if(process.env.ELECTRON_PHASE2_SCREENSHOT)writeFileSync(process.env.ELECTRON_PHASE2_SCREENSHOT,(await window.webContents.capturePage()).toPNG());
+ await click(window,'model-rule-add');
+ await window.webContents.executeJavaScript(`(()=>{const e=document.querySelector('[aria-label="Modelo da regra"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(e,"gpt-phase2-blocked");e.dispatchEvent(new Event("input",{bubbles:true}));})()`);
+ await window.webContents.executeJavaScript(`document.querySelector('[aria-label="allowed gpt-phase2-blocked"]').click()`);
+ await nativeClick(window,'model-policies-save');
+ await waitUntil(async()=>window.webContents.executeJavaScript("window.api.agents.policies().then(p=>p.models.some(m=>m.modelId==='gpt-phase2-blocked'&&!m.allowed))"),10000,'global block');
+ await window.webContents.executeJavaScript("window.api.agents.savePolicies({models:[],defaults:{},routing:{}})");
+});
+
 /* --------------------------------------------------------------- the run */
 
 console.log('# electron main started, waiting for app ready');

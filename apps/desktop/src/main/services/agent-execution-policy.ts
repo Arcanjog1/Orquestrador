@@ -21,9 +21,12 @@ export class AgentExecutionPolicy {
   confirm(runId:string,agentId:string,model:string):boolean {
     const run=this.database.runs.require(runId);
     if(!['NEEDS_HUMAN','BLOCKED'].includes(run.status)) throw new Error('Esta execução não aguarda confirmação.');
-    const pending=this.database.driver.all<{snapshot:string}>("SELECT snapshot FROM agent_policy_calls WHERE run_id=? AND agent_id=? AND status='CONFIRMATION_REQUIRED'",[runId,agentId]);
-    if(!pending.some(row=>JSON.parse(row.snapshot).model===model)) throw new Error('Não há confirmação pendente para este agente e modelo.');
-    this.database.driver.run('INSERT OR IGNORE INTO model_confirmations VALUES (?,?,?,?,?)',[runId,agentId,model,this.fingerprint(agentId,run.workspace_id),new Date().toISOString()]);
+    const pending=this.database.driver.all<{id:string;snapshot:string}>("SELECT id,snapshot FROM agent_policy_calls WHERE run_id=? AND agent_id=? AND status='CONFIRMATION_REQUIRED'",[runId,agentId]);
+    const fingerprint=this.fingerprint(agentId,run.workspace_id);
+    const matching=pending.filter(row=>{const snapshot=JSON.parse(row.snapshot);return snapshot.model===model&&snapshot.policyFingerprint===fingerprint;});
+    if(!matching.length) throw new Error('Não há confirmação pendente válida para esta política, agente e modelo.');
+    this.database.driver.run('INSERT OR IGNORE INTO model_confirmations VALUES (?,?,?,?,?)',[runId,agentId,model,fingerprint,new Date().toISOString()]);
+    for(const row of matching)this.database.driver.run("UPDATE agent_policy_calls SET status='CONFIRMED' WHERE id=?",[row.id]);
     return true;
   }
   calls(runId:string) { this.database.runs.require(runId); return this.database.driver.all<{id:string;snapshot:string;observation:string|null;status:string;started_at:string;finished_at:string|null}>('SELECT id,snapshot,observation,status,started_at,finished_at FROM agent_policy_calls WHERE run_id=? ORDER BY started_at,id',[runId]).map(row=>({...row,snapshot:JSON.parse(row.snapshot) as Record<string,unknown>,observation:row.observation?JSON.parse(row.observation) as Record<string,unknown>:null})); }
@@ -54,6 +57,7 @@ export class AgentExecutionPolicy {
       const observations=actual.map(row=>row.observation?JSON.parse(row.observation) as {failure?:string;model?:string;usage?:{totalTokens:number|null;costUsd:number|null}}:null);
       const unavailable=observations.filter(o=>o?.failure==='model-unavailable').map(o=>o!.model!);
       const fingerprint=this.fingerprint(agent.id,workspaceId);
+      snapshot={...snapshot,accountName:account.display_name,policyFingerprint:fingerprint,policy,globalPolicy:global,projectPolicy:project};
       // Model confirmation is tied to the entire policy and the run, not an enduring credit grant.
       const resolved=resolveAgentPolicy({role:agent.role,provider:agent.provider_id as 'openai'|'anthropic',policy,
         layers:[global.defaults,project,{maxCapability:options.maxCapability??null,reasoningCeiling:options.maxReasoning?({LOW:'low',MEDIUM:'medium',HIGH:'high',MAX:'ultra'} as const)[options.maxReasoning]:null}],models:global.models,
@@ -83,7 +87,7 @@ export class AgentExecutionPolicy {
       const code=error instanceof AgentPolicyError?error.code:'RUNTIME_POLICY';
       const message=error instanceof Error?error.message:String(error);
       if(code==='CONFIRMATION_REQUIRED') snapshot={...snapshot,model:(error as AgentPolicyError).modelId??options.policy?.primaryModel??args.routing?.model};
-      this.database.driver.run('INSERT INTO agent_policy_calls(id,run_id,agent_id,snapshot,started_at,finished_at,observation,status) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished_at=excluded.finished_at,observation=excluded.observation,status=excluded.status',[id,args.runId,agentId??'unbound',JSON.stringify(snapshot),startedAt,new Date().toISOString(),JSON.stringify({error:message}),code]);
+      this.database.driver.run('INSERT INTO agent_policy_calls(id,run_id,agent_id,snapshot,started_at,finished_at,observation,status) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished_at=excluded.finished_at,observation=excluded.observation,status=excluded.status',[id,args.runId,agentId??'unbound',JSON.stringify(snapshot),startedAt,new Date().toISOString(),JSON.stringify({error:message,code}),invoked?'FAILED':code]);
       if(code!=='CANCELLED') this.database.runs.setStatus(args.runId,'NEEDS_HUMAN',message);
       return {invocationSkipped:!invoked,outcome:code==='CANCELLED'?'cancelled':'completed',exitCode:1,signal:null,truncated:false,stdout:'',stderr:message,durationMs:0,startedAt,finishedAt:new Date().toISOString(),failure:code==='CONFIRMATION_REQUIRED'?'approval-required':'permission',failureDetail:message};
     }

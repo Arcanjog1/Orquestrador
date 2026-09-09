@@ -14,6 +14,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { BrowserWindow } from 'electron';
 import type { AppServices } from '../main/services/app-services.js';
+import {defaultAgentPolicy} from '../shared/agent-policy.js';
 
 export interface SmokeCheck {
   readonly name: string;
@@ -228,6 +229,22 @@ export async function runSmokeChecks(
     if(process.env.AI_ORCHESTRATOR_SMOKE_REOPEN==='1' && fitted!==savedNodes)throw new Error('Graph changed after restarting the packaged process.');
     services.database.settings.set('smoke.graphNodes',fitted);
     return 'Persisted nodes, details, zoom, resize, maximize/restore and reload checked in Chromium. Fixture agents only.';
+  });
+  await check('advanced-agent-policies-render-and-process-restart',async()=>{
+    let id=services.database.settings.get('smoke.advanced-agent');
+    if(process.env.AI_ORCHESTRATOR_SMOKE_REOPEN!=='1'){
+      const account=services.accounts.create('Smoke OpenAI reviewer','openai');
+      const agent=services.agents.create({name:'Smoke advanced reviewer',role:'ANALYST',provider:'openai',accountId:account.id,model:'smoke-model',reasoning:null,maxCapability:null,maxReasoning:null,enabled:true,policy:defaultAgentPolicy('ANALYST','smoke-model')});
+      id=agent.id;services.database.settings.set('smoke.advanced-agent',id);
+      services.agents.savePolicies({models:[{provider:'openai',modelId:'smoke-blocked',allowed:false,premium:false,confirmationRequired:false,allowedRoles:[],capability:null}],defaults:{reasoningCeiling:'high'},routing:{CODE_REVIEW:['ANALYST']}});
+    }
+    const agent=services.agents.manage().find(a=>a.id===id);
+    if(agent?.role!=='ANALYST'||agent.provider!=='openai'||agent.policy?.modelMode!=='FIXED'||agent.policy.primaryModel!=='smoke-model'||agent.policy.tools.includes('write'))throw new Error('Advanced policy did not persist.');
+    if(services.agents.policies().models.find(m=>m.modelId==='smoke-blocked')?.allowed!==false)throw new Error('Global block did not persist.');
+    await window.webContents.executeJavaScript("location.hash='#/configuracoes?tab=agents'");
+    await waitForBody(window,/Smoke advanced reviewer/,20000);
+    if(screenshot)await save(window,screenshot.replace(/\.png$/,'-agents.png'));
+    return 'OpenAI reviewer, FIXED policy, restricted tools, global model block and role routing survive renderer reload and process restart.';
   });
   return checks;
 }

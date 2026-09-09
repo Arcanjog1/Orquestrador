@@ -63,3 +63,20 @@ test('Claude tool allowlist excludes shell/write even when the workspace has bro
  const args=calls.find(c=>c.args?.includes('--print'))!.args!;assert.equal(args[args.indexOf('--tools')+1],'Read,Glob,Grep');assert.ok(!args.includes('Write'));assert.ok(!args.includes('Bash(*)'));assert.equal(args[args.indexOf('--permission-mode')+1],'default');
 });
 
+
+test('a thrown provider call consumes an attempt and cannot retry beyond the ceiling',async()=>{const p=prepare();try{
+ p.f.services.agents.update(p.agent.id,{...p.config,policy:{...p.config.policy!,maxAttempts:1}});
+ let calls=0;p.runner.run=async()=>{calls++;throw new Error('mechanical crash');};
+ const first=await p.invoke();assert.equal(first.invocationSkipped,false);assert.equal(p.boundary.calls(p.run.id)[0]?.status,'FAILED');
+ const second=await p.invoke();assert.equal(second.invocationSkipped,true);assert.equal(calls,1);assert.match(second.stderr,/tentativas/);
+}finally{await p.f.cleanup();}});
+test('startup recovery closes policy calls without inventing provider usage or observations',async()=>{const p=prepare();try{
+ await p.invoke();p.db.driver.run("UPDATE agent_policy_calls SET status='RUNNING',finished_at=NULL,observation=NULL WHERE run_id=?",[p.run.id]);
+ p.f.services.orchestration.reconcileInterrupted();const call=p.boundary.calls(p.run.id)[0]!;assert.equal(call.status,'FAILED');assert.equal(call.observation?.failure,'interrupted');assert.equal(call.observation?.usage,null);assert.equal(call.observation?.observed,null);
+}finally{await p.f.cleanup();}});
+test('explicit Astra and Fable global blocks prevent fixed calls before invocation',async()=>{for(const model of ['astra','fable']){const p=prepare();try{
+ p.f.services.agents.update(p.agent.id,{...p.config,policy:defaultAgentPolicy('CODING_WORKER',model)});
+ p.f.services.agents.savePolicies({models:[blocked(model)],defaults:{},routing:{}});
+ const result=await p.boundary.invoke({workspaceId:p.ws.id,agentId:p.agent.id,accountId:p.account.id,runner:p.runner,args:p.args,capabilities:{...caps,declaredModels:[...caps.declaredModels,model]}});
+ assert.equal(result.invocationSkipped,true);assert.equal(p.runner.calls.length,0);
+}finally{await p.f.cleanup();}}});

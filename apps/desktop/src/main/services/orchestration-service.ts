@@ -743,6 +743,10 @@ export class OrchestrationService {
     // Leases the previous process left behind, reclaimed before anything else
     // reads them. This is the boot-time half of the same job.
     this.sweepOnce();
+    for(const call of this.database.driver.all<{id:string;run_id:string}>("SELECT id,run_id FROM agent_policy_calls WHERE status='RUNNING'")) {
+      if(this.active.has(call.run_id)) continue;
+      this.database.driver.run("UPDATE agent_policy_calls SET status='FAILED',finished_at=?,observation=? WHERE id=?",[new Date().toISOString(),JSON.stringify({failure:'interrupted',observed:null,usage:null,error:'O aplicativo foi encerrado antes do resultado.'}),call.id]);
+    }
     let count = 0;
     for (const run of this.database.runs.listUnfinished()) {
       if (this.active.has(run.id)) continue;
