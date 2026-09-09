@@ -1001,4 +1001,19 @@ ALTER TABLE agent_invocations ADD COLUMN routing_observation TEXT;
   },
 ];
 
+MIGRATIONS.push({id:21,name:'advanced-agent-policies',sql:`
+ALTER TABLE agent_invocations ADD COLUMN agent_snapshot TEXT;
+CREATE TABLE agent_policy_scopes(scope TEXT PRIMARY KEY,document TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE agent_policy_calls(
+ id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+ agent_id TEXT NOT NULL,snapshot TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,
+ observation TEXT,status TEXT NOT NULL
+);
+CREATE INDEX idx_agent_policy_calls_run ON agent_policy_calls(run_id,agent_id);
+CREATE TABLE model_confirmations(
+ run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+ agent_id TEXT NOT NULL,model_id TEXT NOT NULL,policy_hash TEXT NOT NULL,confirmed_at TEXT NOT NULL,
+ PRIMARY KEY(run_id,agent_id,model_id,policy_hash)
+);
+`});
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;
