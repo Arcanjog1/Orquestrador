@@ -865,7 +865,7 @@ function AccountCard({
         </span>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <button className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+            <button type="button" aria-label={`Opções de ${account.name}`} className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
               <MoreHorizontal className="size-4" />
             </button>
           </DropdownMenuTrigger>

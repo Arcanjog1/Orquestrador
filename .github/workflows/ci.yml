@@ -68,6 +68,23 @@ jobs:
         timeout-minutes: 20
         run: npm run -w apps/desktop package
 
+      - name: Overflow regression in real Electron
+        timeout-minutes: 5
+        run: node apps/desktop/scripts/overflow-regression.mjs --output=out/overflow-electron
+
+      - name: Overflow regression in packaged Windows application
+        timeout-minutes: 5
+        run: node apps/desktop/scripts/overflow-regression.mjs "--binary=apps/desktop/release/win-unpacked/AI Orchestrator.exe" --output=out/overflow-packaged
+
+      - name: Upload overflow event and layout evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: overflow-regression
+          path: out/overflow-*
+          if-no-files-found: ignore
+
       - name: Packaged smoke test
         timeout-minutes: 15
         run: npm run -w apps/desktop test:packaged
