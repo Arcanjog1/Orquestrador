@@ -142,7 +142,7 @@ export function TeamDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-sm">Equipe deste projeto</DialogTitle>
           <DialogDescription className="text-xs">

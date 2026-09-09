@@ -670,6 +670,11 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
     await click(window, 'skip-onboarding');
     await waitForText(window, /Projeto em equipe/, 15_000);
 
+    const project = (await window.webContents.executeJavaScript('window.api.project.list()')).find(p=>p.workspaceId===workspace.id);
+    assert.ok(project,'the test workspace has a sidebar project');
+    await click(window,'open-project-'+project.id);
+    await waitUntil(async()=>window.webContents.executeJavaScript("document.querySelector('[data-testid=project-chip]')?.textContent.includes('Projeto em equipe')"),10000,'test project selected');
+
     // The header chip opens the team popover; "Editar equipe" opens the dialog.
     await click(window, 'team-chip');
     await waitForText(window, /Editar equipe/, 10_000);
@@ -714,7 +719,9 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
     await click(window, 'team-orchestrator-advanced');
     await waitForText(window, /Voltar para o padrão do CLI/, 5_000);
     await type(window, 'team-orchestrator-model', 'gpt-5.1-codex');
-    await click(window, 'team-save');
+    // Let the controlled input commit, then exercise an actual pointer click.
+    await window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    await nativeClick(window, 'team-save');
     const closed = Date.now() + 10_000;
     let text = '';
     while (Date.now() < closed) {
@@ -722,7 +729,7 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
       if (!/Equipe deste projeto/.test(text)) break;
       await new Promise((r) => setTimeout(r, 100));
     }
-    assert.doesNotMatch(text, /Equipe deste projeto/, 'the dialog closed after saving');
+    assert.doesNotMatch(text, /Equipe deste projeto/, 'the dialog closed after saving; rendered state: '+text);
 
     // What was saved is the workspace's team, by account, as the run reads it.
     const saved = (await window.webContents.executeJavaScript('window.api.workspace.list()')).find(
@@ -742,6 +749,8 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
     await waitForText(window, /Pular onboarding/, 15_000);
     await click(window, 'skip-onboarding');
     await waitForText(window, /Projeto em equipe/, 15_000);
+    await click(window,'open-project-'+project.id);
+    await waitUntil(async()=>window.webContents.executeJavaScript("document.querySelector('[data-testid=project-chip]')?.textContent.includes('Projeto em equipe')"),10000,'saved project selected');
     await click(window, 'team-chip');
     const popover = await waitForText(window, /Conta: Claude Trabalho/, 10_000);
     assert.match(popover, /gpt-5\.1-codex/);
