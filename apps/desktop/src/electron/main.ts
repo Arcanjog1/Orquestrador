@@ -38,6 +38,8 @@ function createWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#12141a',
     title: 'AI Orchestrator',
+    autoHideMenuBar: true,
+    ...(process.platform === 'win32' ? { titleBarStyle: 'hidden' as const, titleBarOverlay: { color: '#12141a', symbolColor: '#dce0ea', height: 36 } } : {}),
     webPreferences: { ...WEB_PREFERENCES, preload: PRELOAD },
   });
 

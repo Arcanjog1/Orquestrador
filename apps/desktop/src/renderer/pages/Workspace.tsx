@@ -7,6 +7,7 @@ import { ProjectContextDialog } from "@/components/orch/ProjectContextDialog";
 import { PrepareProjectDialog } from "@/components/orch/PrepareProjectDialog";
 import { PermissionDialog } from "@/components/orch/PermissionDialog";
 import { TopContextBar } from "@/components/orch/TopContextBar";
+import { ExecutionWorktree } from "@/components/orch/ExecutionWorktree";
 import { TimelineView } from "@/components/orch/Timeline";
 import {
   ActivityPanel,
@@ -90,11 +91,15 @@ export function WorkspacePage({
   const router = useRouter();
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [view, setView] = useState<"worktree" | "timeline">("worktree");
   const [activityOpen, setActivityOpen] = useState(true);
   const [diffOpen, setDiffOpen] = useState(false);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [detailRunId, setDetailRunId] = useState<string | null>(null);
   const [changes, setChanges] = useState<WorkspaceChangesView | null>(null);
+  const [historyRuns, setHistoryRuns] = useState<readonly RunView[]>([]);
+  const [historyDetail, setHistoryDetail] = useState<RunDetailView | null>(null);
+  const [historyMessages, setHistoryMessages] = useState<readonly ChatMessageView[]>([]);
   const [runDetail, setRunDetail] = useState<RunDetailView | null>(null);
   /**
    * What the agent in flight is doing, from the ephemeral channel.
@@ -242,6 +247,7 @@ export function WorkspacePage({
 
   /** Opens a conversation, switching to its folder first when it lives elsewhere. */
   const openSession = (id: string) => {
+    if (id === sessionId) return;
     const target = sessions.find((s) => s.id === id);
     if (target && workspace && target.workspaceId !== workspace.id) {
       pendingSession.current = id;
@@ -404,6 +410,17 @@ export function WorkspacePage({
   useEffect(() => {
     void loadMessages();
   }, [loadMessages]);
+
+  // Restore the persisted run when opening a conversation after a restart.
+  useEffect(() => {
+    if (!workspace || !sessionId) return;
+    let alive = true;
+    void api.run.list({workspaceId:workspace.id}).then(rows => {
+      const latest = rows.filter(r=>r.sessionId===sessionId).sort((a,b)=>b.startedAt.localeCompare(a.startedAt))[0] ?? null;
+      if (alive) setRun(current => current?.sessionId===sessionId ? current : latest);
+    }).catch(fail);
+    return () => { alive=false; };
+  }, [workspace?.id, sessionId, fail]);
 
   // -- The working copy, read with git, never remembered ---------------------
 
@@ -655,6 +672,23 @@ export function WorkspacePage({
       .then((rows) => setAgentStatus(rows as readonly AgentStatus[]))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if(!run) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let alive=true;
+    const stop=api.events.runGraph(event=>{
+      if(event.runId!==run.id || timer) return;
+      timer=setTimeout(()=>{timer=undefined; void api.run.detail({runId:run.id}).then(value=>{if(alive)setRunDetail(value);}).catch(()=>{});},80);
+    });
+    return ()=>{alive=false;stop();if(timer)clearTimeout(timer);};
+  },[run?.id]);
+
+  useEffect(()=>{setHistoryDetail(null); if(workspace) void api.run.list({workspaceId:workspace.id}).then(setHistoryRuns).catch(()=>{});},[workspace?.id,sessionId,run?.id]);
+  async function openHistoricalRun(id: string) {
+    if(!id){setHistoryDetail(null);return;}
+    try {const detail=await api.run.detail({runId:id});setHistoryDetail(detail);setHistoryMessages(detail.run.sessionId ? await api.chat.listMessages({sessionId:detail.run.sessionId}) : []);}catch(error){fail(error);}
+  }
 
   // -- Derived -------------------------------------------------------------
 
@@ -1009,7 +1043,16 @@ export function WorkspacePage({
           onPullRequest={() => setGitDialog("pr")}
         />
 
-        <div className="relative flex min-h-0 flex-1">
+        <nav className="run-view-tabs" aria-label="Visualização da execução">
+          <button aria-pressed={view === 'worktree'} onClick={()=>setView('worktree')}>Worktree</button>
+          <button aria-pressed={view === 'timeline'} onClick={()=>setView('timeline')}>Ver execução linear</button>
+          <button onClick={()=>setEvidenceOpen(true)}>Arquivos e evidências</button>
+          <button onClick={()=>setDiffOpen(true)}>Diff</button>
+          <select aria-label="Execução no histórico" value={historyDetail?.run.id ?? ''} onChange={e=>void openHistoricalRun(e.target.value)}><option value="">Execução atual</option>{historyRuns.map(r=><option key={r.id} value={r.id}>{r.status} · {r.objective.slice(0,55)}</option>)}</select><span>{historyDetail?.run.objective ?? run?.objective}</span>
+        </nav>
+        {view === 'worktree' && (historyDetail || (runDetail && runDetail.run.id === run?.id)) ? (
+          <ExecutionWorktree detail={(historyDetail ?? runDetail)!} messages={historyDetail ? historyMessages : messages} onEvidence={()=>historyDetail ? setDetailRunId(historyDetail.run.id) : setEvidenceOpen(true)} onDiff={historyDetail ? undefined : ()=>setDiffOpen(true)} onReview={historyDetail ? undefined : ()=>void resolveHumanReview('Continuar')} onCancel={historyDetail ? undefined : ()=>setCancelOpen(true)} onCancelTask={historyDetail ? undefined : (taskId)=>{if(run) void api.run.cancelTask({runId:run.id,taskId}).catch(fail);}}/>
+        ) : <div className="relative flex min-h-0 flex-1">
           <div className="min-w-0 flex-1 overflow-y-auto">
             {entries.length === 0 ? (
               <EmptyState onSubmit={(text) => void send(text)} />
@@ -1060,6 +1103,8 @@ export function WorkspacePage({
             </button>
           )}
         </div>
+
+        }
 
         {pendingPermissions.length > 0 && (
           <div
@@ -1307,8 +1352,7 @@ function NoWorkspace({
         </div>
         <h1 className="mt-4 text-2xl font-semibold tracking-tight">Escolha um projeto</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          O AI Orchestrator trabalha dentro de uma pasta do seu computador. Escolha a pasta
-          do projeto, ou clone um repositório, para começar.
+          Adicione uma pasta local ou um repositório GitHub. Consultas e alterações pelo GitHub não exigem checkout.
         </p>
         <div className="mt-6 flex justify-center gap-2">
           <button
