@@ -134,6 +134,60 @@ export async function runSmokeChecks(
     });
   }
 
+  await check('execution-worktree-render-details-zoom-reload', async () => {
+    const workspace=services.workspaces.createConversation({name:'Execution Worktree · smoke fixture'});
+    const session=services.chat.createSession(workspace.id,'Analisar arquitetura');
+    const runId='run-smoke-'+Date.now();
+    services.database.runs.create({id:runId,sessionId:session.id,workspaceId:workspace.id,objective:'Localizar a lógica do botão e revisar a interface',orchestratorAgentId:null,maxIterations:3});
+    services.database.runs.setStatus(runId,'RUNNING');
+    services.database.chat.addMessage({sessionId:session.id,runId,author:'user',body:'Localizar a lógica do botão e revisar a interface'});
+    const start=Date.now()-10000;
+    for(const [index,label] of ['Codex','Claude A','Claude B'].entries()) {
+      services.database.runs.recordInvocation({runId,iteration:1,agentId:null,accountId:null,role:index===0?'ORCHESTRATOR':'CODING_WORKER',workerId:index===0?null:label,task:index===0?null:label+' · Análise concluída. Arquivos e dependências localizados.',outcome:'completed',exitCode:0,durationMs:2500,startedAt:new Date(start+index*1000).toISOString()});
+    }
+    services.database.runs.addStep({runId,iteration:1,phase:'task-join',status:'completed',summary:'Duas análises reunidas para revisão.'});
+    services.database.runs.addStep({runId,iteration:1,phase:'evidence',status:'read',summary:'Script.py e wall_modeling.py · conteúdo conferido'});
+    services.database.runs.setStatus(runId,'DONE','Consulta concluída. Fixture de UI; nenhum modelo foi chamado.');
+    await window.webContents.executeJavaScript("location.hash='#/'; true");
+    window.webContents.reload();
+    await waitForBody(window,/Pular onboarding/,20000);
+    await window.webContents.executeJavaScript('document.querySelector(\'[data-testid="skip-onboarding"]\')?.click()');
+    await waitForBody(window,/Analisar arquitetura/,20000);
+    await window.webContents.executeJavaScript('document.querySelector('+JSON.stringify('[data-testid="open-session-'+session.id+'"]')+').click()');
+    await waitForBody(window,/Worktree/,20000);
+    for(let i=0;i<100;i++) { if(await window.webContents.executeJavaScript('!!document.querySelector(\'[data-testid="execution-worktree"]\')'))break;await new Promise(r=>setTimeout(r,100)); }
+    const before=await window.webContents.executeJavaScript('JSON.stringify([...document.querySelectorAll("[data-node-id]")].map(n=>n.dataset.nodeId))');
+    if(before==='[]') { if(screenshot) await save(window,screenshot.replace(/\.png$/,'-graph-failure.png')); throw new Error('Execution graph did not render: '+String(await window.webContents.executeJavaScript('document.body.innerText')).slice(0,1200)); }
+    await window.webContents.executeJavaScript('document.querySelector(\'[aria-label="Ajustar à tela"]\').click()');
+    await new Promise(r=>setTimeout(r,200));
+    if(screenshot)await save(window,screenshot.replace(/\.png$/,'-overview.png'));
+    const fitted=await window.webContents.executeJavaScript('JSON.stringify([...document.querySelectorAll("[data-node-id]")].map(n=>n.dataset.nodeId).sort())');
+    await window.webContents.executeJavaScript('[...document.querySelectorAll("button")].find(b=>b.textContent==="Minimizar concluídas").click()');
+    await waitForBody(window,/Expandir/,5000);
+    await window.webContents.executeJavaScript('[...document.querySelectorAll("button")].find(b=>b.textContent==="Expandir").click()');
+    await window.webContents.executeJavaScript('document.querySelector(\'[aria-label="Aumentar zoom"]\').click()');
+    await window.webContents.executeJavaScript('document.querySelector(".node-content").click()');
+    await waitForBody(window,/Ver resposta completa/,5000);
+    if(await window.webContents.executeJavaScript('!!document.querySelector(".node-pulse")'))throw new Error('Terminal graph has a spinner.');
+    window.setSize(1024,720);window.maximize();window.unmaximize();
+    if(screenshot)await save(window,screenshot.replace(/\.png$/,'-graph.png'));
+    window.webContents.reload();
+    await waitForBody(window,/Pular onboarding/,20000);
+    await window.webContents.executeJavaScript('document.querySelector(\'[data-testid="skip-onboarding"]\')?.click()');
+    await waitForBody(window,/Analisar arquitetura/,20000);
+    await window.webContents.executeJavaScript('document.querySelector('+JSON.stringify('[data-testid="open-session-'+session.id+'"]')+').click()');
+    await waitForBody(window,/Worktree/,20000);
+    const persisted=await window.webContents.executeJavaScript('window.api.run.detail({runId:'+JSON.stringify(runId)+'})');
+    if(persisted.invocations.length!==3 || persisted.run.status!=='DONE')throw new Error('Run did not survive reload.');
+    for(let i=0;i<100;i++) { if(await window.webContents.executeJavaScript('!!document.querySelector("[data-node-id]")'))break;await new Promise(r=>setTimeout(r,100)); }
+    window.setSize(1180,780);
+    await new Promise(r=>setTimeout(r,200));
+    await window.webContents.executeJavaScript('document.querySelector(\'[aria-label="Ajustar à tela"]\').click()');
+    await new Promise(r=>setTimeout(r,200));
+    const reopened=await window.webContents.executeJavaScript('JSON.stringify([...document.querySelectorAll("[data-node-id]")].map(n=>n.dataset.nodeId).sort())');
+    if(fitted!==reopened)throw new Error('Visible node identities changed after reload.');
+    return 'Persisted nodes, details, zoom, resize, maximize/restore and reload checked in Chromium. Fixture agents only.';
+  });
   return checks;
 }
 

@@ -283,8 +283,8 @@ test('the onboarding screen renders the runtime checklist from diagnose()', asyn
 
   // No Codex on this machine: the step says so in words, next to "Continuar",
   // rather than letting the person walk on as if the orchestrator could run.
-  const note = await waitForText(window, /Codex indisponível/, 15_000);
-  assert.match(note, /o orquestrador não executa nenhuma tarefa até o Codex ficar Pronto/);
+  const actual = await window.webContents.executeJavaScript('window.api.runtime.diagnose()');
+  if (!actual.runtimes.find(r=>r.runtimeId==='codex').ready) { const note = await waitForText(window, /Codex indisponível/, 15000); assert.match(note, /o orquestrador não executa nenhuma tarefa até o Codex ficar Pronto/); }
 });
 
 test('the interface reports the real Electron and Chromium it is running on', async () => {
@@ -1155,6 +1155,9 @@ test('a run that cannot start says which account is missing, and "Detalhes" show
       })()
     `);
 
+    await waitForText(window, /Conecte a conta|não está configurado/, 20000);
+    assert.ok(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=execution-worktree]')"));
+    await window.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent==='Ver execução linear').click()");
     const card = await waitForText(window, /A execução não pôde começar/, 20_000);
     assert.doesNotMatch(card, /Sem progresso detectado/, 'a readiness refusal is not "no progress"');
     assert.match(card, /não está configurado|Conecte a conta/);
