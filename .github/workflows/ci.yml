@@ -265,7 +265,14 @@ jobs:
         run: node node_modules/electron/install.js
 
       - name: Install xvfb
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+        run: |
+          # Hosted runners may already have the complete display helper.
+          # Avoid refreshing unrelated package feeds when it is usable.
+          if ! command -v xvfb-run >/dev/null || ! command -v Xvfb >/dev/null || ! command -v xauth >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y xvfb xauth
+          fi
+          xvfb-run -a true
 
       - name: Typecheck
         run: npm run typecheck
