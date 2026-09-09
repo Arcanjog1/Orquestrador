@@ -87,6 +87,10 @@ export type { ProcessResult, RunProcessOptions } from '../../../../src/process/p
 
 export { GitEvidenceCollector, parseStatusShort } from '../../../../src/git/git-evidence-collector.js';
 export { redact } from '../../../../src/security/secret-redactor.js';
+export { buildScopes } from '../../../../src/permissions/rule-syntax.js';
+export { decideResumption, explainRefusal } from '../../../../src/permissions/resumption.js';
+export type { ResumptionDecision, ResumptionRefusal } from '../../../../src/permissions/resumption.js';
+export type { PermissionScope } from '../../../../src/permissions/rule-syntax.js';
 export { screenCommand } from '../../../../src/git/git-safety.js';
 
 export { AcceptanceCriteriaLedger } from '../../../../src/orchestrator/acceptance-criteria.js';

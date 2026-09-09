@@ -195,6 +195,16 @@ export class ScriptedAgent implements AgentRunner {
    */
   denyNext: readonly DeniedToolCall[] | null = null;
 
+  /**
+   * What this agent reports having carried as `--allowedTools`.
+   *
+   * Null means "this runtime has no such flag", which is how a real adapter
+   * without one behaves. Set by a test that needs the loop to see a mismatch
+   * between what a person granted and what reached the command line - the
+   * exact shape of the defect where grants were stored and never passed.
+   */
+  authorisedTools: readonly string[] | null = null;
+
   async run(input: AgentInput): Promise<AgentResult> {
     this.calls.push(input);
     const step = this.script[Math.min(this.index, this.script.length - 1)];
@@ -206,6 +216,7 @@ export class ScriptedAgent implements AgentRunner {
       startedAt,
       stdout,
       ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+      ...(this.authorisedTools ? { authorisedTools: this.authorisedTools } : {}),
       ...(denied && denied.length > 0
         ? {
             exitCode: 1,

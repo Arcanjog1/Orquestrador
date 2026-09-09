@@ -1304,6 +1304,21 @@ export class PermissionRepository extends Repository {
   }
 
   /**
+   * What the person already refused in this project.
+   *
+   * A refusal is a decision, and asking the same question again every round
+   * would make it a nag. The scope is the *workspace*, not the run: a person
+   * who refused a shell command yesterday refused it, and a new run is not a
+   * fresh chance to ask.
+   */
+  refusedIn(workspaceId: string): ToolPermissionRequestRecord[] {
+    return this.db.all<ToolPermissionRequestRecord>(
+      "SELECT * FROM tool_permission_requests WHERE workspace_id = ? AND status = 'denied' ORDER BY created_at",
+      [workspaceId],
+    );
+  }
+
+  /**
    * The rules approved for one workspace.
    *
    * What the adapter sends as `--allowedTools`. Scoped to the workspace, so

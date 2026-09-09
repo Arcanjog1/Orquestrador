@@ -35,13 +35,25 @@
  *   not a dismissal.
  */
 
-import type { Database, ToolPermissionRequestRecord } from '../core.js';
-import { newId, redact } from '../core.js';
+import type { Database, ResumptionDecision, ToolPermissionRequestRecord } from '../core.js';
+import { buildScopes, explainRefusal, newId, redact } from '../core.js';
 import type {
+  PermissionDecisionView,
   PermissionGrantView,
   PermissionRequestView,
   PermissionScopeOption,
 } from '../../shared/ipc-contract.js';
+
+/**
+ * What the answer to an authorisation has to do besides record itself.
+ *
+ * The service that owns the loop implements this. Kept as a one-method seam so
+ * the permission flow does not import the orchestrator - and so the decision
+ * to continue can be tested without one.
+ */
+export interface RunResumer {
+  resumeAfterApproval(runId: string): ResumptionDecision;
+}
 
 export class PermissionError extends Error {
   readonly code = 'PERMISSION_ERROR';
@@ -51,19 +63,19 @@ export class PermissionError extends Error {
   }
 }
 
-/**
- * Tools that must never be granted from this flow.
- *
- * A bare `Bash` grant would authorise every command in the workspace for
- * ever, which is precisely the "liberar o computador inteiro" the person said
- * they did not want. The scope offered for a shell is always the exact
- * command; when the CLI did not report one, no scope is offered at all and the
- * dialog says why.
- */
-const NEVER_BARE = new Set(['Bash', 'PowerShell', 'Shell', 'Terminal']);
-
 export class PermissionService {
-  constructor(private readonly database: Database) {}
+  constructor(
+    private readonly database: Database,
+    /**
+     * Who continues the run this request stopped.
+     *
+     * Optional so the service stands alone in a test, and set once at
+     * start-up in the application. When it is absent the grant is still
+     * recorded - the authorisation is never lost - and the answer says
+     * plainly that nothing was resumed.
+     */
+    private readonly resumer: RunResumer | null = null,
+  ) {}
 
   /** Everything waiting on a person, newest first. */
   pending(): PermissionRequestView[] {
@@ -93,7 +105,7 @@ export class PermissionService {
    * that sent a wider rule than it displayed would be refused here, which is
    * the point of validating it in the main process.
    */
-  approve(requestId: string, rule: string): PermissionRequestView {
+  approve(requestId: string, rule: string): PermissionDecisionView {
     const record = this.database.permissions.requireRequest(requestId);
     if (record.status !== 'pending') {
       throw new PermissionError('Este pedido já foi respondido.');
@@ -110,16 +122,38 @@ export class PermissionService {
       rule: chosen.rule,
       grantId: newId('grant'),
     });
-    return this.view(this.database.permissions.requireRequest(requestId));
+    return this.decided(requestId, record.run_id);
   }
 
   /** Refuses a request. Nothing is granted; the refusal is kept. */
-  deny(requestId: string): PermissionRequestView {
+  deny(requestId: string): PermissionDecisionView {
     const record = this.database.permissions.requireRequest(requestId);
     if (record.status !== 'pending') {
       throw new PermissionError('Este pedido já foi respondido.');
     }
-    return this.view(this.database.permissions.deny(requestId));
+    this.database.permissions.deny(requestId);
+    return this.decided(requestId, record.run_id);
+  }
+
+  /**
+   * The answer to "did my decision do anything?", which is the question the
+   * person is actually asking.
+   *
+   * Recording the grant and continuing the task are two different things, and
+   * the incident this closes is exactly the gap between them: the row said
+   * `approved` and the run never moved. So the answer carries both, and it
+   * carries the reason when the run legitimately does not continue - a
+   * cancelled run, a finished one, or other questions still unanswered.
+   */
+  private decided(requestId: string, runId: string | null): PermissionDecisionView {
+    const request = this.view(this.database.permissions.requireRequest(requestId));
+    const outcome = runId && this.resumer ? this.resumer.resumeAfterApproval(runId) : null;
+    return {
+      request,
+      resumed: outcome?.resume === true,
+      notResumedBecause: outcome && !outcome.resume ? explainRefusal(outcome.because) : null,
+      rules: this.database.permissions.rulesFor(request.workspaceId),
+    };
   }
 
   /** Withdraws a standing grant. The requests keep their history. */
@@ -130,67 +164,19 @@ export class PermissionService {
   /**
    * The scopes this request can be approved at.
    *
-   * Deliberately narrow, and computed here rather than offered by the
-   * renderer:
-   *
-   * - **a shell command** can be approved only as that exact command, or as
-   *   that command with any arguments (`Bash(git log *)` style). Never as the
-   *   bare tool.
-   * - **a file tool** can be approved for the path it named, or for the tool
-   *   in this workspace - both are bounded by the working directory the CLI
-   *   already enforces.
-   * - **a call the CLI described only by name** offers the bare tool *unless*
-   *   it is a shell, in which case there is nothing safe to offer and the
-   *   dialog says so.
+   * Computed here rather than offered by the renderer, and built by
+   * `buildScopes`, which is the one place that knows the documented rule
+   * syntax. This method used to build the rules itself by putting the refused
+   * call's primary field in parentheses - `WebFetch(https://...)`,
+   * `Read(C:\\path\\file.ts)` - and the CLI matches neither, so an approval
+   * was stored, sent, and authorised nothing. See `src/permissions/rule-syntax.ts`.
    */
   scopes(record: ToolPermissionRequestRecord): PermissionScopeOption[] {
-    const tool = record.tool_name;
-    const command = record.command?.trim();
-    const options: PermissionScopeOption[] = [];
-
-    if (command && command.length > 0) {
-      if (NEVER_BARE.has(tool)) {
-        options.push({
-          rule: `${tool}(${command})`,
-          label: 'Somente este comando',
-          detail: `Autoriza exatamente \`${command}\`, e nada mais, neste projeto.`,
-        });
-        const prefix = commandPrefix(command);
-        if (prefix && prefix !== command) {
-          options.push({
-            rule: `${tool}(${prefix} *)`,
-            label: `Qualquer \`${prefix}\``,
-            detail:
-              `Autoriza \`${prefix}\` com quaisquer argumentos neste projeto. ` +
-              'Mais amplo do que o necessário para esta tarefa.',
-          });
-        }
-      } else {
-        options.push({
-          rule: `${tool}(${command})`,
-          label: 'Somente este caminho',
-          detail: `Autoriza ${tool} em \`${command}\`, neste projeto.`,
-        });
-        options.push({
-          rule: tool,
-          label: `${tool} neste projeto`,
-          detail:
-            `Autoriza ${tool} dentro da pasta do projeto. O Claude Code já limita ` +
-            'estas ferramentas ao diretório de trabalho.',
-        });
-      }
-      return options;
-    }
-
-    // No command reported. A shell has nothing safe to offer.
-    if (NEVER_BARE.has(tool)) return [];
-    return [
-      {
-        rule: tool,
-        label: `${tool} neste projeto`,
-        detail: `Autoriza ${tool} dentro da pasta do projeto.`,
-      },
-    ];
+    return buildScopes({
+      toolName: record.tool_name,
+      command: record.command,
+      workingDirectory: record.working_directory,
+    });
   }
 
   private view(record: ToolPermissionRequestRecord): PermissionRequestView {
@@ -227,23 +213,4 @@ export class PermissionService {
 
 function statusOf(value: string): PermissionRequestView['status'] {
   return value === 'approved' || value === 'denied' || value === 'superseded' ? value : 'pending';
-}
-
-/**
- * The program and subcommand of a command, for the "any arguments" scope.
- *
- * Two words at most, and only while they are plain words. The documented rule
- * syntax matches everything before the first `*` literally, so a prefix built
- * from an option or a path would produce a rule that means something other
- * than it looks like — and a permission rule that reads wrong is worse than no
- * second option at all.
- */
-function commandPrefix(command: string): string | null {
-  const words = command.trim().split(/\s+/);
-  const plain = /^[A-Za-z0-9._@+-]+$/;
-  const head = words[0];
-  if (!head || !plain.test(head)) return null;
-  const second = words[1];
-  if (second && plain.test(second) && !second.startsWith('-')) return `${head} ${second}`;
-  return head;
 }

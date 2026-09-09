@@ -215,6 +215,9 @@ export class ClaudeCodeAdapter implements AgentRunner {
         truncated: result.truncated,
         executable,
         applied: plan.applied,
+        // Exactly what `--allowedTools` carried, so an authorisation can be
+        // proven at the runtime instead of inferred from a grant row.
+        authorisedTools: plan.authorisedTools,
         ...(envelope?.sessionId ? { sessionId: envelope.sessionId } : {}),
         ...(envelope?.usage ? { usage: envelope.usage } : {}),
         ...(failure ? { failure } : {}),
@@ -356,13 +359,15 @@ export class ClaudeCodeAdapter implements AgentRunner {
     // flag to lower case: `flags.has('--allowedTools')` is always false, and
     // writing it that way would have made this whole fix silently inert.
     const allowedToolsFlag = declaredFlag(capabilities, '--allowedTools', '--allowed-tools');
+    let authorisedTools: readonly string[] = [];
     if (allowedToolsFlag) {
       const flag = allowedToolsFlag;
       const rules = [...FILE_TOOLS, ...(this.options.allowedTools?.() ?? [])];
       // De-duplicated and bounded: a grant list that grew without limit would
       // eventually build a command line the shell refuses.
       const unique = [...new Set(rules.map((rule) => rule.trim()).filter((r) => r.length > 0))];
-      if (unique.length > 0) args.push(flag, ...unique.slice(0, MAX_ALLOWED_RULES));
+      authorisedTools = unique.slice(0, MAX_ALLOWED_RULES);
+      if (authorisedTools.length > 0) args.push(flag, ...authorisedTools);
     }
     // The documented structured envelope. Additive: a build without it keeps
     // answering as plain text and everything below still works.
@@ -423,7 +428,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
       }
     }
     applied.note = notes.length > 0 ? notes.join('; ') : null;
-    return { args, applied, jsonOutput, streaming };
+    return { args, applied, jsonOutput, streaming, authorisedTools };
   }
 
   /**
@@ -465,6 +470,8 @@ export class ClaudeCodeAdapter implements AgentRunner {
 
 interface ClaudePlan {
   readonly args: string[];
+  /** Exactly what `--allowedTools` carried, for the record. */
+  readonly authorisedTools: readonly string[];
   readonly applied: { model: string | null; reasoning: string | null; fallbackUsed: boolean; note: string | null };
   /** True when `--output-format json` was sent, so stdout is the envelope. */
   readonly jsonOutput: boolean;

@@ -1,7 +1,8 @@
 # Local e remoto: o que roda de verdade, e o que não roda
 
-Documentação consultada em **8 de setembro de 2026**. As citações são literais
-para poderem ser reconferidas; termos e comportamentos mudam entre versões.
+Documentação consultada em **8 de setembro de 2026**, reconferida e ampliada em
+**9 de setembro de 2026**. As citações são literais para poderem ser
+reconferidas; termos e comportamentos mudam entre versões.
 
 Você pediu duas coisas nesta seção, e elas puxam em direções opostas se a
 resposta for preguiçosa: *"deixe clara a diferença entre local e remoto"* e
@@ -99,6 +100,58 @@ Requisitos, ditos onde o comando aparece, porque são reais:
 - a política `allow_remote_sessions` da organização ligada;
 - acesso ao GitHub, ou o *fallback* de bundle local;
 - research preview para Pro, Max e Team.
+
+### O que foi reconferido em 9 de setembro
+
+A pergunta era se existe um caminho oficial que permita ao aplicativo **dirigir**
+uma execução na nuvem — iniciar, acompanhar, ler o resultado, coletar evidência e
+fechar o DoneGate — usando a assinatura, sem clonar nada no Windows e sem abrir
+um terminal. A resposta continua sendo **não**, e agora com mais detalhe.
+
+**O que é oficial e existe:**
+
+- Um endpoint documentado dispara uma Routine e cria uma sessão de nuvem:
+  `POST https://api.anthropic.com/v1/claude_code/routines/{trig_...}/fire`, com
+  o cabeçalho `anthropic-beta: experimental-cc-routine-2026-04-01` e um token
+  por routine. É cobrado como **uso da assinatura do Claude Code**, não como API
+  paga. Devolve `{type, claude_code_session_id, claude_code_session_url}`.
+- O trabalho acontece em VMs geridas pela Anthropic, e *"Sessions persist even if
+  you close your browser"*. O Claude publica em branches com prefixo `claude/`.
+- `claude -p "sua mensagem" --cloud <session-id>` enfileira uma mensagem numa
+  sessão que já existe, e sai sem esperar resposta.
+
+**O que não existe, e é o que este laço precisa:**
+
+- O disparo é *fire-and-forget*: *"The request returns once the session is
+  created. It does not stream session output or wait for the session to
+  complete."*
+- O token da routine tem escopo **"One routine only; no read access."** Não há
+  endpoint documentado para ler estado, resultado ou diff de uma sessão de
+  nuvem, nem para cancelá-la.
+- `claude --cloud "<tarefa>"` é interativo e é recusado junto com `-p`; `/tasks`
+  e `--teleport` também são interativos.
+
+Ou seja: dá para **começar** e para **mandar mensagem**. Não dá para **ler de
+volta**. E o laço deste aplicativo é feito de leitura: ele coleta evidência,
+reexecuta verificação e só então o DoneGate conclui. Apresentar isso como
+"orquestração automática completa" seria falso, e é exatamente o que o pedido
+proíbe.
+
+### As alternativas que fechariam o laço — e o que custam
+
+Nenhuma foi provisionada, porque ambas custam dinheiro e isso precisa de
+autorização explícita.
+
+| caminho | fecha o laço? | o que exige | custo |
+|---|---|---|---|
+| **Coordenador próprio** (`apps/coordinator/`, já neste repositório) | sim | hospedar o serviço em algum lugar e conectá-lo em Configurações → Nuvem | a hospedagem, quanto ela custar |
+| **Managed Agents** (`client.beta.sessions`, beta `managed-agents-2026-04-01`) | sim | é a superfície da **plataforma** Claude, não a assinatura | cobrança por API, separada da assinatura |
+| **Routine `/fire` + Claude Code na web** | **não** | um token de routine | nada além da assinatura |
+
+O coordenador é o único que já está escrito. Managed Agents é uma API paga, e o
+pedido é explícito: *"Não introduza API paga como fallback automático"* — então
+ela fica registrada aqui como alternativa distinta, e não é usada sem uma
+autorização de custo dada em palavras.
 
 ## 4. O que continua valendo, sem exceção
 

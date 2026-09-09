@@ -65,7 +65,11 @@ export function PermissionDialog({
         action === "approve" && rule
           ? await api.permission.approve({ requestId: request.id, rule })
           : await api.permission.deny({ requestId: request.id });
-      onDecided(decided);
+      // The decision carries the run's fate, not only the request's: answering
+      // used to record a grant and leave the task stopped for ever. Whichever
+      // way it went, the main process says so in the conversation - which is
+      // where the person is looking next, and which keeps the record.
+      onDecided(decided.request);
       onOpenChange(false);
     } catch (e) {
       setError(messageOf(e));

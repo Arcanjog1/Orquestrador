@@ -641,6 +641,24 @@ export interface PermissionGrantView {
   readonly createdAt: string;
 }
 
+/**
+ * What answering an authorisation actually did.
+ *
+ * The grant alone was never the point. A person authorised an operation, the
+ * row said `approved`, and the task that had stopped for it stayed stopped -
+ * so the answer to "did my authorisation work?" has to carry the run's fate,
+ * not just the request's.
+ */
+export interface PermissionDecisionView {
+  readonly request: PermissionRequestView;
+  /** True when the run that stopped for this request went back to work. */
+  readonly resumed: boolean;
+  /** Why it did not, in words for the person. Null when it did. */
+  readonly notResumedBecause: string | null;
+  /** The rules in force for this project after the decision. */
+  readonly rules: readonly string[];
+}
+
 /** What removing a project would do, told before it is done. */
 export interface ProjectRemovalPlanView {
   readonly projectId: string;
@@ -1484,9 +1502,12 @@ export interface IpcMap {
    * The rule is validated in the main process against that request's own
    * options, so an approval can never be for something the dialog did not show.
    */
-  'permission.approve': { request: { requestId: string; rule: string }; response: PermissionRequestView };
+  'permission.approve': {
+    request: { requestId: string; rule: string };
+    response: PermissionDecisionView;
+  };
   /** Refuses a request. Nothing is granted and the refusal is recorded. */
-  'permission.deny': { request: { requestId: string }; response: PermissionRequestView };
+  'permission.deny': { request: { requestId: string }; response: PermissionDecisionView };
   'permission.grants': { request: { workspaceId: string }; response: readonly PermissionGrantView[] };
   'permission.revoke': { request: { grantId: string }; response: { revoked: boolean } };
 

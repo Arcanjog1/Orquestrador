@@ -1940,11 +1940,38 @@ test('a permission request is answerable in the packaged interface, and grants o
       .catch((e) => String(e));
     assert.ok(widened && /opções/.test(widened), `a widened rule is refused: ${widened}`);
 
+    // The answer carries the run's fate as well as the request's. Recording a
+    // grant and continuing the task that stopped for it are two different
+    // things, and for a long time only the first one happened: the row said
+    // `approved`, the run stayed at NEEDS_HUMAN, and the person's only way
+    // forward was to ask again - which started a whole second run.
     const approved = await window.webContents.executeJavaScript(
       `window.api.permission.approve(${JSON.stringify({ requestId: pending[0].id, rule: 'Bash(node check.mjs)' })})`,
     );
-    assert.equal(approved.status, 'approved');
-    assert.equal(approved.approvedRule, 'Bash(node check.mjs)');
+    assert.equal(approved.request.status, 'approved');
+    assert.equal(approved.request.approvedRule, 'Bash(node check.mjs)');
+    assert.deepEqual(approved.rules, ['Bash(node check.mjs)']);
+    // And the run that stopped for this question goes back to work. This is
+    // the whole incident: the person authorised, the row said `approved`, and
+    // the task stayed stopped for ever.
+    assert.equal(approved.resumed, true, 'the original task continued');
+    assert.equal(approved.notResumedBecause, null);
+
+    // It is a real run in the packaged application, so it is left to finish
+    // rather than abandoned mid-flight - this project has no agents
+    // configured, so it stops quickly, and either way it does not stay at
+    // NEEDS_HUMAN waiting for an authorisation it already has.
+    const settled = await waitFor(
+      async () => {
+        const view = await window.webContents.executeJavaScript(
+          `window.api.run.get(${JSON.stringify({ runId: run.id })})`,
+        );
+        return view.status === 'NEEDS_HUMAN' || view.status === 'RUNNING' ? null : view;
+      },
+      20_000,
+      'the resumed run to settle',
+    );
+    assert.ok(settled, `the resumed run left NEEDS_HUMAN: ${settled?.status}`);
 
     const grants = await window.webContents.executeJavaScript(
       `window.api.permission.grants(${JSON.stringify({ workspaceId: folder.workspace.id })})`,
@@ -2321,6 +2348,22 @@ async function reloadWindow(window) {
   });
   window.webContents.reload();
   await loaded;
+}
+
+/**
+ * Polls until `probe` returns something other than null, or gives up.
+ *
+ * Used where the thing being waited for is a value from the real bridge rather
+ * than text on the screen - a run reaching a state, for instance.
+ */
+async function waitFor(probe, timeoutMs, what) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await probe();
+    if (value !== null && value !== undefined) return value;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`timed out waiting for ${what}`);
 }
 
 async function waitForText(window, pattern, timeoutMs) {

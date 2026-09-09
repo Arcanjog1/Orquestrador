@@ -24,7 +24,11 @@ import { createDesktopFixture, ScriptedAgent } from './helpers/desktop-fixture.j
 import { createGitFixture, type GitFixture } from './helpers/git-fixture.js';
 import { toolPolicyPreamble } from '../apps/desktop/src/main/services/orchestration-service.js';
 import type { DesktopFixture } from './helpers/desktop-fixture.js';
-import type { IpcResult, PermissionRequestView } from '../apps/desktop/src/shared/ipc-contract.js';
+import type {
+  IpcResult,
+  PermissionDecisionView,
+  PermissionRequestView,
+} from '../apps/desktop/src/shared/ipc-contract.js';
 import type { AgentInput } from '../src/core/types.js';
 
 const EXPECTED = 'pronto';
@@ -276,14 +280,23 @@ test('approving grants exactly the scope shown, and only for that workspace', as
       'and nothing was granted by the attempt',
     );
 
-    const approved = value<PermissionRequestView>(
+    // The answer carries the run's fate as well as the request's: recording a
+    // grant and continuing the task that stopped for it are two different
+    // things, and for a long time only the first one happened.
+    const approved = value<PermissionDecisionView>(
       await prepared.fixture.router.handle('permission.approve', {
         requestId: request!.id,
         rule: 'Bash(node check.mjs)',
       }),
     );
-    assert.equal(approved.status, 'approved');
-    assert.equal(approved.approvedRule, 'Bash(node check.mjs)');
+    assert.equal(approved.request.status, 'approved');
+    assert.equal(approved.request.approvedRule, 'Bash(node check.mjs)');
+    assert.deepEqual(approved.rules, ['Bash(node check.mjs)']);
+    // Approving continues the run it stopped, so the loop is going again and
+    // has to be waited for. Before this it went nowhere at all, which is why
+    // this test used to be able to tear the database down immediately.
+    assert.equal(approved.resumed, true);
+    await prepared.fixture.services.orchestration.waitFor(sent.run.id);
 
     const grants = value<Array<{ rule: string; workspaceId: string }>>(
       await prepared.fixture.router.handle('permission.grants', { workspaceId: prepared.workspaceId }),
@@ -339,12 +352,15 @@ test('a refusal is respected, recorded, and grants nothing', async () => {
       await prepared.fixture.router.handle('permission.forRun', { runId: sent.run.id }),
     );
 
-    const denied = value<PermissionRequestView>(
+    const denied = value<PermissionDecisionView>(
       await prepared.fixture.router.handle('permission.deny', { requestId: request!.id }),
     );
-    assert.equal(denied.status, 'denied');
-    assert.ok(denied.decidedAt, 'the refusal has a time');
-    assert.equal(denied.approvedRule, null);
+    assert.equal(denied.request.status, 'denied');
+    assert.ok(denied.request.decidedAt, 'the refusal has a time');
+    assert.equal(denied.request.approvedRule, null);
+    // A refusal never continues the run, and says so rather than going quiet.
+    assert.equal(denied.resumed, false);
+    assert.match(denied.notResumedBecause ?? '', /Nada foi autorizado/);
     assert.deepEqual(prepared.fixture.services.database.permissions.rulesFor(prepared.workspaceId), []);
 
     // It leaves the pending list but stays in the run's history.

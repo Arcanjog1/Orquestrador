@@ -1672,6 +1672,57 @@ test('a build that declares the allow-list flag is sent the file tools, and no s
   assert.equal(args.includes('bypassPermissions'), false);
 });
 
+test('the invocation reports what it carried, so an authorisation can be proven', async () => {
+  // Authorisation proven at the runtime rather than in the database. The grant
+  // row said `approved` both when the rule reached the command line and when
+  // it did not - and for a long time it did not, because nothing supplied
+  // `allowedTools` at all. The result now says which of the two happened.
+  const { manager } = fakeProcessManager({ '--help': CLAUDE_HELP_ALLOWED_TOOLS });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+    allowedTools: () => ['WebFetch(domain:github.com)'],
+  });
+
+  const result = await adapter.run({
+    prompt: 'x',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'run-1',
+    iteration: 1,
+  });
+
+  assert.deepEqual(result.authorisedTools, [
+    'Read',
+    'Write',
+    'Edit',
+    'Glob',
+    'Grep',
+    'WebFetch(domain:github.com)',
+  ]);
+});
+
+test('a build with no allow-list flag reports carrying nothing, rather than lying', async () => {
+  const { manager } = fakeProcessManager({ '--help': CLAUDE_HELP });
+  const adapter = new ClaudeCodeAdapter({
+    processManager: manager,
+    resolveExecutable: async () => '/managed/claude.exe',
+    buildEnvironment: () => ({}),
+    allowedTools: () => ['Bash(node check.mjs)'],
+  });
+
+  const result = await adapter.run({
+    prompt: 'x',
+    workingDirectory: '/work',
+    timeoutMs: 1000,
+    runId: 'r',
+    iteration: 1,
+  });
+
+  assert.deepEqual(result.authorisedTools, []);
+});
+
 test('a build whose help does not declare the flag is sent no allow-list at all', async () => {
   const { manager, calls } = fakeProcessManager({ '--help': CLAUDE_HELP });
   const adapter = new ClaudeCodeAdapter({

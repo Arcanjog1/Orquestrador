@@ -350,6 +350,19 @@ export interface AgentResult {
    */
   deniedCalls?: readonly DeniedToolCall[];
   /**
+   * The `--allowedTools` rules this invocation actually carried.
+   *
+   * Authorisation proven at the runtime rather than in the database. A person
+   * approved an operation, the row said `approved`, and the next call was
+   * refused anyway - twice over: the rules were never passed to the CLI at
+   * all, and the one that would have been passed used a syntax the CLI does
+   * not match. Neither was visible from the grant row, which said the same
+   * thing in both cases. This is what was on the command line.
+   *
+   * Absent for an adapter that has no such flag; empty is a real answer.
+   */
+  authorisedTools?: readonly string[];
+  /**
    * The provider's own id for the session this invocation ran in.
    *
    * Recorded so the next delegation to the *same* connection can continue it.

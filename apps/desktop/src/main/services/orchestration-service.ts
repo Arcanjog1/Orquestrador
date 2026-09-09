@@ -47,8 +47,10 @@ import {
   GitEvidenceCollector,
   Verifier,
   commandPassed,
+  decideResumption,
   evaluateConversationDone,
   evaluateDone,
+  explainRefusal,
   formatDoneRejection,
   isMechanicalFailure,
   modelUnavailableIn,
@@ -99,7 +101,7 @@ import { classifyCreditFailure } from '../../../../../src/routing/credit-failure
 import { buildWorkerPrompt } from '../../../../../src/orchestrator/worker-prompt.js';
 import type { ContextEntry } from '../../../../../src/context/project-context.js';
 import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
-import type { DeniedToolCall } from '../core.js';
+import type { DeniedToolCall, ResumptionDecision } from '../core.js';
 import { toMessageView, toRunDetailView, toRunView } from './views.js';
 import { BudgetLedger, isAgentProvider } from '../core.js';
 import type { BudgetLimits, ProviderCapabilities } from '../core.js';
@@ -423,12 +425,19 @@ export class OrchestrationService {
     if (!controller) {
       // A run waiting at the human gate is not running, but it is still
       // open. Cancelling it closes the question: the person chose to stop.
+      // A run waiting at a gate is not running, but it is still open.
+      // `NEEDS_HUMAN` is one of those gates now that an authorisation can
+      // continue a run: cancelling has to close the question for good, so an
+      // approval arriving afterwards cannot start the work the person just
+      // stopped. `requestCancel` above already settles it, and this makes the
+      // state say so rather than leaving a run that looks resumable.
       const run = this.database.runs.find(runId);
-      if (run && run.status === 'BLOCKED') {
-        this.database.runs.setStatus(runId, 'CANCELLED', 'Encerrada pelo usuário na revisão humana.');
-        this.step(runId, run.iteration, 'cancelled', 'dismissed', 'Encerrada na revisão humana.');
+      if (run && (run.status === 'BLOCKED' || run.status === 'NEEDS_HUMAN')) {
+        const where = run.status === 'BLOCKED' ? 'na revisão humana' : 'enquanto aguardava você';
+        this.database.runs.setStatus(runId, 'CANCELLED', `Encerrada pelo usuário ${where}.`);
+        this.step(runId, run.iteration, 'cancelled', 'dismissed', `Encerrada ${where}.`);
         if (run.session_id) {
-          this.say(run.session_id, runId, 'system', 'Execução encerrada na revisão humana.');
+          this.say(run.session_id, runId, 'system', `Execução encerrada ${where}.`);
           this.progress(runId, run.session_id, 'cancelled', 'Encerrada.', 'CANCELLED');
         }
         return true;
@@ -487,33 +496,122 @@ export class OrchestrationService {
       kind: isConversation(workspace) ? 'conversation' : 'coding',
     });
 
+    this.launch(run.id, session.id, workspace, input.objective, 1);
+    return toRunView(this.database.runs.require(run.id), []);
+  }
+
+  /**
+   * Continues a run that stopped for an authorisation, now that it has one.
+   *
+   * The half that was missing. `permission.approve` wrote a grant row and
+   * returned; the run stayed at `NEEDS_HUMAN` for ever, while the prompt the
+   * worker had been given promised "the task will be delegated again once they
+   * do". The person authorised, nothing continued, and the only way forward
+   * was to ask again - which created a *second* run with none of the first
+   * one's history and a fresh, higher model assessment for a question that had
+   * never needed one.
+   *
+   * `decideResumption` decides, and it decides cancellation first: a run the
+   * person stopped is not restarted by an authorisation that lands afterwards.
+   * The run continues from the iteration it stopped at, so its budget is the
+   * one it had - resuming is not a new run wearing the old one's id.
+   */
+  resumeAfterApproval(runId: string): ResumptionDecision {
+    const run = this.database.runs.find(runId);
+    if (!run) return { resume: false, because: 'finished' };
+    const decision = decideResumption({
+      status: run.status,
+      // Read from the row, not from an in-memory controller: a cancellation
+      // survives a restart, and this decision has to survive one too.
+      cancelRequested: this.database.runs.cancelRequested(runId),
+      running: this.active.has(runId),
+      pending: this.database.permissions
+        .forRun(runId)
+        .filter((request) => request.status === 'pending').length,
+      approvedForRun: this.database.permissions
+        .forRun(runId)
+        .filter((request) => request.status === 'approved').length,
+      grantedRules: this.grantsFor(run.workspace_id),
+    });
+    if (!decision.resume) {
+      // Said out loud, in the conversation, rather than left as silence. The
+      // whole defect this fixes was a decision nobody could see.
+      if (run.session_id && decision.because !== 'already-running') {
+        this.say(run.session_id, runId, 'system', explainRefusal(decision.because));
+      }
+      return decision;
+    }
+
+    const workspace = this.database.workspaces.require(run.workspace_id);
+    const sessionId = run.session_id;
+    if (!sessionId) return { resume: false, because: 'not-waiting' };
+    const approved = this.database.permissions
+      .forRun(runId)
+      .filter((request) => request.status === 'approved');
+    const refused = this.database.permissions
+      .forRun(runId)
+      .filter((request) => request.status === 'denied');
+    const note =
+      `Você autorizou ${approved.length === 1 ? '1 operação' : `${approved.length} operações`}` +
+      `${approved.length > 0 ? `: ${approved.map((r) => r.approved_rule ?? r.tool_name).join(', ')}` : ''}.` +
+      (refused.length > 0
+        ? ` Recusou: ${refused.map((r) => r.tool_name).join(', ')} - não peça de novo.`
+        : '') +
+      ' Continuando a tarefa original de onde ela parou.';
+    this.say(sessionId, runId, 'system', note);
+    this.step(runId, run.iteration, 'permission', 'resumed', note.slice(0, 500), {
+      approvedRules: decision.rules,
+    });
+    // From the iteration it stopped at, not from one. The run keeps the budget
+    // it had left; an authorisation is not a way to buy eight more rounds.
+    this.launch(runId, sessionId, workspace, run.objective, Math.max(1, run.iteration), note);
+    return decision;
+  }
+
+  /**
+   * Starts the loop for a run row that already exists, and gives it back
+   * whatever it took, on every path out.
+   *
+   * One place, used by `start` and by `resumeAfterApproval`, because the
+   * bookkeeping in the `finally` - the project's standing note, the closed
+   * exchange, the released environment - has to happen exactly once per
+   * attempt and a second copy of it would eventually drift from this one.
+   */
+  private launch(
+    runId: string,
+    sessionId: string,
+    workspace: WorkspaceWithAgents,
+    objective: string,
+    startIteration: number,
+    resumptionNote?: string,
+  ): void {
     const controller = new AbortController();
-    this.active.set(run.id, controller);
+    this.active.set(runId, controller);
     this.startSweeping();
 
-    void this.execute(run.id, workspace, input.objective, controller)
+    void this.execute(runId, workspace, objective, controller, startIteration, resumptionNote ?? null)
       .catch((error: unknown) => {
         const reason = describeError(error);
-        this.database.runs.setStatus(run.id, 'FAILED', reason);
-        this.step(run.id, this.database.runs.require(run.id).iteration, 'error', 'failed', reason, {
+        this.database.runs.setStatus(runId, 'FAILED', reason);
+        this.step(runId, this.database.runs.require(runId).iteration, 'error', 'failed', reason, {
           error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
         });
-        this.say(session.id, run.id, 'system', `Falhou: ${reason}`);
-        this.progress(run.id, session.id, 'failed', 'Falhou.', 'FAILED');
+        this.say(sessionId, runId, 'system', `Falhou: ${reason}`);
+        this.progress(runId, sessionId, 'failed', 'Falhou.', 'FAILED');
       })
       .finally(() => {
-        this.active.delete(run.id);
-        this.runners.delete(run.id);
-        this.phaseClock.delete(run.id);
+        this.active.delete(runId);
+        this.runners.delete(runId);
+        this.phaseClock.delete(runId);
         // The project's standing note about its own state, written once, from
         // the one place every path out of the loop passes through - so a run
         // that failed leaves a record saying it failed, rather than the
         // project's last note being a success from three runs ago.
-        const finished = this.database.runs.find(run.id);
+        const finished = this.database.runs.find(runId);
         if (finished) {
           this.recordProjectState({
-            workspaceId: run.workspace_id,
-            runId: run.id,
+            workspaceId: workspace.id,
+            runId,
             objective: finished.objective,
             status: finished.status,
             summary: finished.termination_reason ?? 'sem resumo',
@@ -522,16 +620,14 @@ export class OrchestrationService {
         // The run's ending, on the record, from the one place every path out
         // of the loop passes through. Hooking each `setStatus` instead would
         // mean eleven call sites and a twelfth one day that forgets.
-        this.closeExchange(run.id, session.id);
+        this.closeExchange(runId, sessionId);
         if (this.active.size === 0) this.stopSweeping();
         // Whatever the run cost - a container, a clone, a lease - is given
         // back exactly once, on every path out of the loop.
-        const environment = this.environments.get(run.id);
-        this.environments.delete(run.id);
+        const environment = this.environments.get(runId);
+        this.environments.delete(runId);
         void environment?.release?.().catch(() => {});
       });
-
-    return toRunView(this.database.runs.require(run.id), []);
   }
 
   /**
@@ -618,6 +714,10 @@ export class OrchestrationService {
     workspace: WorkspaceWithAgents,
     objective: string,
     controller: AbortController,
+    /** Where the loop starts. Above 1 only when a stopped run is continuing. */
+    startIteration = 1,
+    /** What changed while the run was stopped, for the orchestrator to read. */
+    resumptionNote: string | null = null,
   ): Promise<void> {
     const sessionId = this.database.runs.require(runId).session_id!;
     const signal = controller.signal;
@@ -814,7 +914,13 @@ export class OrchestrationService {
      * memory rather than the workspace.
      */
     const requestedFileChecks = new Map<string, FileCheckRequest>();
-    let feedback: string | null = null;
+    // A resumed run does not start from nothing: the orchestrator's first
+    // round reads what changed while the run was stopped - which operation the
+    // person authorised, and which they refused - so it continues the task
+    // instead of planning it again from the objective alone.
+    let feedback: string | null = resumptionNote
+      ? `A EXECUÇÃO FOI RETOMADA. ${resumptionNote}`
+      : null;
 
     // Routing state for this run: what each worker's CLI can take (read once
     // per worker), the attempts so far as the router reads them, the models a
@@ -849,7 +955,7 @@ export class OrchestrationService {
     // ("continue", "now also do X") is read against what came before it.
     const history = this.conversationBefore(sessionId, runId);
 
-    for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+    for (let iteration = Math.max(1, startIteration); iteration <= maxIterations; iteration += 1) {
       if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
       this.database.runs.setIteration(runId, iteration);
 
@@ -1822,10 +1928,32 @@ export class OrchestrationService {
         return `  ${slot.id} - ${slot.label}: ${can}`;
       }),
       '',
+      // Which repository this project is, when it is one.
+      //
+      // The incident: a project connected to a GitHub repository asked whether
+      // the orchestrator could reach it. The prompt said "there is no
+      // repository", so the supervisor delegated a web fetch to find out, the
+      // non-interactive runtime refused the tool for lack of authorisation,
+      // and the answer came back reading as though the repository might not
+      // exist. It did exist, and it was named right here in the project.
+      ...(input.workspace.repository_url
+        ? [
+            `REPOSITORY: ${input.workspace.repository_url}` +
+              (input.workspace.default_branch ? ` (branch ${input.workspace.default_branch})` : ''),
+            '  This project IS connected to that repository. The application reads it through',
+            '  the GitHub API; a worker does not fetch it, and must never be asked to. If you',
+            '  need something from the repository that is not in front of you, say which part',
+            '  is missing rather than delegating a fetch.',
+            '  A refused tool is never evidence about the repository. If a worker reports a',
+            '  refusal, that says the worker lacked a permission - nothing about whether the',
+            '  repository, a branch or a file exists.',
+            '',
+          ]
+        : []),
       ...(input.conversation
         ? [
-            'THIS IS A CONVERSATION RUN. There is no workspace, no repository and no command',
-            'to run. Nothing you or a worker says will change a file, and you must not claim',
+            'THIS IS A CONVERSATION RUN. There is no working folder and no command to run.',
+            'Nothing you or a worker says will change a file, and you must not claim',
             'otherwise, ask for a verification, or describe a diff. Finish by answering the',
             'objective: reply with action "done", put the final answer for the person in',
             '"summary", and list in "satisfiedCriteria" the criteria your own review of the',
@@ -2077,8 +2205,22 @@ export class OrchestrationService {
         ...input.tools.filter((tool) => !described.has(tool)).map((toolName) => ({ toolName })),
       ];
 
+      // What the person already refused in this project. Asked once, and not
+      // again: "Se o usuário recusar a autorização, respeite a recusa e não
+      // solicite a mesma permissão indefinidamente." A refusal outlives the
+      // run it was given in, so this is read per workspace.
+      const refused = new Set(
+        this.database.permissions
+          .refusedIn(input.workspaceId)
+          .map((row) => `${row.tool_name}\u0000${row.command ?? ''}`),
+      );
+
       const created: Array<{ id: string; toolName: string }> = [];
       for (const call of entries.slice(0, 10)) {
+        const key = `${call.toolName}\u0000${call.command ?? ''}`;
+        // Already refused. The decision stands; nothing is asked again, and
+        // the worker is told about the refusal in its own preamble instead.
+        if (refused.has(key)) continue;
         // A question already waiting for this exact call is not asked twice.
         const alreadyAsked = this.database.permissions
           .forRun(input.runId)
@@ -2133,6 +2275,28 @@ export class OrchestrationService {
   private grantsFor(workspaceId: string): readonly string[] {
     try {
       return this.database.permissions.rulesFor(workspaceId);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * What the person refused in this project, in words for the worker.
+   *
+   * The counterpart of `grantsFor`. A refusal that only the application knows
+   * about is a refusal the worker keeps walking into: it calls the tool, the
+   * call is denied, and - because the same question is never asked twice -
+   * nothing on screen explains the loop.
+   */
+  private refusalsFor(workspaceId: string): readonly string[] {
+    try {
+      return [
+        ...new Set(
+          this.database.permissions
+            .refusedIn(workspaceId)
+            .map((row) => (row.command ? `${row.tool_name}(${row.command})` : row.tool_name)),
+        ),
+      ].slice(0, 20);
     } catch {
       return [];
     }
@@ -2442,7 +2606,11 @@ export class OrchestrationService {
     // with no list, three times in one run. The criteria existed: they were in
     // the decision, in the ledger and in the gate. They were simply never sent.
     const workerPrompt = buildWorkerPrompt({
-      preamble: toolPolicyPreamble(this.grantsFor(workspace.id)),
+      preamble: toolPolicyPreamble(
+        this.grantsFor(workspace.id),
+        this.refusalsFor(workspace.id),
+        workspace.repository_url,
+      ),
       task,
       criteria: input.decision.acceptanceCriteria,
     });
@@ -2732,6 +2900,30 @@ export class OrchestrationService {
       });
       // The row the report will be attached to, once the evidence exists.
       last.invocationId = invocationId;
+
+      // Authorisation, proven at the runtime.
+      //
+      // The rule the person approved either was on the command line or was
+      // not, and until this step existed nobody could tell: the grant row said
+      // `approved` whether the rules reached the CLI (they did not - nothing
+      // supplied them) and whether the rule was one the CLI can match (it was
+      // not - it carried a URL). Both failures looked identical from the
+      // database, and both produced the same "you haven't granted it yet".
+      if (result.authorisedTools) {
+        const sent = new Set(result.authorisedTools);
+        const granted = this.grantsFor(workspace.id);
+        const missing = granted.filter((rule) => !sent.has(rule));
+        this.step(
+          runId,
+          iteration,
+          'permission',
+          missing.length > 0 ? 'not-carried' : 'carried',
+          missing.length > 0
+            ? `Regras autorizadas que NÃO foram enviadas ao CLI: ${missing.join(', ')}.`
+            : `Enviadas ao CLI: ${result.authorisedTools.join(', ') || 'nenhuma'}.`,
+          { authorisedTools: [...result.authorisedTools], granted: [...granted] },
+        );
+      }
       // Close the delegation, and publish what came back.
       //
       // The distinction that matters: `complete` means this message's
@@ -3595,7 +3787,11 @@ function contextKindOf(kind: string): ContextEntry['kind'] {
  * can approve it. What this prevents is reaching for PowerShell to write six
  * bytes that `Write` writes without asking anyone.
  */
-export function toolPolicyPreamble(grants: readonly string[]): string {
+export function toolPolicyPreamble(
+  grants: readonly string[],
+  refusals: readonly string[] = [],
+  repository: string | null = null,
+): string {
   const lines = [
     'TOOL POLICY FOR THIS DELEGATION (from the application, not from the task):',
     '- Read, Write, Edit, Glob and Grep run without asking, inside the working directory.',
@@ -3608,10 +3804,36 @@ export function toolPolicyPreamble(grants: readonly string[]): string {
       `- Approved by the person for this project, and only these: ${grants.join(', ')}.`,
     );
   }
+  // What the person said no to. Without this the worker reaches for the same
+  // tool every round, the application declines to ask again - because a
+  // refusal is a decision - and the run goes in circles with nobody saying
+  // why.
+  if (refusals.length > 0) {
+    lines.push(
+      `- REFUSED by the person, and not up for asking again: ${refusals.join(', ')}.`,
+      '  Do not call these. Do the task another way, or say what is missing.',
+    );
+  }
+  // A repository question is answered by the application, not by the worker
+  // fetching a web page. The incident: a read-only question about a GitHub
+  // repository sent the worker to WebFetch, the runtime refused it for lack
+  // of authorisation, and the answer that came back read as though the
+  // repository might not exist. It did exist. A refused tool says nothing
+  // whatsoever about a repository.
+  if (repository) {
+    lines.push(
+      `- This project is connected to the repository ${repository}. The application reads it`,
+      '  through the GitHub API and puts what it read in your task. You do NOT need WebFetch,',
+      '  curl or a browser for it. If something about the repository is missing from your task,',
+      '  say which part is missing rather than fetching it yourself.',
+    );
+  }
   lines.push(
     '- If the task genuinely needs a command run, say so plainly in your answer and name',
     '  the exact command. The application will ask the person to approve that command,',
     '  and the task will be delegated again once they do. Do not work around a refusal.',
+    '- Never conclude that something does not exist because a tool was refused. A refusal is',
+    '  about permission, not about the world: report that you could not check, and why.',
   );
   return lines.join('\n');
 }

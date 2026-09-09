@@ -195,7 +195,9 @@ export class AppServices {
     );
     this.chat = new ChatService(this.database, this.orchestration);
     this.projects = new ProjectService(this.database);
-    this.permissions = new PermissionService(this.database);
+    // The orchestrator is the resumer: answering an authorisation has to
+    // continue the task that stopped for it, not just record a row.
+    this.permissions = new PermissionService(this.database, this.orchestration);
     this.workspaces.bindActivity((workspaceId) => this.orchestration.hasActiveRunInWorkspace(workspaceId));
     this.github = new GitHubService(
       this.database,
@@ -430,6 +432,15 @@ export class AppServices {
       }),
       model: selection === 'manual' ? workspace.worker_model : null,
       effort: selection === 'manual' ? workspace.worker_reasoning : null,
+      // What the person authorised in this project, read at spawn time.
+      //
+      // This option existed and nothing ever supplied it, so every grant a
+      // person approved was written to the database and never reached the
+      // command line. That is half of why authorising changed nothing; the
+      // other half was the rule syntax. Read here, per invocation, so an
+      // approval given a second ago applies to the next delegation without
+      // rebuilding anything.
+      allowedTools: () => this.database.permissions.rulesFor(workspace.id),
     });
     const workers = await this.buildWorkers(workspace, workerBindings, accountId, {
       runner: worker,
@@ -542,6 +553,10 @@ export class AppServices {
       }),
       model: selection === 'manual' ? (binding?.model ?? workspace.worker_model) : null,
       effort: selection === 'manual' ? (binding?.reasoning ?? workspace.worker_reasoning) : null,
+      // Same reason as above. `workspace.id` is empty on the capability probe,
+      // which asks the binary about itself and runs nothing, so it authorises
+      // nothing either.
+      allowedTools: () => (workspace.id ? this.database.permissions.rulesFor(workspace.id) : []),
     });
   }
 
