@@ -101,6 +101,7 @@ export function parseDecision(raw: string): ParseResult {
   if (typeof obj.workerId === 'string' && obj.workerId.trim()) {
     decision.workerId = obj.workerId.trim();
   }
+  if(obj.taskKind!=null){if(typeof obj.taskKind!=='string'||!['IMPLEMENTATION','CODE_REVIEW','UI_UX','TESTING','RESEARCH','IMAGE'].includes(obj.taskKind))return fail('Invalid taskKind',raw);decision.taskKind=obj.taskKind;}
   if (typeof obj.requiresTools === 'boolean') decision.requiresTools = obj.requiresTools;
 
   // Under the strict schema every field is present, and an absent value is

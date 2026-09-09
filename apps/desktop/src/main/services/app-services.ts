@@ -195,7 +195,7 @@ export class AppServices {
       this.orchestrationOptions(options.orchestration ?? {}),
       // Tests supplying their own runners are supplying their own agents too,
       // so there is nothing to check.
-      options.createRunners ? async () => null : (workspace) => this.checkAgentsReady(workspace),
+      options.createRunners ? async () => null : (workspace,supervisorOnly) => this.checkAgentsReady(workspace,supervisorOnly),
     );
     this.chat = new ChatService(this.database, this.orchestration);
     this.projects = new ProjectService(this.database);
@@ -310,7 +310,7 @@ export class AppServices {
    * hang until its timeout with no explanation. One sentence now beats fifteen
    * silent minutes.
    */
-  private async checkAgentsReady(workspace: WorkspaceWithAgents): Promise<string | null> {
+  private async checkAgentsReady(workspace: WorkspaceWithAgents,supervisorOnly=false): Promise<string | null> {
     const team = this.database.workspaces.team(workspace.id);
     const workers = team.filter((member) => member.role === 'CODING_WORKER');
     const roles: Array<readonly [string | null, string, string]> = [
@@ -322,7 +322,7 @@ export class AppServices {
         : [[workspace.worker_agent_id, 'que executa', 'Anthropic (Claude)'] as const]),
     ];
 
-    for (const [agentId, what, provider] of roles) {
+    for (const [agentId, what, provider] of (supervisorOnly?roles.slice(0,1):roles)) {
       if (!agentId) return `Escolha a conta ${what} este projeto em Equipe.`;
       const agent = this.database.agents.find(agentId);
       if (!agent) return `O agente ${what} este projeto não existe mais. Escolha a conta em Equipe.`;
@@ -416,7 +416,9 @@ export class AppServices {
       };
     }
 
-    const orchestrator = new CodexAdapter({
+    const orchestrator = orchestratorAgent?.provider_id==='anthropic'
+      ? this.claudeAdapterFor(workspace,orchestratorAccountId,null)
+      : new CodexAdapter({
       processManager: this.processManager,
       resolveExecutable: () => this.runtimeManager.getExecutablePath('codex'),
       // The decision shape is the orchestrator's contract, not the adapter's,
@@ -509,14 +511,14 @@ export class AppServices {
           providerId: account?.provider_id ?? null,
           connectionKind: 'api',
           agentId: binding.agentId,
-          routing:{provider:account?.provider_id==='openai'?'openai':'anthropic',selection:'manual',manual:{model:binding.model??agent?.model??account?.default_model??null,reasoning:binding.reasoning??account?.default_reasoning??null},capabilities:async()=>({modelFlag:true,effortFlag:true,declaredModels:null,declaredEfforts:['low','medium','high','max']})},
+          routing:{provider:account?.provider_id==='openai'?'openai':'anthropic',selection:'manual',manual:{model:binding.model??agent?.model??account?.default_model??null,reasoning:binding.reasoning??account?.default_reasoning??null},capabilities:()=>api.describeCapabilities!()},
         });
         continue;
       }
       // Not an API connection: the official CLI, on the person's subscription.
       // The first slot reuses the adapter already built above, so a
       // single-worker project behaves exactly as it always has.
-      if (index === 0 && cli) {
+      if (index === 0 && cli && account?.provider_id!=='openai') {
         slots.push({
           id,
           label,
@@ -529,7 +531,7 @@ export class AppServices {
         });
         continue;
       }
-      const adapter = this.claudeAdapterFor(workspace, connectionId, binding);
+      const adapter = account?.provider_id==='openai' ? this.codexAdapterFor(connectionId) : this.claudeAdapterFor(workspace, connectionId, binding);
       slots.push({
         id,
         label,
@@ -539,7 +541,7 @@ export class AppServices {
         connectionKind: 'cli',
         agentId: binding.agentId,
         routing: {
-          provider: 'anthropic',
+          provider: account?.provider_id==='openai'?'openai':'anthropic',
           selection: isWorkerSelection(binding.selection) ? binding.selection : 'auto',
           manual: { model: binding.model, reasoning: binding.reasoning },
           capabilities: () => adapter.describeCapabilities(workspace.local_path || process.cwd()),
@@ -557,6 +559,26 @@ export class AppServices {
       workers: slots,
       budget: this.budgetOf(workspace),
     };
+  }
+
+  private codexAdapterFor(connectionId:string|null):CodexAdapter {
+    return new CodexAdapter({processManager:this.processManager,
+      resolveExecutable:()=>this.runtimeManager.getExecutablePath('codex'),
+      buildEnvironment:()=>({...this.runtimeManager.childEnvironmentOverlay('codex'),...(connectionId?this.codexAccountManager.buildEnvironment(connectionId):{})})});
+  }
+
+  async agentModels(accountId:string):Promise<import('../../shared/agent-policy.js').ModelCatalogEntry[]> {
+    const account=this.database.accounts.require(accountId);
+    if(account.connection_kind==='api') {
+      const api=this.apiProviderFor(accountId,'');
+      if(!api) return [];
+      const models=await api.getAvailableModels();
+      return models.map(m=>({id:m.id,provider:account.provider_id as 'openai'|'anthropic',source:'provider' as const,reasoning:[],accountAllowed:null}));
+    }
+    const adapter=account.provider_id==='openai'?this.codexAdapterFor(accountId):this.claudeAdapterFor({local_path:'',id:''} as WorkspaceWithAgents,accountId,null);
+    const capabilities=await adapter.describeCapabilities();
+    const cached=adapter instanceof CodexAdapter?adapter.cachedModels():[];
+    return (capabilities.declaredModels??[]).map(id=>({id,provider:account.provider_id as 'openai'|'anthropic',source:'runtime' as const,reasoning:[...(cached.find(m=>m.id===id)?.reasoning??capabilities.declaredEfforts??[])],accountAllowed:null}));
   }
 
   /** One Claude Code adapter, bound to one connection's isolated profile. */

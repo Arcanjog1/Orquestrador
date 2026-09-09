@@ -77,6 +77,26 @@ export class CodexAdapter implements AgentRunner {
 
   constructor(private readonly options: CodexAdapterOptions) {}
 
+  async describeCapabilities(cwd=process.cwd()):Promise<import('../../../../../src/routing/provider-policy.js').WorkerRuntimeCapabilities> {
+    const executable=await this.options.resolveExecutable();
+    const caps=await readCapabilities(this.options.processManager,executable,cwd,['exec','--help'],this.environment());
+    if(caps.probe.state!=='OK') throw CodexCapabilityError.fromProbe(executable,caps.probe);
+    const models=this.cachedModels();
+    return {modelFlag:caps.flags.has('--model'),effortFlag:caps.flags.has('--config'),
+      declaredModels:models.length?models.map(m=>m.id):null,
+      modelEfforts:Object.fromEntries(models.map(m=>[m.id,m.reasoning])),
+      declaredEfforts:codexSupportedEfforts(await this.readVersion(executable,cwd))};
+  }
+
+  cachedModels():Array<{id:string;reasoning:string[]}> {
+    const home=this.environment().CODEX_HOME;
+    if(!home) return [];
+    try {
+      const data=JSON.parse(readFileSync(join(home,'models_cache.json'),'utf8')) as {models?:Array<{slug?:string;supported_reasoning_levels?:Array<{effort?:string}>}>};
+      return (data.models??[]).filter(m=>typeof m.slug==='string').map(m=>({id:m.slug!,reasoning:(m.supported_reasoning_levels??[]).flatMap(r=>r.effort?[r.effort]:[])}));
+    } catch { return []; }
+  }
+
   /**
    * The environment **every** child of this adapter runs under.
    *
@@ -110,7 +130,7 @@ export class CodexAdapter implements AgentRunner {
       // Built before the plan, so the capability probe inside `buildArgs`
       // runs under exactly the environment the real invocation will.
       const env = this.environment(input.env);
-      const plan = await this.buildArgs(executable, input.workingDirectory, scratch, routing, env);
+      const plan = await this.buildArgs(executable, input.workingDirectory, scratch, routing, env, input.toolPolicy);
       if (input.strictRouting && ((routing.model && plan.applied.model !== routing.model) || (routing.reasoning && !plan.applied.reasoning))) throw new Error('O runtime não permite garantir o teto configurado. Atualize o runtime.');
 
       // Liveness for the supervisor too.
@@ -267,6 +287,7 @@ export class CodexAdapter implements AgentRunner {
     scratch: string,
     routing: { model: string | null; reasoning: string | null },
     env: Record<string, string | undefined>,
+    toolPolicy?: AgentInput['toolPolicy'],
   ): Promise<CodexPlan> {
     this.capabilities ??= await readCapabilities(
       this.options.processManager,
@@ -329,7 +350,21 @@ export class CodexAdapter implements AgentRunner {
     // The orchestrator supervises; the worker edits. Read-only makes that the
     // sandbox's rule rather than a line in a prompt.
     if (this.execCapabilities.flags.has('--sandbox')) {
-      args.push('--sandbox', 'read-only');
+      args.push('--sandbox', toolPolicy?.includes('write')?'workspace-write':'read-only');
+    }
+    if(toolPolicy) {
+      if(!this.execCapabilities.flags.has('--sandbox')||!this.execCapabilities.flags.has('--config')) throw new Error('Este runtime não garante a política de ferramentas.');
+      if(toolPolicy.includes('image')) throw new Error('Geração de imagem indisponível neste adapter.');
+      args.push('--config','approval_policy="never"','--config',`web_search="${toolPolicy.includes('web')?'live':'disabled'}"`);
+      // A read-only sandbox enforces non-mutation, including shell commands.
+      // For write-only tools the shell must also be disabled: it could bypass the contract.
+      if(!toolPolicy.includes('commands')) args.push('--config','features.shell_tool=false','--config','features.unified_exec=false');
+      args.push('--config','features.multi_agent=false','--config','features.apps=false');
+      const home=env.CODEX_HOME;
+      if(home) {
+        const config=readIfPresent(join(home,'config.toml'))??'';
+        if(/\[mcp_servers[.\]]/.test(config)) throw new Error('Este perfil possui ferramentas MCP que o adapter não consegue restringir. Use um perfil isolado sem MCP.');
+      }
     }
 
     // Structured output, when this build supports it: tell Codex the shape the

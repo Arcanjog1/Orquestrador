@@ -338,7 +338,7 @@ export class AgentSessionRepository extends Repository {
  * Agents
  * ------------------------------------------------------------------ */
 
-export type AgentRoleName = 'ORCHESTRATOR' | 'CODING_WORKER';
+export type AgentRoleName = string;
 
 export interface AgentRecord extends SqlRow {
   id: string;
@@ -547,7 +547,19 @@ export class WorkspaceRepository extends Repository {
         input.pathKey ?? '',
       ],
     );
+    this.applyDefaultTeam(input.id);
     return this.require(input.id);
+  }
+
+  /** Applies defaults only to a newly created workspace, never overwrites a saved team. */
+  applyDefaultTeam(workspaceId:string):void {
+    const row=this.db.get<{document:string}>('SELECT document FROM agent_policy_scopes WHERE scope=?',['global']);
+    if(!row)return;
+    const team=(JSON.parse(row.document) as {defaultTeam?:{orchestrator:string;agents:string[]}}).defaultTeam;
+    if(!team)return;
+    const ids=[team.orchestrator,...team.agents];
+    if(ids.some(id=>!this.db.get('SELECT 1 FROM agents WHERE id=? AND enabled=1',[id])))return;
+    this.setTeam(workspaceId,{agentId:team.orchestrator},team.agents.map(agentId=>({agentId})));
   }
 
   /** How a cloud project's work is published when a run ends. */
@@ -1879,6 +1891,10 @@ export class RunRepository extends Repository {
     } | null;
   }): string {
     const id = input.id ?? newId('inv');
+    const previousSnapshot=this.db.get<{agent_snapshot:string|null}>('SELECT agent_snapshot FROM agent_invocations WHERE id=?',[id])?.agent_snapshot;
+    const snapshotAgent=input.agentId?this.db.get<{display_name:string;role:string;provider_id:string;adapter_id:string}>('SELECT display_name,role,provider_id,adapter_id FROM agents WHERE id=?',[input.agentId]):undefined;
+    const snapshotAccount=input.accountId?this.db.get<{display_name:string}>('SELECT display_name FROM accounts WHERE id=?',[input.accountId]):undefined;
+    const agentSnapshot=previousSnapshot??JSON.stringify({id:input.agentId,name:snapshotAgent?.display_name??null,role:snapshotAgent?.role??input.role,provider:snapshotAgent?.provider_id??input.providerId??null,adapter:snapshotAgent?.adapter_id??null,accountId:input.accountId,accountName:snapshotAccount?.display_name??null,model:input.routing?.resolvedModel??null});
     if (input.id) {
       const previous = this.db.get<{outcome: string}>('SELECT outcome FROM agent_invocations WHERE id = ?', [id]);
       if (previous && previous.outcome !== 'running') return id;
@@ -1931,6 +1947,7 @@ export class RunRepository extends Repository {
       ] as SqlValue[],
     );
     if (routing?.observation) this.db.run('UPDATE agent_invocations SET routing_observation=? WHERE id=?',[JSON.stringify(routing.observation),id]);
+    this.db.run('UPDATE agent_invocations SET agent_snapshot=? WHERE id=?',[agentSnapshot,id]);
     if (input.outcome !== 'running') this.addConsumption(input.runId, usage);
     return id;
   }

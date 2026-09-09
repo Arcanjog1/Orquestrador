@@ -55,6 +55,14 @@ export const REQUEST_CHANNELS = [
   'workspace.push',
 
   'agents.manage',
+  'agents.roles',
+  'agents.models',
+  'agents.policies',
+  'agents.savePolicies',
+  'agents.projectPolicy',
+  'agents.saveProjectPolicy',
+  'agents.calls',
+  'agents.confirmModel',
   'agents.create',
   'agents.update',
   'agents.remove',
@@ -318,7 +326,7 @@ export interface RepositoryAnalysisView {
 
 export interface AgentInputView {
   readonly name: string;
-  readonly role: TeamRole;
+  readonly role: string;
   readonly provider: ProviderName;
   readonly accountId: string;
   readonly model: string | null;
@@ -326,10 +334,13 @@ export interface AgentInputView {
   readonly maxCapability: (typeof ACCOUNT_CAPABILITY_TIERS)[number] | null;
   readonly maxReasoning: (typeof ACCOUNT_REASONING_TIERS)[number] | null;
   readonly enabled: boolean;
+  readonly policy?: import('./agent-policy.js').AgentPolicy;
 }
 export interface ManagedAgentView extends AgentView, AgentInputView {
   readonly accountId: string;
-  readonly role: TeamRole;
+  readonly role: string;
+  readonly availability?: 'ACTIVE' | 'DISABLED' | 'UNAVAILABLE';
+  readonly unavailableReason?: string | null;
 }
 
 export interface AgentView {
@@ -885,6 +896,7 @@ export interface RunStepView {
 }
 
 export interface RunInvocationView {
+  readonly agentSnapshot?: string | null;
   readonly routingObservation?: string | null;
   readonly id: string;
   readonly iteration: number;
@@ -1321,6 +1333,14 @@ export interface IpcMap {
   'workspace.push': { request: { workspaceId: string }; response: GitOperationResult };
 
   'agents.manage': { request: void; response: readonly ManagedAgentView[] };
+  'agents.roles': {request:void;response:readonly import('./agent-policy.js').RoleDefinition[]};
+  'agents.models': {request:{accountId:string};response:import('./agent-policy.js').ModelCatalogEntry[]};
+  'agents.policies': {request:void;response:import('./agent-policy.js').PolicyConfiguration};
+  'agents.savePolicies': {request:import('./agent-policy.js').PolicyConfiguration;response:import('./agent-policy.js').PolicyConfiguration};
+  'agents.projectPolicy': {request:{workspaceId:string};response:import('./agent-policy.js').PolicyLayer};
+  'agents.saveProjectPolicy': {request:{workspaceId:string;policy:import('./agent-policy.js').PolicyLayer};response:import('./agent-policy.js').PolicyLayer};
+  'agents.calls': {request:{runId:string};response:Array<{id:string;snapshot:Record<string,unknown>;observation:Record<string,unknown>|null;status:string;started_at:string;finished_at:string|null}>};
+  'agents.confirmModel': {request:{runId:string;agentId:string;model:string};response:boolean};
   'agents.create': { request: AgentInputView; response: ManagedAgentView };
   'agents.update': { request: { agentId: string; agent: AgentInputView }; response: ManagedAgentView };
   'agents.remove': { request: { agentId: string }; response: boolean };

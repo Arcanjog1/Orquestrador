@@ -38,6 +38,7 @@ export interface WorkerRuntimeCapabilities {
   declaredModels: readonly string[] | null;
   /** Effort values the help page names, when it names any. */
   declaredEfforts: readonly string[] | null;
+  modelEfforts?: Readonly<Record<string, readonly string[]>>;
   version?: string | null;
 }
 

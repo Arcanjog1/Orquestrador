@@ -23,7 +23,7 @@
 import { ALLOWED_ACTIONS } from './decision-parser.js';
 import { CAPABILITY_TIERS, REASONING_TIERS } from '../routing/tiers.js';
 
-export const DECISION_SCHEMA_VERSION = 8;
+export const DECISION_SCHEMA_VERSION = 9;
 
 /** The tiers as the decision JSON spells them (lowercase). */
 export const WIRE_CAPABILITIES = CAPABILITY_TIERS.map((tier) => tier.toLowerCase());
@@ -46,6 +46,7 @@ export const DECISION_JSON_SCHEMA = {
     'relevantFiles',
     'workerRequirements',
     'workerId',
+    'taskKind',
     'requiresTools',
     'satisfiedCriteria',
     'queryProof',
@@ -53,8 +54,8 @@ export const DECISION_JSON_SCHEMA = {
   ],
   properties: {
     delegations: { type: ['array', 'null'], description: 'Optional explicit DAG, maximum 8 tasks. Independent tasks run concurrently only with isolated workers. Dependencies name task ids within this batch. Never omit a real dependency.', items: {
-      type: 'object', additionalProperties: false, required: ['taskId','workerId','task','dependsOn','requiresTools'],
-      properties: { taskId: {type:'string'}, workerId:{type:'string'}, task:{type:'string'}, dependsOn:{type:'array',items:{type:'string'}}, requiresTools:{type:'boolean'} },
+      type: 'object', additionalProperties: false, required: ['taskKind','taskId','workerId','task','dependsOn','requiresTools'],
+      properties: { taskKind:{type:['string','null']}, taskId: {type:'string'}, workerId:{type:'string'}, task:{type:'string'}, dependsOn:{type:'array',items:{type:'string'}}, requiresTools:{type:'boolean'} },
     } },
     queryProof: {
       type: ['object', 'null'], additionalProperties: false, required: ['criteria', 'citations'],
@@ -220,6 +221,7 @@ export const DECISION_JSON_SCHEMA = {
       items: { type: 'string' },
       description: 'Files the coding agent should look at first. Empty when there are none.',
     },
+    taskKind: {type:['string','null'],enum:['IMPLEMENTATION','CODE_REVIEW','UI_UX','TESTING','RESEARCH','IMAGE',null],description:'The role required for this task; never delegate simple repository questions.'},
     workerId: {
       type: ['string', 'null'],
       description:

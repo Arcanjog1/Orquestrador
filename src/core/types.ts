@@ -199,6 +199,7 @@ export interface Decision {
    * field existed means.
    */
   workerId?: string;
+  taskKind?: string;
   /**
    * Whether this delegation needs to change files.
    *
@@ -280,6 +281,8 @@ export interface AgentInput {
   routing?: InvocationRouting;
   /** Do not drop or increase an enforced routing value at the adapter boundary. */
   strictRouting?: boolean;
+  /** Enforced by the adapter's actual tool set / sandbox, never just a prompt. */
+  toolPolicy?: readonly ('read'|'diff'|'evidence'|'write'|'commands'|'web'|'image')[];
   /**
    * The provider-side session this invocation should continue.
    *
@@ -295,6 +298,7 @@ export type AgentOutcome = 'completed' | 'timeout' | 'cancelled' | 'spawn-error'
 
 /** Result of an `AgentRunner.run` call. */
 export interface AgentResult {
+  invocationSkipped?: boolean;
   outcome: AgentOutcome;
   exitCode: number | null;
   signal: NodeJS.Signals | null;

@@ -131,6 +131,7 @@ export interface AgentProvider extends AgentRunner {
   readonly providerId: ProviderId;
   /** The connection (account) this provider speaks for. Null for an unbound CLI. */
   readonly connectionId: string | null;
+  describeCapabilities?():Promise<import('../routing/provider-policy.js').WorkerRuntimeCapabilities>;
   getCapabilities(): ProviderCapabilities;
   /**
    * The models this account really has, asked of the provider.

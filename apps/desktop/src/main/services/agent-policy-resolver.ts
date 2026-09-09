@@ -3,7 +3,7 @@ import { modelCapability, type WorkerRuntimeCapabilities } from '../../../../../
 import { isPremiumModel, type AccountRoutingPolicy } from '../../../../../src/routing/account-policy.js';
 
 export class AgentPolicyError extends Error {
-  constructor(readonly code:string, message:string) { super(message); this.name='AgentPolicyError'; }
+  constructor(readonly code:string, message:string,readonly modelId?:string) { super(message); this.name='AgentPolicyError'; }
 }
 const deny = (code:string,message:string):never => { throw new AgentPolicyError(code,message); };
 const efforts:readonly string[] = EFFORT_ORDER;
@@ -54,7 +54,7 @@ export function resolveAgentPolicy(input:PolicyResolutionInput) {
   const candidates=policy.modelMode==='FIXED'?[policy.primaryModel]:[policy.primaryModel,...policy.fallbackModels];
   const model=candidates.find(m=>!allowed(m));
   if(!model) deny('MODEL_BLOCKED',`${policy.modelMode}: ${allowed(policy.primaryModel)} (${policy.primaryModel}).`);
-  if(models.some(m=>m.provider===provider&&key(m.modelId)===key(model!)&&m.confirmationRequired)&&!input.confirmation?.(model!)) deny('CONFIRMATION_REQUIRED',`Confirme o uso de ${model} nesta execução.`);
+  if(models.some(m=>m.provider===provider&&key(m.modelId)===key(model!)&&m.confirmationRequired)&&!input.confirmation?.(model!)) throw new AgentPolicyError('CONFIRMATION_REQUIRED',`Confirme o uso de ${model} nesta execução.`,model!);
   const requestedReasoning=policy.reasoning??input.requested.reasoning;
   const ceilings=[policy.reasoningCeiling,...layers.map(l=>l.reasoningCeiling),account.maxReasoning?({LOW:'low',MEDIUM:'medium',HIGH:'high',MAX:'ultra'} as const)[account.maxReasoning]:null].filter((v):v is string=>!!v);
   let reasoning=requestedReasoning;
@@ -64,9 +64,10 @@ export function resolveAgentPolicy(input:PolicyResolutionInput) {
     reasoning=efforts[Math.min(reasoning?efforts.indexOf(reasoning):ceiling,ceiling)]!;
   }
   if(reasoning){
-    if(!capabilities.effortFlag||!capabilities.declaredEfforts?.length) deny('REASONING','O runtime não garante o raciocínio solicitado.');
+    const supported=capabilities.modelEfforts?.[model!]??capabilities.declaredEfforts;
+    if(!capabilities.effortFlag||!supported?.length) deny('REASONING','O runtime não garante o raciocínio solicitado.');
     const max=efforts.indexOf(reasoning);
-    reasoning=[...efforts].reverse().find(e=>efforts.indexOf(e)<=max&&capabilities.declaredEfforts!.includes(e))??null;
+    reasoning=[...efforts].reverse().find(e=>efforts.indexOf(e)<=max&&supported!.includes(e))??null;
     if(!reasoning) deny('REASONING','Nenhum nível de raciocínio compatível com o teto.');
   }
   const tools=policy.tools.filter(t=>layers.every(l=>!l.tools||l.tools.includes(t))).filter(t=>!['write','commands','web'].includes(t)||policy.permissions[t as keyof typeof policy.permissions]);

@@ -111,7 +111,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
       reasoning: this.options.effort ?? null,
     };
     const resume = input.resumeSessionId ?? this.options.resumeSessionId?.() ?? null;
-    const plan = await this.buildArgs(executable, input.workingDirectory, routing, resume);
+    const plan = await this.buildArgs(executable, input.workingDirectory, routing, resume, input.toolPolicy);
     if (input.strictRouting && ((routing.model && plan.applied.model !== routing.model) || (routing.reasoning && !plan.applied.reasoning))) throw new Error('O runtime não permite garantir o teto configurado. Atualize o runtime.');
     const env = { ...this.options.buildEnvironment(), ...(input.env ?? {}) };
 
@@ -319,6 +319,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
     cwd: string,
     routing: { model: string | null; reasoning: string | null },
     resumeSessionId: string | null,
+    toolPolicy?: AgentInput['toolPolicy'],
   ): Promise<ClaudePlan> {
     const capabilities = await this.readHelp(executable, cwd);
     if (!capabilities.flags.has('--print')) {
@@ -330,8 +331,15 @@ export class ClaudeCodeAdapter implements AgentRunner {
       );
     }
     const args = ['--print'];
+    const toolNames:Record<string,string[]>={read:['Read','Glob','Grep'],diff:[],evidence:[],write:['Write','Edit'],commands:['Bash'],web:['WebFetch','WebSearch'],image:[]};
+    const availableTools=toolPolicy ? [...new Set(toolPolicy.flatMap(t=>toolNames[t]??[]))] : null;
+    if(toolPolicy) {
+      if(!capabilities.flags.has('--tools')||!capabilities.flags.has('--strict-mcp-config')) throw new Error('Este runtime não garante a restrição de ferramentas do agente.');
+      if(toolPolicy.includes('commands')&&!toolPolicy.includes('write')) throw new Error('Este runtime não isola escrita em comandos. Use um runtime com sandbox de leitura ou retire comandos.');
+      args.push('--tools',availableTools!.join(','),'--strict-mcp-config');
+    }
     if (capabilities.flags.has('--permission-mode')) {
-      args.push('--permission-mode', 'acceptEdits');
+      args.push('--permission-mode', !toolPolicy||toolPolicy.includes('write')?'acceptEdits':'default');
     }
 
     // The tools a worker needs to do file work, named explicitly.
@@ -364,7 +372,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
     let authorisedTools: readonly string[] = [];
     if (allowedToolsFlag) {
       const flag = allowedToolsFlag;
-      const rules = [...FILE_TOOLS, ...(this.options.allowedTools?.() ?? [])];
+      const rules = [...FILE_TOOLS, ...(this.options.allowedTools?.() ?? [])].filter(rule=>!availableTools||availableTools.includes(rule.split('(')[0]!));
       // De-duplicated and bounded: a grant list that grew without limit would
       // eventually build a command line the shell refuses.
       const unique = [...new Set(rules.map((rule) => rule.trim()).filter((r) => r.length > 0))];

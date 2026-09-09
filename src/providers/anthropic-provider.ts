@@ -87,6 +87,10 @@ export class AnthropicApiProvider implements AgentProvider {
     this.connectionId = options.connectionId;
   }
 
+  async describeCapabilities():Promise<import('../routing/provider-policy.js').WorkerRuntimeCapabilities> {
+    return {modelFlag:true,effortFlag:true,declaredModels:(await this.getAvailableModels()).map(m=>m.id),declaredEfforts:ANTHROPIC_EFFORTS};
+  }
+
   getCapabilities(): ProviderCapabilities {
     return {
       providerId: 'anthropic',

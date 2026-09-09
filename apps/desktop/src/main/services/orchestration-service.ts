@@ -1,4 +1,6 @@
-import { agentConfig } from './agent-service.js';
+import { roleDefinition, type TaskKind } from '../../shared/agent-policy.js';
+import { agentConfig, AgentService } from './agent-service.js';
+import { AgentExecutionPolicy } from './agent-execution-policy.js';
 import { capabilityRank, reasoningRank } from '../../../../../src/routing/tiers.js';
 import { orchestratorSelectionOf } from './workspace-service.js';
 /**
@@ -325,7 +327,7 @@ export type EnvironmentFactory = (
  * there until the agent timeout, showing "Codex preparando a tarefa..." for
  * fifteen minutes. Failing in a second with a reason is better than that.
  */
-export type ReadinessCheck = (workspace: WorkspaceWithAgents) => Promise<string | null>;
+export type ReadinessCheck = (workspace: WorkspaceWithAgents, supervisorOnly?:boolean) => Promise<string | null>;
 
 const DEFAULTS = {
   maxIterations: 8,
@@ -609,6 +611,15 @@ export class OrchestrationService {
    * The run continues from the iteration it stopped at, so its budget is the
    * one it had - resuming is not a new run wearing the old one's id.
    */
+  resumeAfterModelConfirmation(runId:string):boolean {
+    const run=this.database.runs.require(runId);
+    if(run.status!=='NEEDS_HUMAN'||run.cancel_requested_at||!run.session_id) throw new Error('Esta execução não pode ser retomada.');
+    if(this.active.has(runId)) throw new Error('A execução ainda está finalizando a pausa. Tente novamente em instantes.');
+    if(!this.database.driver.get('SELECT 1 FROM model_confirmations WHERE run_id=?',[runId])) throw new Error('Confirmação de modelo ausente.');
+    this.launch(runId,run.session_id,this.database.workspaces.require(run.workspace_id),run.objective,Math.max(1,run.iteration),'Modelo confirmado para esta execução. Continue com o objetivo e as políticas originais.');
+    return true;
+  }
+
   resumeAfterApproval(runId: string): ResumptionDecision {
     const run = this.database.runs.find(runId);
     if (!run) return { resume: false, because: 'finished' };
@@ -839,7 +850,7 @@ export class OrchestrationService {
     });
 
     // Ask before spending fifteen minutes finding out.
-    const problem = await this.checkReadiness(workspace);
+    const problem = await this.checkReadiness(workspace,objectiveIntent.kind==='READ_ONLY_QUERY');
     if (problem) {
       this.database.runs.setStatus(runId, 'FAILED', problem);
       this.say(sessionId, runId, 'system', problem);
@@ -1280,7 +1291,7 @@ export class OrchestrationService {
         batchSignatures.add(signature);
         const chosen = new Map<string, WorkerSlot>();
         for (const task of tasks) {
-          const result = this.chooseWorker(team, {...decision, task: task.task, workerId: task.workerId, requiresTools: task.requiresTools}, conversation);
+          const result = this.chooseWorker(team, {...decision, task: task.task, workerId: task.workerId, requiresTools: task.requiresTools, taskKind:task.taskKind}, conversation);
           if (!result.ok) throw new Error(result.reason);
           chosen.set(task.taskId, result.slot);
         }
@@ -1290,8 +1301,10 @@ export class OrchestrationService {
           if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
           const wave = readyDelegations(tasks, completed, pending, t => {
             const slot=chosen.get(t.taskId)!;
-            return slot.accountId ?? String(team.findIndex(s=>s.runner===slot.runner));
-          }, github && budget.unlimited ? 3 : 1);
+            const agent=slot.agentId?this.database.agents.find(slot.agentId):undefined;
+            const policy=agent?agentConfig(agent.runtime_options).policy:undefined;
+            return policy?.parallel ? slot.agentId! : slot.accountId ?? String(team.findIndex(s=>s.runner===slot.runner));
+          }, github && budget.unlimited && ![...chosen.values()].some(s=>{const a=s.agentId?this.database.agents.find(s.agentId):undefined;return a&&agentConfig(a.runtime_options).policy?.parallel===false;}) ? 3 : 1);
           if (!wave.length) {
             for(const id of pending) { outcomes.push({taskId:id,status:'blocked',summary:'Dependência falhou ou foi cancelada.',changedFiles:[]}); this.step(runId,iteration,'task-blocked','blocked','Dependência não concluída.',{taskId:id}); }
             break;
@@ -1308,7 +1321,7 @@ export class OrchestrationService {
             this.step(runId,iteration,'task-start','started',task.task,{taskId:entry.taskId,workerId:slot.id,dependsOn:task.dependsOn.map(id=>iteration+'/'+id),baseCommit});
             try {
               const spend=budget.check(); if(!spend.allowed) throw new Error(spend.reason);
-              const result = await this.delegate({runId,sessionId,workspace,cwd:taskCwd,runners,slot,iteration,branchTaskId:entry.taskId,task:task.task+'\nDEPENDENCY RESULTS: '+JSON.stringify(outcomes.filter(o=>task.dependsOn.includes(o.taskId))),decision:{...decision,task:task.task,workerId:task.workerId,requiresTools:task.requiresTools},correlationId:runCorrelation,causationId:decisionMessageId,routing:slot.routing??null,capabilities:capabilitiesOf.get(slot.id)??NO_CAPABILITIES,attempts:[],unavailableModels:[],signal,budget,github,fileReads:carriedReads});
+              const result = await this.delegate({runId,sessionId,workspace,cwd:taskCwd,runners,slot,iteration,branchTaskId:entry.taskId,task:task.task+'\nDEPENDENCY RESULTS: '+JSON.stringify(outcomes.filter(o=>task.dependsOn.includes(o.taskId))),decision:{...decision,task:task.task,workerId:task.workerId,requiresTools:task.requiresTools,taskKind:task.taskKind},correlationId:runCorrelation,causationId:decisionMessageId,routing:slot.routing??null,capabilities:capabilitiesOf.get(slot.id)??NO_CAPABILITIES,attempts:[],unavailableModels:[],signal,budget,github,fileReads:carriedReads});
               const cancelled=entry.cancelled || this.stopping(runId,signal);
               const mechanical=carriedReads.length>0 && missingFilePayload(result.answer);
               const status=cancelled?'cancelled':result.record.failure||result.record.exitCode!==0||result.record.outcome!=='completed'||mechanical?'failed':'completed';
@@ -1330,6 +1343,7 @@ export class OrchestrationService {
           let proposalsApplied=false;
           for(const item of results) {
             const parsed=github && item.result && item.status==='completed' ? readChangeProposal(item.result.answer,baseCommit!) : null;
+            if(parsed?.kind==='proposal'&&!this.agentMayWrite(workspace.id,chosen.get(item.task.taskId)?.agentId??null)) {item.status='failed';conflict=true;this.step(runId,iteration,'proposal','refused','A função ou política do agente proíbe escrita.',{taskId:item.task.taskId});continue;}
             if(parsed?.kind==='invalid') {item.status='failed'; this.step(runId,iteration,'proposal','rejected',parsed.problem,{taskId:item.task.taskId});}
             if(parsed?.kind==='proposal') taskPaths.set(item.task.taskId,parsed.proposal.changes.map(c=>c.path));
             if(parsed?.kind==='proposal') for(const change of parsed.proposal.changes) {if(paths.has(change.path)) conflict=true; paths.add(change.path); changes.push(change);}
@@ -1438,6 +1452,7 @@ export class OrchestrationService {
             answer: delegated.answer,
             objective,
             signal,
+            agentId:slot.agentId,
           });
           if (applied.feedback) proposalFeedback = applied.feedback;
         }
@@ -2180,21 +2195,22 @@ export class OrchestrationService {
     const pinned = orchestratorSelectionOf(workspace) === 'manual';
     const models = {FAST:'gpt-5.1-codex-mini',BALANCED:'gpt-5.1-codex',STRONG:'gpt-5.3-codex',MAX:'gpt-5.3-codex'};
     const connection = accountId ? this.database.accounts.find(accountId) : undefined;
-    const model = pinned ? workspace.orchestrator_model : agent?.model ?? connection?.default_model ?? (policy.maxCapability ? models[policy.maxCapability] : null);
+    const model = config.policy?.primaryModel ?? (pinned ? workspace.orchestrator_model : agent?.model ?? connection?.default_model ?? (policy.maxCapability ? (connection?.provider_id==='anthropic'?{FAST:'haiku',BALANCED:'sonnet',STRONG:'opus',MAX:'opus'}:models)[policy.maxCapability] : null));
     const reasoning = pinned ? workspace.orchestrator_reasoning : config.reasoning ?? connection?.default_reasoning ?? null;
-    const route = routeWorkerModel({provider:'openai', accountId, task:'supervision',requested:null,previousAttempts:[],selection:'manual',
+    const route = routeWorkerModel({provider:connection?.provider_id==='anthropic'?'anthropic':'openai', accountId, task:'supervision',requested:null,previousAttempts:[],selection:'manual',
       manual:{model,reasoning},policy,capabilities:{modelFlag:true,effortFlag:true,declaredModels:null,declaredEfforts:['low','medium','high','xhigh','max']}});
     const routeNote = `Orquestrador solicitado ${model ?? 'padrão'}/${reasoning ?? 'padrão'}; teto ${policy.maxCapability ?? 'sem teto'}/${policy.maxReasoning ?? 'sem teto'}; ${route.selectionReason}`;
     this.step(runId,iteration,'routing',route.policyBlocked?'blocked':'resolved',routeNote);
-    if (route.policyBlocked) return {decision:null,failure:routeNote,policyBlocked:true};
+    if (route.policyBlocked && !config.policy) return {decision:null,failure:routeNote,policyBlocked:true};
     let currentPrompt = input.prompt;
     let lastProblem = 'nenhuma resposta';
     let lastExcerpt = '';
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const startedAt = new Date().toISOString();
-      const activeInvocationId = this.database.runs.recordInvocation({runId, iteration, agentId: workspace.orchestrator_agent_id, accountId: this.orchestratorAccountId(workspace), role: 'ORCHESTRATOR', task: null, outcome: 'running', exitCode: null, durationMs: null, startedAt});
+      let activeInvocationId: string | undefined;
+      const beforeInvocation = () => { activeInvocationId ??= this.database.runs.recordInvocation({runId, iteration, agentId: workspace.orchestrator_agent_id, accountId: this.orchestratorAccountId(workspace), role: 'ORCHESTRATOR', task: null, outcome: 'running', exitCode: null, durationMs: null, startedAt}); };
       this.progress(runId, this.database.runs.require(runId).session_id ?? '', 'orchestrator', 'Codex analisando...', 'RUNNING');
-      const result = await runners.orchestrator.run({
+      const result = await new AgentExecutionPolicy(this.database).invoke({workspaceId:workspace.id,agentId:workspace.orchestrator_agent_id,accountId,runner:runners.orchestrator,beforeInvocation,args:{
         prompt: currentPrompt,
         routing:{model:route.resolvedModel,reasoning:route.resolvedReasoning},
         strictRouting:!!(policy.maxCapability || policy.maxReasoning),
@@ -2202,12 +2218,12 @@ export class OrchestrationService {
         timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
         runId,
         iteration,
-      });
+      }});
       // Counted before anything is decided about the answer: a repair round
       // trip is a second call and costs a second time.
-      input.budget.record(result.usage ?? null);
+      if(!result.invocationSkipped) input.budget.record(result.usage ?? null);
       const orchestratorCapabilities = capabilitiesOfRunner(runners.orchestrator);
-      this.database.runs.recordInvocation({
+      if(!result.invocationSkipped) this.database.runs.recordInvocation({
         id: activeInvocationId,
         runId,
         iteration,
@@ -2265,6 +2281,7 @@ export class OrchestrationService {
       });
       if (result.applied) input.onApplied?.(result.applied);
       if (signal.aborted) return { decision: null };
+      if(result.invocationSkipped) return {decision:null,failure:result.failureDetail??result.stderr,policyBlocked:true};
 
       const diagnostics = {
         attempt,
@@ -2389,7 +2406,9 @@ export class OrchestrationService {
             : capabilities.toolExecution
               ? 'reads, edits and runs things in the workspace'
               : 'analyses, plans and reviews only - CANNOT read, edit or run anything';
-        return `  ${slot.id} - ${slot.label}: ${can}`;
+        const agent=slot.agentId?this.database.agents.find(slot.agentId):undefined;
+        const policy=agent?agentConfig(agent.runtime_options).policy:undefined;
+        return '  '+slot.id+' - '+slot.label+': role='+(agent?.role??'CODING_WORKER')+' taskKinds='+JSON.stringify(policy?.taskKinds??roleDefinition(agent?.role??'CODING_WORKER')?.taskKinds)+' tools='+JSON.stringify(policy?.tools??roleDefinition(agent?.role??'CODING_WORKER')?.tools)+'. '+can;
       }),
       '',
       // Which repository this project is, when it is one.
@@ -3073,10 +3092,16 @@ export class OrchestrationService {
     answer: string;
     objective: string;
     signal: AbortSignal;
+    agentId?: string | null;
   }): Promise<{ applied: boolean; feedback: string | null }> {
     const github = input.github;
     const result = readChangeProposal(input.answer, github.headCommit);
     if (result.kind === 'none') return { applied: false, feedback: null };
+    if(input.agentId&&!this.agentMayWrite(this.database.runs.require(input.runId).workspace_id,input.agentId)) {
+      const feedback='A função ou política deste agente proíbe escrita; proposta recusada antes de criar branch ou commit.';
+      this.step(input.runId,input.iteration,'proposal','refused',feedback);
+      return {applied:false,feedback};
+    }
     if(!classifyObjective(input.objective).requiresChanges) {
       const feedback='Esta consulta não autoriza alterações. A proposta foi recusada antes de criar branch, commit ou PR; responda usando evidência de leitura/execução.';
       this.step(input.runId,input.iteration,'proposal','refused',feedback);
@@ -3260,6 +3285,15 @@ export class OrchestrationService {
     if (agent.enabled !== 1) throw new Error('O agente foi desativado ou removido. Escolha outro na equipe.');
     if ((accountId !== null || agentConfig(agent.runtime_options).managed) && agent.account_id !== accountId) throw new Error('A conta do agente mudou. Reabra a equipe antes de executar.');
     if (agentConfig(agent.runtime_options).managed && this.database.accounts.find(accountId ?? '')?.auth_state !== 'connected') throw new Error('A conta deste agente não está conectada.');
+  }
+
+  private agentMayWrite(workspaceId:string,agentId:string|null):boolean {
+    const agent=agentId?this.database.agents.find(agentId):undefined;
+    if(!agent) return true; // Legacy fixture / unbound runner, governed by the objective gate.
+    const policy=agentConfig(agent.runtime_options).policy;
+    const service=new AgentService(this.database);
+    const layers=[service.policies().defaults,service.projectPolicy(workspaceId)];
+    return agent.enabled===1&&(policy?policy.tools.includes('write')&&policy.permissions.write:roleDefinition(agent.role)?.tools.includes('write')===true)&&layers.every(l=>!l.tools||l.tools.includes('write'));
   }
 
   private accountPolicyFor(accountId: string | null): AccountRoutingPolicy {
@@ -3545,7 +3579,7 @@ export class OrchestrationService {
       // The policy left nothing to run. That is a question for the person, not
       // a model choice: falling through to the CLI default here would run the
       // model the policy exists to keep out.
-      if (routed?.policyBlocked) {
+      if (routed?.policyBlocked && !agentOptions.policy) {
         const reason =
           'A tarefa pede uma capacidade que a política desta conta não permite. ' +
           `${routed.selectionReason}. Ajuste o teto da conta em Contas e integrações, ` +
@@ -3646,11 +3680,12 @@ export class OrchestrationService {
         );
       }
 
-      const activeInvocationId = this.database.runs.recordInvocation({runId, iteration, agentId: slot.agentId ?? workspace.worker_agent_id, accountId: slot.accountId, role: 'CODING_WORKER', workerId: slot.id, task, outcome: 'running', exitCode: null, durationMs: null, startedAt, routing: planned});
+      let activeInvocationId: string | undefined;
+      const beforeInvocation = () => { activeInvocationId ??= this.database.runs.recordInvocation({runId, iteration, agentId: slot.agentId ?? workspace.worker_agent_id, accountId: slot.accountId, role: 'CODING_WORKER', workerId: slot.id, task, outcome: 'running', exitCode: null, durationMs: null, startedAt, routing: planned}); };
       if (input.branchTaskId) { const entry=this.branchTasks.get(runId+':'+input.branchTaskId); if(entry) entry.invocationId=activeInvocationId; }
       this.progress(runId, sessionId, 'worker', slot.label + ' executando...', 'RUNNING');
       const invoke = (resumeSessionId: string | null) =>
-        slot.runner.run({
+        new AgentExecutionPolicy(this.database).invoke({workspaceId:workspace.id,agentId:slot.agentId??workspace.worker_agent_id,accountId:slot.accountId,runner:slot.runner,capabilities:input.capabilities,beforeInvocation:()=>{beforeInvocation();if(input.branchTaskId){const entry=this.branchTasks.get(runId+':'+input.branchTaskId);if(entry)entry.invocationId=activeInvocationId;}},args:{
           prompt: workerPrompt.text,
           workingDirectory: cwd,
           timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
@@ -3664,7 +3699,7 @@ export class OrchestrationService {
           ...(routed
             ? { routing: { model: routed.resolvedModel, reasoning: routed.resolvedReasoning }, strictRouting: !!(this.policyFor(slot.accountId,slot.agentId).maxCapability || this.policyFor(slot.accountId,slot.agentId).maxReasoning || (input.routing?.provider === 'anthropic' && !this.policyFor(slot.accountId,slot.agentId).allowPremiumModels)) }
             : {}),
-        });
+        }});
 
       let result = await invoke(previousSession?.provider_session_id ?? null);
       const branchCancelled = input.branchTaskId && this.branchTasks.get(runId+':'+input.branchTaskId)?.cancelled;
@@ -3724,7 +3759,7 @@ export class OrchestrationService {
           ...(result.failure ? { failure: result.failure } : {}),
         });
 
-      input.budget.record(result.usage ?? null);
+      if(!result.invocationSkipped) input.budget.record(result.usage ?? null);
       // The worker's answer is what a conversation run finishes with, and it
       // is only ever *an answer*: nothing here treats it as evidence that a
       // file changed. In a coding run the evidence collector, not this string,
@@ -3759,7 +3794,7 @@ export class OrchestrationService {
         ...(result.failureDetail ? { failureDetail: result.failureDetail } : {}),
         ...(toolsUsed(result.activity).length > 0 ? { tools: toolsUsed(result.activity) } : {}),
       };
-      const invocationId = this.database.runs.recordInvocation({
+      const invocationId = result.invocationSkipped ? undefined : this.database.runs.recordInvocation({
         id: activeInvocationId,
         runId,
         iteration,
@@ -3947,7 +3982,16 @@ export class OrchestrationService {
       return { ok: false, reason, feedback: `NO_WORKER_CONFIGURED\n\n${reason}` };
     }
     const wanted = decision.workerId;
-    const slot = wanted ? team.find((entry) => entry.id === wanted) : team[0];
+    const kind=decision.taskKind as TaskKind|undefined;
+    const configured=new AgentService(this.database).policies().routing;
+    const compatible=(entry:WorkerSlot)=>{
+      const agent=entry.agentId?this.database.agents.find(entry.agentId):undefined;
+      if(!agent) return !kind || kind==='IMPLEMENTATION';
+      const config=agentConfig(agent.runtime_options);
+      return agent.enabled===1&&!roleDefinition(agent.role)?.requiresImage&&(!kind || ((config.policy?.taskKinds??roleDefinition(agent.role)?.taskKinds??[]).includes(kind)&&(!configured[kind]||configured[kind]!.includes(agent.role))));
+    };
+    const slot = wanted ? team.find(entry=>entry.id===wanted) : team.find(compatible);
+    if(slot&&!compatible(slot)) return {ok:false,reason:'O agente não está ativo ou não atende ao tipo de tarefa solicitado.',feedback:'ROLE_INCOMPATIBLE: choose an active agent with the required role.'};
     if (!slot) {
       const known = team.map((entry) => `${entry.id} (${entry.label})`).join(', ');
       return {

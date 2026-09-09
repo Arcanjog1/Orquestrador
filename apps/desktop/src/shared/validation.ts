@@ -25,6 +25,7 @@ import {
   type IpcMap,
   type RequestChannel,
 } from './ipc-contract.js';
+import {AGENT_ROLES,EFFORT_ORDER,type AgentPolicy,type PolicyLayer,type PolicyConfiguration} from './agent-policy.js';
 
 export class IpcValidationError extends Error {
   readonly code = 'INVALID_ARGUMENT';
@@ -275,14 +276,21 @@ export const branchName: Validator<string> = (value, path) => {
   return s;
 };
 
+const tool = oneOf(['read','diff','evidence','write','commands','web','image'] as const);
+const taskKind = oneOf(['IMPLEMENTATION','CODE_REVIEW','UI_UX','TESTING','RESEARCH','IMAGE'] as const);
+const roleName = oneOf(AGENT_ROLES.map(role=>role.id));
+const policyLayer = obj<PolicyLayer>({allowedModels:listOf(modelName,200),blockedModels:listOf(modelName,200),reasoningCeiling:nullable(oneOf(EFFORT_ORDER)),maxCapability:nullable(oneOf(ACCOUNT_CAPABILITY_TIERS)),tools:listOf(tool,7),maxAttempts:int({min:1,max:100}),timeoutMs:int({min:1000,max:7200000}),maxTokens:nullable(int({min:1,max:100000000})),maxCostUsd:nullable(num({min:0.001,max:10000}))},{optional:['allowedModels','blockedModels','reasoningCeiling','maxCapability','tools','maxAttempts','timeoutMs','maxTokens','maxCostUsd']});
+const advancedPolicy = obj<AgentPolicy>({version:(v,p)=>{if(v!==1)fail(p,'must be 1');return 1;},modelMode:oneOf(['FIXED','CONTROLLED_AUTO'] as const),primaryModel:modelName,allowedModels:listOf(modelName,200),blockedModels:listOf(modelName,200),fallbackModels:listOf(modelName,200),reasoning:nullable(oneOf(EFFORT_ORDER)),reasoningCeiling:nullable(oneOf(EFFORT_ORDER)),tools:listOf(tool,7),permissions:obj({write:bool,commands:bool,web:bool}),maxAttempts:int({min:1,max:100}),timeoutMs:int({min:1000,max:7200000}),maxTokens:nullable(int({min:1,max:100000000})),maxCostUsd:nullable(num({min:0.001,max:10000})),parallel:bool,taskKinds:listOf(taskKind,6)});
+const globalPolicy=obj<PolicyConfiguration>({defaultTeam:obj({orchestrator:id,agents:listOf(id,8)}),models:listOf(obj({provider:oneOf(['openai','anthropic'] as const),modelId:modelName,allowed:bool,premium:bool,confirmationRequired:bool,allowedRoles:listOf(roleName,20),capability:nullable(oneOf(ACCOUNT_CAPABILITY_TIERS))}),500),defaults:policyLayer,routing:obj({IMPLEMENTATION:listOf(roleName,20),CODE_REVIEW:listOf(roleName,20),UI_UX:listOf(roleName,20),TESTING:listOf(roleName,20),RESEARCH:listOf(roleName,20),IMAGE:listOf(roleName,20)},{optional:['IMPLEMENTATION','CODE_REVIEW','UI_UX','TESTING','RESEARCH','IMAGE']})},{optional:['defaultTeam']});
+
 /** One role of a workspace team: the account, and how it should run. */
 const agentInput = obj<AgentInputView>({
-  name: sessionTitle, role: oneOf(['ORCHESTRATOR', 'CODING_WORKER'] as const),
+  name: sessionTitle, role: roleName,
   provider: oneOf(['openai', 'anthropic'] as const), accountId: id,
   model: nullable(modelName), reasoning: nullable(oneOf(REASONING_LEVELS)),
   maxCapability: nullable(oneOf(ACCOUNT_CAPABILITY_TIERS)),
-  maxReasoning: nullable(oneOf(ACCOUNT_REASONING_TIERS)), enabled: bool,
-});
+  maxReasoning: nullable(oneOf(ACCOUNT_REASONING_TIERS)), enabled: bool,policy:advancedPolicy,
+},{optional:['policy']});
 
 export const teamMember = obj<{
   agentId?: string;
@@ -431,6 +439,14 @@ export const REQUEST_VALIDATORS: {
   'workspace.push': obj({ workspaceId: id }),
 
   'agents.manage': noArgs,
+  'agents.roles':noArgs,
+  'agents.models':obj({accountId:id}),
+  'agents.policies':noArgs,
+  'agents.savePolicies':globalPolicy,
+  'agents.projectPolicy':obj({workspaceId:id}),
+  'agents.saveProjectPolicy':obj({workspaceId:id,policy:policyLayer}),
+  'agents.calls':obj({runId:id}),
+  'agents.confirmModel':obj({runId:id,agentId:id,model:modelName}),
   'agents.create': agentInput,
   'agents.update': obj({agentId: id, agent: agentInput}),
   'agents.remove': obj({agentId: id}),

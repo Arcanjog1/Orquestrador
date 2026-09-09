@@ -1,4 +1,5 @@
 export interface DelegationTask {
+  taskKind?: string;
   taskId: string;
   workerId: string;
   task: string;
@@ -19,6 +20,7 @@ export function validateDelegations(value: unknown): DelegationTask[] {
       Object.keys(row).some(
         (k) =>
           ![
+            "taskKind",
             "taskId",
             "workerId",
             "task",
@@ -48,6 +50,7 @@ export function validateDelegations(value: unknown): DelegationTask[] {
       );
     ids.add(row.taskId);
     return {
+      ...(typeof row.taskKind==='string'?{taskKind:row.taskKind}:{}),
       taskId: row.taskId,
       workerId: row.workerId,
       task: row.task,

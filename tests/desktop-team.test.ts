@@ -98,7 +98,7 @@ test('the team is bound by account, keeps model and reasoning, and survives a re
   }
 });
 
-test('an account of the wrong provider is refused, by name, and the old team stays', async () => {
+test('a legacy seed missing the chosen role is refused by name, and the old team stays', async () => {
   const repo = createGitFixture();
   const fixture = createDesktopFixture();
   try {
@@ -129,7 +129,7 @@ test('an account of the wrong provider is refused, by name, and the old team sta
     );
     assert.equal(refused.code, 'WORKSPACE_ERROR');
     assert.match(refused.message, /"Claude Trabalho"/);
-    assert.match(refused.message, /OpenAI/);
+    assert.match(refused.message, /agente/);
 
     const after = value<WorkspaceView[]>(await fixture.router.handle('workspace.list', null));
     const same = after.find((w) => w.id === workspace.id)!;

@@ -153,7 +153,7 @@ export function executionGraph(
         id: `inv:${invocation.id}`,
         kind: worker ? "worker" : "orchestrator",
         status,
-        label: worker
+        label: safeJson(invocation.agentSnapshot)?.name ? `${safeJson(invocation.agentSnapshot)?.name} · ${safeJson(invocation.agentSnapshot)?.role}` : worker
           ? (invocation.workerId ?? "Worker")
           : detail.steps.some(s=>s.phase==='objective-intent'&&s.summary==='READ_ONLY_QUERY') ? 'Codex · consulta' : "Codex · revisão e decisão",
         summary: compactText(

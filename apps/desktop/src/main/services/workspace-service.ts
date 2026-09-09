@@ -39,12 +39,8 @@ import {
 } from '../../../../../src/workspace/preflight.js';
 import { displayFullName, repositoryKey } from '../../../../../src/github/repository-identity.js';
 import type { ProjectService } from './project-service.js';
+import { roleDefinition } from '../../shared/agent-policy.js';
 
-/** Which provider each role runs on. Fixed: Codex supervises, Claude Code executes. */
-const PROVIDER_OF_ROLE: Record<TeamRole, ProviderName> = {
-  ORCHESTRATOR: 'openai',
-  CODING_WORKER: 'anthropic',
-};
 
 export class WorkspaceError extends Error {
   readonly code = 'WORKSPACE_ERROR';
@@ -908,7 +904,7 @@ export class WorkspaceService {
     if (orchestrator.role !== 'ORCHESTRATOR') {
       throw new WorkspaceError('O agente escolhido para supervisionar não é um orquestrador.');
     }
-    if (worker.role !== 'CODING_WORKER') {
+    if (roleDefinition(worker.role)?.lane !== 'delegate') {
       throw new WorkspaceError('O agente escolhido para executar não é um agente de execução.');
     }
     return this.toView(
@@ -919,8 +915,9 @@ export class WorkspaceService {
   /** Resolve a chosen agent, or the legacy default, without conflating identity and account. */
   private memberAgent(role: TeamRole, accountId: string, agentId?: string): string {
     const id = agentId ?? (role==='ORCHESTRATOR' ? orchestratorAgentIdFor(accountId) : workerAgentIdFor(accountId));
-    const row = this.database.agents.require(id);
-    if (row.enabled!==1 || row.account_id!==accountId || row.role!==role) throw new WorkspaceError('Escolha um agente ativo ligado à conta e ao papel corretos.');
+    const row = this.database.agents.find(id);
+    if(!row) throw new WorkspaceError('A conta "'+this.database.accounts.find(accountId)?.display_name+'" não possui agente para esta função. Crie um agente em Agentes e modelos e selecione-o explicitamente.');
+    if (row.enabled!==1 || row.account_id!==accountId || roleDefinition(row.role)?.lane!==(role==='ORCHESTRATOR'?'supervisor':'delegate')) throw new WorkspaceError('Escolha um agente ativo ligado à conta e ao papel corretos.');
     return id;
   }
 
@@ -1247,14 +1244,6 @@ export class WorkspaceService {
   private accountForRole(role: TeamRole, accountId: string) {
     const account = this.database.accounts.find(accountId);
     if (!account) throw new WorkspaceError('Essa conta não existe mais.');
-    const expected = PROVIDER_OF_ROLE[role];
-    if (account.provider_id !== expected) {
-      const job = role === 'ORCHESTRATOR' ? 'supervisionar' : 'executar';
-      const provider = expected === 'openai' ? 'OpenAI (Codex)' : 'Anthropic (Claude)';
-      throw new WorkspaceError(
-        `A conta "${account.display_name}" não pode ${job}: esta função precisa de uma conta ${provider}.`,
-      );
-    }
     return account;
   }
 
@@ -1343,7 +1332,7 @@ export class WorkspaceService {
     const account = agent?.account_id ? this.database.accounts.find(agent.account_id) : undefined;
     return {
       role,
-      provider: PROVIDER_OF_ROLE[role],
+      provider: (account?.provider_id ?? agent?.provider_id ?? (role==='ORCHESTRATOR'?'openai':'anthropic')) as ProviderName,
       agentId: agent?.id ?? null,
       accountId: account?.id ?? null,
       accountName: account?.display_name ?? null,

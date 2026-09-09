@@ -195,6 +195,7 @@ export function toRunDetailView(
       durationMs: step.duration_ms ?? null,
     })),
     invocations: invocations.map((row) => ({
+      agentSnapshot: str(row.agent_snapshot),
       id: str(row.id) ?? '',
       iteration: num(row.iteration) ?? 0,
       role: str(row.role) ?? '',

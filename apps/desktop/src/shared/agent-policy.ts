@@ -47,6 +47,7 @@ export interface PolicyLayer {
   maxTokens?: number | null; maxCostUsd?: number | null;
 }
 export interface PolicyConfiguration {
+  defaultTeam?: {orchestrator:string;agents:string[]};
   models: ModelPolicy[];
   defaults: PolicyLayer;
   routing: Partial<Record<TaskKind, string[]>>;
