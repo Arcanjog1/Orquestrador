@@ -1,3 +1,5 @@
+import {roleDefinition,type PolicyLayer} from '@shared/agent-policy';
+import {PolicyLayerFields} from './AgentPolicyFields';
 import { useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -148,6 +150,8 @@ export function TeamForm({
   const [workers, setWorkers] = useState<MemberDraft[]>(() => workerDraftsOf(workspace, byProvider));
   const [agents, setAgents] = useState<import('@shared/ipc-contract').ManagedAgentView[]>([]);
   useEffect(() => { void api.agents.manage().then(list=>setAgents([...list])).catch(()=>undefined); }, [accounts]);
+  const [projectPolicy,setProjectPolicy]=useState<PolicyLayer>({});
+  useEffect(()=>{if(workspace)void api.agents.projectPolicy({workspaceId:workspace.id}).then(setProjectPolicy).catch(()=>undefined);},[workspace?.id]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   // The runtime diagnostic, read here when the caller has none: the
@@ -240,6 +244,7 @@ export function TeamForm({
       if (workspace.environment === "cloud") {
         await api.workspace.setPublish({ workspaceId: workspace.id, ...publish });
       }
+      await api.agents.saveProjectPolicy({workspaceId:workspace.id,policy:projectPolicy});
       onSaved();
     } catch (e) {
       setError(messageOf(e));
@@ -299,13 +304,15 @@ export function TeamForm({
 
   return (
     <div className="space-y-3" data-testid="team-form">
+      <details className="border rounded p-3"><summary>Políticas deste projeto</summary><p className="text-xs text-muted-foreground my-2">Restrições adicionais aos padrões globais e à configuração individual.</p><PolicyLayerFields value={projectPolicy} onChange={setProjectPolicy}/></details>
       {rows.map(({ key, spec, draft, prefix, index, update: updateRow, remove }) => {
-        const options = byProvider[spec.provider];
+        const options = accounts.filter(account=>agents.some(a=>a.accountId===account.id&&a.enabled&&roleDefinition(a.role)?.lane===(spec.role==='ORCHESTRATOR'?'supervisor':'delegate')));
+        const provider=accounts.find(a=>a.id===draft.accountId)?.provider??spec.provider;
         const isWorker = spec.role === "CODING_WORKER";
         const manual = draft.selection === "manual";
         const update = (_role: TeamMemberView["role"], patch: Partial<MemberDraft>) =>
           updateRow(patch);
-        const runtime = known.find((r) => r.runtimeId === (isWorker ? "claude-code" : "codex"));
+        const runtime = known.find((r) => r.runtimeId === (provider==='openai' ? "codex" : "claude-code"));
         return (
           <div
             key={key}
@@ -313,12 +320,12 @@ export function TeamForm({
             data-testid={`team-${prefix}`}
           >
             <div className="flex items-center gap-2">
-              <ProviderIcon provider={spec.provider} />
+              <ProviderIcon provider={provider==='openai'?'openai':'anthropic'} />
               <SectionLabel>
                 {isWorker && workers.length > 1 ? `${spec.title} ${index + 1}` : spec.title}
               </SectionLabel>
               <span className="ml-auto text-[11px] text-muted-foreground">
-                {spec.providerLabel} · {spec.agentLabel}
+                {provider==='openai'?'OpenAI':'Anthropic'} · {provider==='openai'?'Codex':'Claude Code'}
                 {runtime?.version ? ` ${runtime.version}` : ""}
               </span>
               {remove && (
@@ -336,7 +343,7 @@ export function TeamForm({
             <div className="mt-3 grid grid-cols-2 gap-3">
               <Labeled label="Provider">
                 <div className="mt-1 rounded-md border border-border bg-surface px-2 py-1.5 text-xs">
-                  {spec.providerLabel}
+                  {provider==='openai'?'OpenAI':'Anthropic'}
                 </div>
               </Labeled>
               <Labeled label="Account">
@@ -345,12 +352,12 @@ export function TeamForm({
                     className="mt-1 rounded-md border border-dashed border-border px-2 py-1.5 text-xs text-muted-foreground"
                     data-testid={`team-${prefix}-account-empty`}
                   >
-                    Nenhuma conta {spec.providerLabel}. Adicione em Contas e integrações.
+                    Nenhuma conta {provider==='openai'?'OpenAI':'Anthropic'}. Adicione em Contas e integrações.
                   </div>
                 ) : (
                   <Select
                     value={draft.accountId}
-                    onValueChange={(accountId) => update(spec.role, { accountId, agentId:undefined })}
+                    onValueChange={(accountId) => update(spec.role, { accountId, agentId:agents.find(a=>a.enabled&&a.accountId===accountId&&roleDefinition(a.role)?.lane===(spec.role==='ORCHESTRATOR'?'supervisor':'delegate'))?.id })}
                   >
                     <SelectTrigger
                       className="mt-1 h-8 text-xs"
@@ -376,7 +383,7 @@ export function TeamForm({
                 <select aria-label={`Agente ${prefix}`} data-testid={`team-${prefix}-agent`} className="w-full rounded border border-border bg-surface p-2 text-xs"
                   value={draft.agentId ?? ''} onChange={e=>updateRow({agentId:e.target.value || undefined})}>
                   <option value="">Agente padrão da conta</option>
-                  {agents.filter(a=>a.enabled && a.accountId===draft.accountId && a.role===spec.role).map(a=><option key={a.id} value={a.id}>{a.name} · {a.id.slice(-6)}</option>)}
+                  {agents.filter(a=>a.enabled && a.accountId===draft.accountId && roleDefinition(a.role)?.lane===(spec.role==='ORCHESTRATOR'?'supervisor':'delegate')).map(a=><option key={a.id} value={a.id}>{a.name} · {roleDefinition(a.role)?.label} · {a.id.slice(-6)}</option>)}
                 </select>
               </Labeled>
               {/* Orchestrator, CLI default: two read-only cells that say so. */}

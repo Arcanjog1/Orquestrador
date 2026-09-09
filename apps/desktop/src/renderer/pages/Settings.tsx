@@ -46,7 +46,7 @@ const tabs = [
   { id: "general", label: "General" },
   { id: "appearance", label: "Appearance" },
   { id: "accounts", label: "Accounts & Integrations" },
-  { id: "agents", label: "Agentes" },
+  { id: "agents", label: "Agentes e modelos" },
   { id: "execution", label: "Execution" },
   { id: "verifications", label: "Verificações do projeto" },
   { id: "git", label: "Git" },
