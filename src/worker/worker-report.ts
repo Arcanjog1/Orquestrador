@@ -76,7 +76,7 @@ export interface WorkerReport {
   readonly status: WorkerReportStatus;
   /** One line, for the conversation. */
   readonly headline: string;
-  /** The worker's own summary, trimmed. Empty when it said nothing. */
+  /** The complete provider response. Compact rendering never truncates this field. */
   readonly declared: string;
   /**
    * What **this invocation** changed, measured against the iteration before it.
@@ -119,12 +119,12 @@ export interface WorkerReport {
   readonly mechanical: boolean;
 }
 
-const MAX_DECLARED = 4000;
+// Full provider response is retained; only renderWorkerReport bounds its preview.
 const MAX_FILES = 40;
 
 export function buildWorkerReport(input: WorkerReportInput): WorkerReport {
   const worker = input.worker;
-  const declared = input.answer.trim().slice(0, MAX_DECLARED);
+  const declared = input.answer;
   const denied = [...(worker.deniedTools ?? [])];
   const evidence = input.evidence;
   const evidenceUnavailable = evidence === null || Boolean(evidence.evidenceProblem);

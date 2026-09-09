@@ -302,3 +302,10 @@ test('a file this delegation both read and changed counts as changed, not as rea
   assert.deepEqual([...report.evidenceFiles.modified], ['app.js']);
   assert.deepEqual([...report.readOnlyFiles], ['README.md']);
 });
+
+test('a response longer than the compact preview survives verbatim', () => {
+  const answer='  '+('Resposta completa\n'.repeat(1000))+'FIM  ';
+  const report=buildWorkerReport(input({answer}));
+  assert.equal(report.declared,answer);
+  assert.ok(renderWorkerReport(report).length < answer.length);
+});

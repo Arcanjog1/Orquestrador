@@ -200,7 +200,7 @@ export async function runGitHubFileRead(
     request,
     ok: true,
     outcome: 'ok',
-    resolvedPath: `${source.ref.owner}/${source.ref.repo}@${short(source.at)}:${request.path}`,
+    resolvedPath: `${source.ref.owner}/${source.ref.repo}@${source.at}:${request.path}`,
     sizeBytes: bytes.byteLength,
     sha256: createHash('sha256').update(bytes).digest('hex'),
     text: slice.toString('utf8'),

@@ -111,6 +111,16 @@ test('delivers the prompt over stdin rather than the command line', async () => 
   assert.equal(result.stdout, prompt);
 });
 
+test('real child process receives the exact bounded file payload, including Unicode', async () => {
+  const { fileContext } = await import('../src/orchestrator/file-context.js');
+  const text = 'from nuvem.core import wall_modeling\n# botão — ação 🧱\n';
+  const payload = fileContext([{request:{path:'Script.py'},ok:true,outcome:'ok',resolvedPath:'repo@sha:Script.py',sizeBytes:Buffer.byteLength(text),sha256:'fixture',text,truncated:false,problem:null}], 'WORKER');
+  const result = await new ProcessManager().run({command:process.execPath,args:['-e','const chunks=[];process.stdin.on("data",c=>chunks.push(c)).on("end",()=>process.stdout.write(Buffer.concat(chunks)))'],cwd:process.cwd(),stdin:payload.text});
+  assert.equal(result.exitCode,0);
+  assert.equal(result.stdout,payload.text);
+  assert.ok(result.stdout.includes(text));
+});
+
 test('reports a missing command as a spawn error, not a crash', async () => {
   const pm = new ProcessManager();
   const result = await pm.run({
@@ -196,7 +206,8 @@ test('kills the whole process tree, leaving no orphan still running', async () =
       graceMs: 500,
     });
 
-    await new Promise((r) => setTimeout(r, 400));
+    const deadline=Date.now()+5000;
+    while(!existsSync(beat) && Date.now()<deadline) await new Promise(r=>setTimeout(r,50));
     assert.ok(existsSync(beat), 'grandchild never started beating');
 
     await pm.cancelAll(500);
@@ -208,7 +219,8 @@ test('kills the whole process tree, leaving no orphan still running', async () =
     await new Promise((r) => setTimeout(r, 400));
     assert.equal(readFileSync(beat, 'utf8'), afterKill, 'grandchild kept running after cancellation');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    await pm.cancelAll(500);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
   }
 });
 

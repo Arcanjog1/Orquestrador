@@ -1790,6 +1790,14 @@ export class RunRepository extends Repository {
     return this.db.all<RunStepRecord>('SELECT * FROM run_steps WHERE run_id = ? ORDER BY id', [runId]);
   }
 
+  /** Cancellation is terminal even if the provider returns a late success. */
+  cancelInvocation(id: string): void {
+    const active = this.db.get('SELECT run_id FROM agent_invocations WHERE id=? AND outcome=?', [id, 'running']);
+    if (!active) return;
+    this.db.run('UPDATE agent_invocations SET outcome=?, finished_at=? WHERE id=? AND outcome=?', ['cancelled', now(), id, 'running']);
+    this.addConsumption(String(active.run_id), null);
+  }
+
   recordInvocation(input: {
     id?: string;
     runId: string;
@@ -1942,7 +1950,7 @@ export class RunRepository extends Repository {
    */
   setInvocationReport(invocationId: string, report: unknown): void {
     this.db.run('UPDATE agent_invocations SET report_json = ? WHERE id = ?', [
-      redact(JSON.stringify(report)).slice(0, 200_000),
+      redact(JSON.stringify(report)),
       invocationId,
     ]);
   }

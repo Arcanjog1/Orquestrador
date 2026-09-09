@@ -349,7 +349,7 @@ export const ORCHESTRATOR_AGENT = 'orchestrator';
 export class OrchestrationService {
   private readonly active = new Map<string, AbortController>();
   /** Runners of in-flight runs, so cancelling can reach the child processes. */
-  private readonly branchTasks = new Map<string, {runId: string; iteration: number; taskId: string; slot: WorkerSlot; cancelled: boolean}>();
+  private readonly branchTasks = new Map<string, {runId: string; iteration: number; taskId: string; slot: WorkerSlot; cancelled: boolean; invocationId?: string}>();
   private readonly runners = new Map<string, RunnerPair>();
   /** Environments of in-flight runs, so each is released exactly once. */
   private readonly environments = new Map<string, ExecutionEnvironment>();
@@ -492,6 +492,7 @@ export class OrchestrationService {
     const entry = this.branchTasks.get(runId + ':' + taskId);
     if (!entry || entry.cancelled) return false;
     entry.cancelled = true;
+    if (entry.invocationId) this.database.runs.cancelInvocation(entry.invocationId);
     this.step(runId, entry.iteration, 'task-cancel', 'cancelled', 'Subtarefa cancelada.', {taskId, workerId: entry.slot.id});
     void entry.slot.runner.cancel();
     return true;
@@ -1066,6 +1067,8 @@ export class OrchestrationService {
     /** The evidence as the previous iteration left it, and how long it has stood. */
     let previousFingerprint: string | null = null;
     let stagnantRounds = 0;
+    const batchSignatures = new Set<string>();
+    let unresolvedDelegations = false;
     // What was said in this conversation before this run, so a follow-up
     // ("continue", "now also do X") is read against what came before it.
     const history = this.conversationBefore(sessionId, runId);
@@ -1142,6 +1145,12 @@ export class OrchestrationService {
       }
       const decision = asked.decision;
       record.decision = decision;
+      if (decision.action === 'done' && unresolvedDelegations) {
+        this.step(runId, iteration, 'done-gate', 'rejected', 'Subtarefas falhas, canceladas ou conflitantes ainda não foram resolvidas.');
+        this.database.runs.setStatus(runId, 'NEEDS_HUMAN', 'Revisar os resultados parciais antes de concluir.');
+        this.progress(runId, sessionId, 'needs-human', 'Join parcial precisa de revisão.', 'NEEDS_HUMAN');
+        return;
+      }
       // What the orchestrator decided, as a message rather than only as a log
       // line. The action and the target worker are recorded; the prose is
       // already a chat message, so it is not duplicated here.
@@ -1216,6 +1225,13 @@ export class OrchestrationService {
 
       if (decision.action === 'delegate' && decision.delegations?.length) {
         const tasks = decision.delegations;
+        const signature=JSON.stringify({tasks,head:github?.headCommit,reads:carriedReads.map(r=>[r.request.path,r.sha256,r.request.offsetBytes])});
+        if(batchSignatures.has(signature)) {
+          const reason='Sem progresso: o mesmo DAG foi solicitado novamente com os mesmos arquivos e commit. Revise a estratégia antes de repetir.';
+          this.step(runId,iteration,'progress','stagnant',reason);
+          this.database.runs.setStatus(runId,'NEEDS_HUMAN',reason);this.progress(runId,sessionId,'needs-human',reason,'NEEDS_HUMAN');return;
+        }
+        batchSignatures.add(signature);
         const chosen = new Map<string, WorkerSlot>();
         for (const task of tasks) {
           const result = this.chooseWorker(team, {...decision, task: task.task, workerId: task.workerId, requiresTools: task.requiresTools}, conversation);
@@ -1229,7 +1245,7 @@ export class OrchestrationService {
           const wave = readyDelegations(tasks, completed, pending, t => {
             const slot=chosen.get(t.taskId)!;
             return slot.accountId ?? String(team.findIndex(s=>s.runner===slot.runner));
-          }, github ? 3 : 1);
+          }, github && budget.unlimited ? 3 : 1);
           if (!wave.length) {
             for(const id of pending) { outcomes.push({taskId:id,status:'blocked',summary:'Dependência falhou ou foi cancelada.',changedFiles:[]}); this.step(runId,iteration,'task-blocked','blocked','Dependência não concluída.',{taskId:id}); }
             break;
@@ -1261,25 +1277,30 @@ export class OrchestrationService {
           }));
           if (this.stopping(runId,signal)) return this.finishCancelled(runId,sessionId);
           const paths=new Set<string>();
+          const taskPaths=new Map<string,string[]>();
           const changes: import('../../../../../src/github/repository-operations.js').RepositoryChange[]=[];
           let conflict=false;
+          let proposalsApplied=false;
           for(const item of results) {
             const parsed=github && item.result && item.status==='completed' ? readChangeProposal(item.result.answer,baseCommit!) : null;
             if(parsed?.kind==='invalid') {item.status='failed'; this.step(runId,iteration,'proposal','rejected',parsed.problem,{taskId:item.task.taskId});}
+            if(parsed?.kind==='proposal') taskPaths.set(item.task.taskId,parsed.proposal.changes.map(c=>c.path));
             if(parsed?.kind==='proposal') for(const change of parsed.proposal.changes) {if(paths.has(change.path)) conflict=true; paths.add(change.path); changes.push(change);}
           }
           if(conflict) this.step(runId,iteration,'task-conflict','conflict','Propostas sobrepõem arquivos. Nenhuma alteração desta rodada foi aplicada; revisão necessária.',{paths:[...paths],tasks:wave.map(t=>t.taskId)});
           if(!conflict && github && changes.length && results.every(r=>r.status==='completed')) {
             const merged='\x60\x60\x60orquestrador-changes\n'+JSON.stringify({baseCommit,message:'Join independent task proposals',changes})+'\n\x60\x60\x60';
             const applied=await this.applyProposal({runId,sessionId,iteration,github,answer:merged,objective,signal});
+            proposalsApplied=applied.applied;
             if(applied.feedback) {proposalFeedback=applied.feedback; if(!applied.applied) conflict=true;}
           }
           for(const item of results) {
-            const status=conflict?'conflict':item.status;
+            const status=conflict?'conflict':taskPaths.has(item.task.taskId)&&!proposalsApplied?'not-applied':item.status;
             if(status==='completed') completed.add(item.task.taskId);
-            outcomes.push({taskId:item.task.taskId,status,summary:item.result?.answer.slice(0,6000)??'Sem resultado',invocationId:item.result?.record.invocationId,changedFiles:status==='completed'?[...paths]:[]});
+            outcomes.push({taskId:item.task.taskId,status,summary:item.result?.answer.slice(0,6000)??'Sem resultado',invocationId:item.result?.record.invocationId,changedFiles:status==='completed'?(taskPaths.get(item.task.taskId)??[]):[]});
           }
         }
+        unresolvedDelegations = outcomes.some(o=>o.status!=='completed');
         this.step(runId,iteration,'task-join',outcomes.every(o=>o.status==='completed')?'completed':'partial','Resultados reunidos para revisão do Codex.',{outcomes});
         feedback='JOIN — review every task status, evidence and pending criteria. Failed/cancelled/conflicting proposals were not applied. Do not repeat mechanical failures.\n'+JSON.stringify(outcomes)+'\n'+(proposalFeedback??'');
         if(outcomes.some(o=>o.status==='failed' && /file|conte[uú]do/i.test(o.summary))) {
@@ -1749,7 +1770,7 @@ export class OrchestrationService {
       }
 
       if (decision.action === 'done' && decision.queryProof && isReadOnlyObjective(objective) && !evidence.changedSinceBaseline && resolvedCommands.size === 0) {
-        const delivered = iterations.slice(0, -1).flatMap(r => r.fileReads ?? []).flatMap(r => { const d=supervisorFiles.deliveries.find(d=>d.path===r.request.path && d.state==='SUPERVISOR_CARRIED'); return d && r.text!==null ? [{...r,text:Buffer.from(r.text).subarray(0,d.bytesSent).toString('utf8')}] : []; });
+        const delivered = iterations.slice(0, -1).flatMap(r => r.fileReads ?? []).flatMap(r => { const d=supervisorFiles.deliveries.find(d=>d.path===r.request.path && d.sha256===r.sha256 && d.range.start===(r.request.offsetBytes??0) && d.state==='SUPERVISOR_CARRIED'); return d && r.text!==null ? [{...r,text:Buffer.from(r.text).subarray(0,d.bytesSent).toString('utf8')}] : []; });
         const problems = queryProofProblems(objective, decision.summary ?? '', decision.queryProof, delivered);
         this.step(runId, iteration, 'query-proof', problems.length ? 'rejected' : 'passed', problems.join('; ') || 'Resposta revisada e citações conferidas nos bytes entregues.', { proof: decision.queryProof });
         if (!problems.length) for (const criterion of decision.queryProof.criteria) ledger.markByText(criterion, 'satisfied', iteration, 'Consulta: revisão do supervisor com citações conferidas nos bytes entregues.');
@@ -3235,25 +3256,8 @@ export class OrchestrationService {
       );
     }
 
-    // The files the supervisor asked to see, read by the application.
-    const reads = record?.fileReads ?? [];
-    if (reads.length > 0) {
-      lines.push('', 'FILE CONTENTS (opened by the application; no worker was asked to copy them):');
-      for (const read of reads) {
-        lines.push(`  ${describeFileRead(read)}`);
-        if (read.text !== null) {
-          lines.push(indent(read.text));
-          if (read.truncated) {
-            lines.push(
-              '  … truncado. Peça um trecho menor ou um "fileChecks" se precisar comparar bytes.',
-            );
-          }
-        }
-      }
-      lines.push(
-        '  Ler não prova nada por si só: um "fileChecks" é o que resolve um critério.',
-      );
-    }
+    // Bytes are appended once by fileContext, under its shared carry budget.
+    for (const read of record?.fileReads ?? []) lines.push(describeFileRead(read));
 
     // What the application read for itself. Reported before the commands,
     // because in a workspace with no registered verification this is the only
@@ -3395,7 +3399,7 @@ export class OrchestrationService {
       fileReads: input.fileReads,
     });
     if (workerPrompt.deliveries.length) {
-      this.step(runId, iteration, 'file-context', 'worker-carried', 'Conteúdo incluído no prompt do worker.', { deliveries: workerPrompt.deliveries });
+      this.step(runId, iteration, 'file-context', workerPrompt.deliveries.some(d=>d.state==='NOT_CARRIED') ? 'not-carried' : 'worker-carried', 'Validação do conteúdo no prompt do worker.', { deliveries: workerPrompt.deliveries });
       if (workerPrompt.deliveries.some(d => d.state === 'NOT_CARRIED')) {
         throw new Error('file-read/not-carried: conteúdo indisponível ou excedeu o orçamento; reduza as leituras antes de delegar.');
       }
@@ -3536,6 +3540,7 @@ export class OrchestrationService {
       }
 
       const activeInvocationId = this.database.runs.recordInvocation({runId, iteration, agentId: slot.agentId ?? workspace.worker_agent_id, accountId: slot.accountId, role: 'CODING_WORKER', workerId: slot.id, task, outcome: 'running', exitCode: null, durationMs: null, startedAt, routing: planned});
+      if (input.branchTaskId) { const entry=this.branchTasks.get(runId+':'+input.branchTaskId); if(entry) entry.invocationId=activeInvocationId; }
       this.progress(runId, sessionId, 'worker', slot.label + ' executando...', 'RUNNING');
       const invoke = (resumeSessionId: string | null) =>
         slot.runner.run({
@@ -3563,7 +3568,7 @@ export class OrchestrationService {
       // default) and a person can clear them, so an id recorded weeks ago can
       // simply be gone. Forget it and do the same delegation once more with a
       // fresh session, rather than failing a run over bookkeeping.
-      if (previousSession && sessionMissing(result)) {
+      if (!branchCancelled && !this.stopping(runId,input.signal) && previousSession && sessionMissing(result)) {
         this.database.agentSessions.forget(input.sessionId, slot.accountId!);
         this.step(runId, iteration, 'worker', 'session-expired', `${slot.label}: sessão anterior expirou`, {
           workerId: slot.id,

@@ -579,3 +579,27 @@ test('branch cancellation preserves independent work and blocks its dependent ta
     assert.ok(detail.steps.some(s=>s.phase==='task-blocked'));assert.ok(detail.invocations.some(i=>i.role==='CODING_WORKER'&&i.outcome==='cancelled'));
   }finally{releaseA();await prepared.cleanup();}
 });
+
+test('a repeated batch without new evidence stops before calling workers again',async()=>{
+  const a=new ScriptedAgent('mock-claude','A',['Analysis']);
+  const prepared=await prepare({files:PROJECT,workers:[a],maxIterations:8,orchestrator:()=>JSON.stringify({action:'delegate',delegations:[{taskId:'a',workerId:'worker-1',task:'A',dependsOn:[],requiresTools:false}]})});
+  try { const result=await ask(prepared,'analise o projeto');assert.equal(result.run.status,'NEEDS_HUMAN');assert.equal(a.calls.length,1); }finally{await prepared.cleanup();}
+});
+
+test('whole-run cancellation stops every active branch and ignores both late answers',async()=>{
+  let count=0,start!:()=>void,release!:()=>void;
+  const started=new Promise<void>(r=>start=r),released=new Promise<void>(r=>release=r);
+  const work=async()=>{if(++count===2)start();await released;return 'Late success';};
+  const a=new ScriptedAgent('mock-claude','A',[work]),b=new ScriptedAgent('mock-claude','B',[work]);
+  const prepared=await prepare({files:PROJECT,workers:[a,b],orchestrator:()=>JSON.stringify({action:'delegate',delegations:['a','b'].map((id,index)=>({taskId:id,workerId:'worker-'+(index+1),task:id,dependsOn:[],requiresTools:false}))})});
+  try {
+    const sent=value<{run:{id:string}}>(await prepared.fixture.router.handle('chat.sendMessage',{sessionId:prepared.sessionId,text:'analise o projeto'}));
+    await started;
+    prepared.fixture.services.orchestration.cancel(sent.run.id);
+    release();await prepared.fixture.services.orchestration.waitFor(sent.run.id);
+    const detail=value<{run:{status:string};invocations:{role:string;outcome:string}[]}>(await prepared.fixture.router.handle('run.detail',{runId:sent.run.id}));
+    assert.equal(detail.run.status,'CANCELLED');
+    const workers=detail.invocations.filter(i=>i.role==='CODING_WORKER');
+    assert.equal(workers.length,2);assert.ok(workers.every(i=>i.outcome==='cancelled'));
+  }finally{release();await prepared.cleanup();}
+});

@@ -11,12 +11,12 @@ import { defaultClaudeSources } from '../src/runtime/sources/claude-sources.js';
 import { MinGitReleaseSource } from '../src/runtime/sources/git-sources.js';
 import { makeFetch } from './helpers/fake-runtime-source.js';
 
-function withTempHome<T>(fn: (paths: ReturnType<typeof appPaths>) => T): T {
+async function withTempHome<T>(fn: (paths: ReturnType<typeof appPaths>) => T): Promise<Awaited<T>> {
   const home = mkdtempSync(join(tmpdir(), 'lao-mgr-'));
   try {
-    return fn(ensureAppPaths(appPaths({ AI_ORCHESTRATOR_HOME: home } as NodeJS.ProcessEnv)));
+    return await fn(ensureAppPaths(appPaths({ AI_ORCHESTRATOR_HOME: home } as NodeJS.ProcessEnv)));
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
   }
 }
 
@@ -112,7 +112,9 @@ test('prepareAll collects failures instead of stopping at the first one', async 
     const result = await manager.prepareAll();
 
     assert.equal(result.ready, false);
-    assert.ok(result.failures.length >= 2, 'each unmet runtime should be reported');
+    assert.ok(result.failures.length > 0, 'an unavailable source is reported');
+    const pending = (await manager.diagnose()).pending;
+    assert.equal(result.failures.length, pending.length, 'each unmet runtime is reported, including when this machine already has a working runtime');
     for (const failure of result.failures) {
       assert.ok(failure.message.length > 0);
       assert.ok(failure.remedy.length > 0);
@@ -122,7 +124,7 @@ test('prepareAll collects failures instead of stopping at the first one', async 
 });
 
 test('asking for an unknown runtime is a programming error, not a silent null', () => {
-  withTempHome((paths) => {
+  return withTempHome((paths) => {
     const manager = new RuntimeManager({ paths, fetchImpl: makeFetch({}) });
     assert.throws(() => manager.get('nope' as 'codex'), /No runtime registered/);
   });
