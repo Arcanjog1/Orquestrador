@@ -56,6 +56,27 @@ export async function runSmokeChecks(
     return `electron ${electron}, node ${node}, chromium ${chrome}`;
   });
 
+  await check('agents-crud-and-process-restart', async () => {
+    const saved=services.database.settings.get('smoke.agents');
+    let ids:{a:string;b:string};
+    if (process.env.AI_ORCHESTRATOR_SMOKE_REOPEN==='1') {
+      if(!saved)throw new Error('No agents saved by first process.');
+      ids=JSON.parse(saved);
+    } else {
+      const account=services.accounts.create('Smoke shared account','anthropic');
+      const input={name:'Smoke Backend',role:'CODING_WORKER' as const,provider:'anthropic' as const,accountId:account.id,model:'sonnet',reasoning:'medium' as const,maxCapability:'BALANCED' as const,maxReasoning:'MEDIUM' as const,enabled:true};
+      const a=services.agents.create(input),b=services.agents.create({...input,name:'Smoke Review'});
+      services.agents.update(a.id,{...input,name:'Smoke Backend persisted',enabled:false});
+      const removed=services.agents.create({...input,name:'Removed'});services.agents.remove(removed.id);
+      if(services.agents.manage().some(a=>a.id===removed.id))throw new Error('Removed agent returned.');
+      ids={a:a.id,b:b.id};services.database.settings.set('smoke.agents',JSON.stringify(ids));
+    }
+    const list=await window.webContents.executeJavaScript('window.api.agents.manage()');
+    const a=list.find((row:{id:string})=>row.id===ids.a),b=list.find((row:{id:string})=>row.id===ids.b);
+    if(!a || !b || a.id===b.id || a.accountId!==b.accountId || a.enabled!==false || a.name!=='Smoke Backend persisted' || a.model!=='sonnet' || a.maxCapability!=='BALANCED' || a.maxReasoning!=='MEDIUM')throw new Error('Agent identity/configuration did not survive.');
+    return 'Two independent agents, same account; edit/disable/remove persisted through IPC and process restart.';
+  });
+
   await check('node-sqlite', () => {
     const version = services.database.schemaVersion;
     if (version !== services.database.expectedSchemaVersion) {

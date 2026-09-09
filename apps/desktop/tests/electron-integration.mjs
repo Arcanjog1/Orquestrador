@@ -512,13 +512,33 @@ test("accounts: the ceiling is set in the interface, per account, and persists",
   }
 });
 
+// These cases replay login progress, so hold the authentication boundary local.
+// A machine with Codex on PATH can otherwise start a real login whose late
+// progress races the synthetic sequence (and waits for a human in CI).
+async function createAccountAndWaitForLogin(window) {
+  const original = services.accounts.connect;
+  let called = false;
+  services.accounts.connect = async function (accountId) {
+    called = true;
+    return services.accounts.list().find(account => account.id === accountId);
+  };
+  try {
+    await window.webContents.executeJavaScript(`
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent.trim() === 'Criar e conectar').click()
+    `);
+    await waitUntil(async () => called, 15_000, 'login invocation');
+  } finally {
+    services.accounts.connect = original;
+  }
+}
+
 test('the login dialog shows the device code, keeps it while waiting, and drops it when done', async () => {
   const window = await openWindow();
 
   // Reach the dialog the way a person does: Settings, add an OpenAI account,
-  // "Criar e conectar". No Codex runtime is installed in this test's
-  // application root, so the real sign-in ends quickly; the dialog is open
-  // either way, listening for this account's progress.
+  // "Criar e conectar". Authentication is held local by the helper below;
+  // the real dialog listens for this account's replayed progress.
   await window.webContents.executeJavaScript(
     `(() => { location.hash = '#/configuracoes?tab=accounts'; return true; })()`,
   );
@@ -538,11 +558,8 @@ test('the login dialog shows the device code, keeps it while waiting, and drops 
       return true;
     })()
   `);
-  await window.webContents.executeJavaScript(`
-    [...document.querySelectorAll('button')]
-      .find((b) => b.textContent.trim() === 'Criar e conectar').click()
-  `);
-  await waitForText(window, /Conectando OpenAI|OpenAI conectado/, 15_000);
+  await createAccountAndWaitForLogin(window);
+  await waitForText(window, /Conectando OpenAI|OpenAI conectado|Não conseguimos concluir/, 15_000);
 
   const accounts = await window.webContents.executeJavaScript('window.api.accounts.list()');
   const account = accounts.find((a) => a.provider === 'openai' && a.name === 'Codex Teste');
@@ -560,8 +577,7 @@ test('the login dialog shows the device code, keeps it while waiting, and drops 
 
   // The next report says nothing about the page or the code. Both stay.
   say({ stage: 'waiting-for-completion', label: 'Aguardando você concluir no navegador...' });
-  await new Promise((r) => setTimeout(r, 300));
-  text = await window.webContents.executeJavaScript('document.body.innerText');
+  text = await waitForText(window, /Aguardando você concluir no navegador/, 10_000);
   assert.match(text, /ABCD-EFGH/, 'the code survives a report that does not mention it');
   assert.match(text, /Aguardando você concluir no navegador/);
   assert.match(text, /Abrir o navegador de novo/, 'and so does the page');
@@ -611,10 +627,7 @@ test('a dialog that missed the first report still gets the code from the next on
       return true;
     })()
   `);
-  await window.webContents.executeJavaScript(`
-    [...document.querySelectorAll('button')]
-      .find((b) => b.textContent.trim() === 'Criar e conectar').click()
-  `);
+  await createAccountAndWaitForLogin(window);
   await waitForText(window, /Conectando OpenAI|OpenAI conectado|Não conseguimos concluir/, 15_000);
 
   const accounts = await window.webContents.executeJavaScript('window.api.accounts.list()');
@@ -2156,6 +2169,73 @@ test('budget limits are saved for the project, and the screen says what they can
 
 /* ------------------------------------------------------------------ helpers */
 
+
+test('audit: native project overflow click and keyboard open one menu without navigation', async () => {
+  const window = await openWindow();
+  const anchorDir=mkdtempSync(join(tmpdir(),'audit-pointer-anchor-'));
+  const anchorFolder=await window.webContents.executeJavaScript(`window.api.workspace.openProject(${JSON.stringify({localPath:anchorDir})})`);
+  const anchor=await window.webContents.executeJavaScript(`window.api.project.list().then(list=>list.find(p=>p.workspaceId==='${anchorFolder.workspace.id}'))`);
+  const dir=mkdtempSync(join(tmpdir(),'audit-pointer-project-'));
+  const folder=await window.webContents.executeJavaScript(`window.api.workspace.openProject(${JSON.stringify({localPath:dir})})`);
+  const project=await window.webContents.executeJavaScript(`window.api.project.list().then(list=>list.find(p=>p.workspaceId==='${folder.workspace.id}'))`);
+  assert.ok(project.id);
+  await window.webContents.executeJavaScript("location.hash='#/'");
+  await reloadWindow(window);
+  if (await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=skip-onboarding]')")) await click(window,'skip-onboarding');
+  const ready = await waitFor(async()=>window.webContents.executeJavaScript(`document.querySelector('[data-testid=skip-onboarding]')?'onboarding':document.querySelector('[data-testid="project-menu-${project.id}"]')?'ready':null`),15000,'sidebar or onboarding');
+  if (ready==='onboarding') await click(window,'skip-onboarding');
+  const id=`project-menu-${project.id}`;
+  await waitUntil(async()=>window.webContents.executeJavaScript(`!!document.querySelector('[data-testid="${id}"]')`),10000,'project overflow');
+  await click(window,`open-project-${anchor.id}`);
+  await waitUntil(async()=>window.webContents.executeJavaScript(`!!document.querySelector('[data-testid="project-${anchor.id}"] [data-active="true"]')`),5000,'anchor project selected');
+  const before=await window.webContents.executeJavaScript("JSON.stringify({hash:location.hash,active:[...document.querySelectorAll('[data-active=true]')].map(e=>e.closest('[data-testid]')?.dataset.testid)})");
+  await nativeClick(window,id);
+  await waitUntil(async()=>window.webContents.executeJavaScript("!!document.querySelector('[role=menu]')"),5000,'native dropdown');
+  assert.equal(await window.webContents.executeJavaScript("JSON.stringify({hash:location.hash,active:[...document.querySelectorAll('[data-active=true]')].map(e=>e.closest('[data-testid]')?.dataset.testid)})"),before,'mouse opening menu must not open project');
+  await window.webContents.executeJavaScript("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+  await window.webContents.executeJavaScript(`(()=>{const e=document.querySelector('[data-testid="${id}"]');return e ? (e.focus(),true):false})()`);
+  window.webContents.sendInputEvent({type:'keyDown',keyCode:'Space'});
+  window.webContents.sendInputEvent({type:'keyUp',keyCode:'Space'});
+  await waitUntil(async()=>window.webContents.executeJavaScript("!!document.querySelector('[role=menu]')"),5000,'keyboard dropdown');
+  assert.equal(await window.webContents.executeJavaScript("JSON.stringify({hash:location.hash,active:[...document.querySelectorAll('[data-active=true]')].map(e=>e.closest('[data-testid]')?.dataset.testid)})"),before,'keyboard opening menu must not open project');
+  window.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'});
+  window.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'});
+});
+
+test('audit: create, edit, disable and remove agents through the real renderer',async()=>{
+ const window=await openWindow();
+ await window.webContents.executeJavaScript("window.api.accounts.create({name:'Audit shared account',provider:'anthropic'})");
+ await window.webContents.executeJavaScript("location.hash='#/configuracoes?tab=agents'");
+ await reloadWindow(window);
+ if(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=skip-onboarding]')"))await click(window,'skip-onboarding');
+ await click(window,'agent-create');
+ await window.webContents.executeJavaScript(`(()=>{const e=document.querySelector('[data-testid=agent-name]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'Audit Backend');e.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+ await nativeClick(window,'agent-save');
+ const a=await waitFor(async()=>window.webContents.executeJavaScript("window.api.agents.manage().then(list=>list.find(a=>a.name==='Audit Backend'))"),10000,'saved agent');
+ await click(window,`agent-edit-${a.id}`);
+ await nativeClick(window,'agent-enabled');
+ await nativeClick(window,'agent-save');
+ await waitUntil(async()=>window.webContents.executeJavaScript(`window.api.agents.manage().then(list=>list.find(a=>a.id==='${a.id}')?.enabled===false)`),10000,'disabled agent');
+ await reloadWindow(window);
+ const saved=await window.webContents.executeJavaScript(`window.api.agents.manage().then(list=>list.find(a=>a.id==='${a.id}'))`);
+ assert.equal(saved.enabled,false);assert.equal(saved.name,'Audit Backend');
+ if(process.env.ELECTRON_AUDIT_SCREENSHOT)writeFileSync(process.env.ELECTRON_AUDIT_SCREENSHOT,(await window.webContents.capturePage()).toPNG());
+ await click(window,`agent-remove-${a.id}`);
+ await waitUntil(async()=>window.webContents.executeJavaScript(`window.api.agents.manage().then(list=>!list.some(a=>a.id==='${a.id}'))`),10000,'removed agent');
+});
+
+async function nativeClick(window,id) {
+ const point=await window.webContents.executeJavaScript(`(()=>{const e=document.querySelector('[data-testid="${id}"]');if(!e)throw new Error('missing ${id}');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`);
+ window.webContents.focus();
+ window.webContents.sendInputEvent({type:'mouseMove',...point});
+ window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...point});
+ window.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...point});
+}
+
+async function waitUntil(probe,timeoutMs,what) {
+ return waitFor(async()=>await probe()?true:null,timeoutMs,what);
+}
+
 let sharedWindow = null;
 let fakeGitHub = null;
 let loginItem = false;
@@ -2443,6 +2523,7 @@ app.whenReady().then(async () => {
   }, SUITE_TIMEOUT_MS);
   watchdog.unref?.();
 
+  if (process.env.ELECTRON_TEST_FILTER) { const selected=cases.filter(([name])=>name.includes(process.env.ELECTRON_TEST_FILTER)); cases.splice(0,cases.length,...selected); }
   let failed = 0;
   console.log(`1..${cases.length}`);
   for (const [index, [name, fn]] of cases.entries()) {
