@@ -1184,7 +1184,9 @@ export class OrchestrationService {
         this.progress(runId, sessionId, asked.policyBlocked ? 'needs-human' : 'failed', reason, asked.policyBlocked ? 'NEEDS_HUMAN' : 'FAILED');
         return;
       }
-      const decision = asked.decision;
+      const decision = { ...asked.decision,
+        ...(asked.decision.reason ? {reason:publicGateAnswer(asked.decision.reason)} : {}),
+      };
       record.decision = decision;
       if (decision.action === 'done' && unresolvedDelegations) {
         this.step(runId, iteration, 'done-gate', 'rejected', 'Subtarefas falhas, canceladas ou conflitantes ainda não foram resolvidas.');

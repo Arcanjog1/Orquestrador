@@ -329,6 +329,21 @@ export function executionGraph(
     end.row = tail.row + 1;
     link(tail, end, "sequence");
   }
+  const queryStep=detail.steps.find(s=>s.phase==='query-proof'&&s.status==='passed');
+  if(run.status==='DONE'&&run.iterations===1&&queryStep&&
+    detail.steps.some(s=>s.phase==='objective-intent'&&s.summary==='READ_ONLY_QUERY')&&
+    detail.invocations.length===1&&detail.invocations[0]?.role==='ORCHESTRATOR') {
+    const proof=nodes.find(n=>n.sourceIds.includes(String(queryStep.id)))!;
+    // Keep the compact query readable, with every measurement still available
+    // in the proof inspector. Failed or multi-round runs retain their full graph.
+    proof.fullText=detail.steps.map(s=>`${s.phase} · ${s.status}\n${s.summary??''}\n${s.detail??''}`).join('\n\n');
+    proof.metadata=detail.steps;
+    proof.sourceIds=detail.steps.map(s=>String(s.id));
+    const compact=nodes.filter(n=>['user','orchestrator','done'].includes(n.kind)||n===proof)
+      .sort((a,b)=>['user','orchestrator','verification','done'].indexOf(a.kind)-['user','orchestrator','verification','done'].indexOf(b.kind));
+    compact.forEach((node,row)=>{node.row=row;node.lane=0;});
+    return {nodes:compact,edges:compact.slice(1).map((n,i)=>({id:`${compact[i]!.id}>${n.id}`,from:compact[i]!.id,to:n.id,kind:'sequence'}))};
+  }
   return { nodes, edges };
 }
 

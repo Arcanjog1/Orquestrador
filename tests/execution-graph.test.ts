@@ -73,6 +73,16 @@ test("zero invocations never creates phantom agents; rebuilding is deterministic
   );
   assert.equal(a.nodes.at(-1)?.kind, "done");
 });
+test('a proven one-round query shows objective, Codex, proof and DONE with all operation details retained',()=>{
+  const d=detail('DONE',[inv('codex',2,3,'ORCHESTRATOR')]);
+  const steps=[['objective-intent','classified','READ_ONLY_QUERY'],['repository','ready','repo: main'],['routing','resolved','default'],['query-proof','passed','REPOSITORY_ACCESS'],['evidence','unchanged','0 arquivos'],['done-gate','passed',''],['pull-request','skipped','No commit']].map(([phase,status,summary],index)=>({id:100+index,iteration:index<3?0:1,phase:phase!,status:status!,summary:summary!,detail:null,startedAt:time(index+1),durationMs:0}));
+  const graph=executionGraph({...d,steps});
+  assert.deepEqual(graph.nodes.map(n=>n.kind),['user','orchestrator','verification','done']);
+  assert.match(graph.nodes[2]!.fullText,/repository · ready/);
+  assert.match(graph.nodes[2]!.fullText,/pull-request · skipped/);
+  assert.equal(graph.nodes[1]!.label,'Codex · consulta');
+  assert.equal(graph.edges.length,3);
+});
 
 test('persisted task dependencies connect the actual worker invocations', () => {
   const base = detail('DONE', [inv('a',2,3),inv('b',5,6)]);
