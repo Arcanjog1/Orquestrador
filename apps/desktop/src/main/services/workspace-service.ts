@@ -904,6 +904,7 @@ export class WorkspaceService {
   setAgents(workspaceId: string, orchestratorAgentId: string, workerAgentId: string): WorkspaceView {
     const orchestrator = this.database.agents.require(orchestratorAgentId);
     const worker = this.database.agents.require(workerAgentId);
+    if (orchestrator.enabled!==1 || worker.enabled!==1) throw new WorkspaceError('Escolha agentes ativos.');
     if (orchestrator.role !== 'ORCHESTRATOR') {
       throw new WorkspaceError('O agente escolhido para supervisionar não é um orquestrador.');
     }
@@ -915,14 +916,14 @@ export class WorkspaceService {
     );
   }
 
-  /**
-   * Binds the team by account.
-   *
-   * The interface offers accounts, because that is what a person has: "Codex
-   * Trabalho", "Claude Trabalho". Each account already has exactly one agent
-   * for its role (`AgentService.sync`), so the account decides the agent. An
-   * account of the wrong provider is refused with a sentence that says so.
-   */
+  /** Resolve a chosen agent, or the legacy default, without conflating identity and account. */
+  private memberAgent(role: TeamRole, accountId: string, agentId?: string): string {
+    const id = agentId ?? (role==='ORCHESTRATOR' ? orchestratorAgentIdFor(accountId) : workerAgentIdFor(accountId));
+    const row = this.database.agents.require(id);
+    if (row.enabled!==1 || row.account_id!==accountId || row.role!==role) throw new WorkspaceError('Escolha um agente ativo ligado à conta e ao papel corretos.');
+    return id;
+  }
+
   setTeam(
     workspaceId: string,
     orchestrator: TeamMemberInput,
@@ -938,17 +939,11 @@ export class WorkspaceService {
     if (list.length === 0) {
       throw new WorkspaceError('Escolha pelo menos um worker para este projeto.');
     }
-    // Two members on the same connection would be one worker wearing two
-    // names: same credential, same session, same context. Refused here rather
-    // than discovered later as a team that mysteriously does not parallelise.
     const seen = new Set<string>();
     for (const member of list) {
-      if (seen.has(member.accountId)) {
-        throw new WorkspaceError(
-          'Dois workers desta equipe usam a mesma conexão. Escolha uma conexão diferente para cada um.',
-        );
-      }
-      seen.add(member.accountId);
+      const identity = member.agentId ?? workerAgentIdFor(member.accountId);
+      if (seen.has(identity)) throw new WorkspaceError('Dois workers usam o mesmo agente na mesma conexão. Escolha agentes diferentes.');
+      seen.add(identity);
     }
     const orchestratorAccount = this.accountForRole('ORCHESTRATOR', orchestrator.accountId);
     const workerAccounts = list.map((member) => this.accountForRole('CODING_WORKER', member.accountId));
@@ -963,13 +958,13 @@ export class WorkspaceService {
     const record = this.database.workspaces.setTeam(
       workspaceId,
       {
-        agentId: orchestratorAgentIdFor(orchestratorAccount.id),
+        agentId: this.memberAgent('ORCHESTRATOR',orchestratorAccount.id,orchestrator.agentId),
         model: orchestratorSelection === 'manual' ? (orchestrator.model ?? null) : null,
         reasoning: orchestratorSelection === 'manual' ? reasoningOrNull(orchestrator.reasoning) : null,
         selection: orchestratorSelection,
       },
       list.map((member, index) => ({
-        agentId: workerAgentIdFor(workerAccounts[index]!.id),
+        agentId: this.memberAgent('CODING_WORKER',workerAccounts[index]!.id,member.agentId),
         model: member.model ?? null,
         reasoning: reasoningOrNull(member.reasoning),
         // Absent means automatic; the orchestrator's row never carries one.

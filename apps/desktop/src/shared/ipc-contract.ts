@@ -37,6 +37,8 @@ export const REQUEST_CHANNELS = [
   'accounts.status',
   'accounts.remove',
   'accounts.setRoutingPolicy',
+  'github.access',
+  'github.grantAccess',
   'github.status',
   'github.configure',
   'github.connect',
@@ -52,6 +54,10 @@ export const REQUEST_CHANNELS = [
   'workspace.commit',
   'workspace.push',
 
+  'agents.manage',
+  'agents.create',
+  'agents.update',
+  'agents.remove',
   'agents.list',
   'agents.status',
 
@@ -310,6 +316,22 @@ export interface RepositoryAnalysisView {
   readonly readAt: string;
 }
 
+export interface AgentInputView {
+  readonly name: string;
+  readonly role: TeamRole;
+  readonly provider: ProviderName;
+  readonly accountId: string;
+  readonly model: string | null;
+  readonly reasoning: ReasoningLevel | null;
+  readonly maxCapability: (typeof ACCOUNT_CAPABILITY_TIERS)[number] | null;
+  readonly maxReasoning: (typeof ACCOUNT_REASONING_TIERS)[number] | null;
+  readonly enabled: boolean;
+}
+export interface ManagedAgentView extends AgentView, AgentInputView {
+  readonly accountId: string;
+  readonly role: TeamRole;
+}
+
 export interface AgentView {
   readonly id: string;
   readonly name: string;
@@ -452,6 +474,7 @@ export interface TeamMemberView {
 }
 
 export interface TeamMemberInput {
+  readonly agentId?: string;
   readonly accountId: string;
   readonly model?: string;
   readonly reasoning?: ReasoningLevel;
@@ -862,6 +885,7 @@ export interface RunStepView {
 }
 
 export interface RunInvocationView {
+  readonly routingObservation?: string | null;
   readonly id: string;
   readonly iteration: number;
   readonly role: string;
@@ -990,6 +1014,17 @@ export interface WorkspaceChangesView {
 export type CheckoutResult =
   | { readonly switched: true; readonly workspace: WorkspaceView }
   | { readonly switched: false; readonly dirtyFiles: number; readonly message: string };
+
+export interface GitHubAccessView {
+ readonly kind: 'github-app' | 'oauth' | 'unknown';
+ readonly credential: 'usable' | 'expired' | 'absent';
+ readonly login: string | null;
+ readonly scopes: string;
+ readonly repositoryCount: number | null;
+ readonly checkedAt: string;
+ readonly message: string;
+ readonly installations: readonly {id:number;account:string|null;selection:string|null;contents:string|null;pullRequests:string|null}[] | null;
+}
 
 export interface GitHubStatusView {
   /** A Client ID was entered. */
@@ -1244,6 +1279,8 @@ export interface IpcMap {
    * The token never crosses this boundary: what the renderer gets is who is
    * signed in. Progress goes out on `account:progress` with the id `github`.
    */
+  'github.access': { request: void; response: GitHubAccessView };
+  'github.grantAccess': { request: { installationId?: number }; response: boolean };
   'github.status': { request: void; response: GitHubStatusView };
   'github.configure': { request: { clientId: string }; response: GitHubStatusView };
   'github.connect': { request: void; response: GitHubStatusView };
@@ -1283,6 +1320,10 @@ export interface IpcMap {
   'workspace.commit': { request: { workspaceId: string; message: string }; response: GitOperationResult };
   'workspace.push': { request: { workspaceId: string }; response: GitOperationResult };
 
+  'agents.manage': { request: void; response: readonly ManagedAgentView[] };
+  'agents.create': { request: AgentInputView; response: ManagedAgentView };
+  'agents.update': { request: { agentId: string; agent: AgentInputView }; response: ManagedAgentView };
+  'agents.remove': { request: { agentId: string }; response: boolean };
   'agents.list': { request: void; response: readonly AgentView[] };
   'agents.status': { request: void; response: readonly AgentStatusView[] };
 

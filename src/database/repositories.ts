@@ -276,10 +276,11 @@ export class AgentSessionRepository extends Repository {
     chatSessionId: string,
     connectionId: string,
     workingDirectory: string,
+    agentScope = '',
   ): AgentSessionRecord | undefined {
     const row = this.db.get<AgentSessionRecord>(
-      'SELECT * FROM agent_sessions WHERE chat_session_id = ? AND connection_id = ?',
-      [chatSessionId, connectionId],
+      'SELECT * FROM agent_sessions WHERE chat_session_id = ? AND connection_id = ? AND agent_scope = ?',
+      [chatSessionId, connectionId, agentScope],
     );
     if (!row) return undefined;
     return row.working_directory === workingDirectory ? row : undefined;
@@ -289,19 +290,21 @@ export class AgentSessionRepository extends Repository {
   remember(input: {
     chatSessionId: string;
     connectionId: string;
+    agentScope?: string;
     providerSessionId: string;
     adapterId: string;
     workingDirectory: string;
   }): void {
     const timestamp = now();
     this.db.run(
-      'INSERT INTO agent_sessions (chat_session_id, connection_id, provider_session_id, adapter_id, working_directory, created_at, updated_at) ' +
-        'VALUES (?,?,?,?,?,?,?) ON CONFLICT(chat_session_id, connection_id) DO UPDATE SET ' +
+      'INSERT INTO agent_sessions (chat_session_id, connection_id, agent_scope, provider_session_id, adapter_id, working_directory, created_at, updated_at) ' +
+        'VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(chat_session_id, connection_id, agent_scope) DO UPDATE SET ' +
         'provider_session_id = excluded.provider_session_id, adapter_id = excluded.adapter_id, ' +
         'working_directory = excluded.working_directory, updated_at = excluded.updated_at',
       [
         input.chatSessionId,
         input.connectionId,
+        input.agentScope ?? '',
         input.providerSessionId,
         input.adapterId,
         input.workingDirectory,
@@ -320,11 +323,12 @@ export class AgentSessionRepository extends Repository {
   }
 
   /** Forgets a session, so the next delegation starts a fresh one. */
-  forget(chatSessionId: string, connectionId: string): boolean {
+  forget(chatSessionId: string, connectionId: string, agentScope = ''): boolean {
     return (
-      this.db.run('DELETE FROM agent_sessions WHERE chat_session_id = ? AND connection_id = ?', [
+      this.db.run('DELETE FROM agent_sessions WHERE chat_session_id = ? AND connection_id = ? AND agent_scope = ?', [
         chatSessionId,
         connectionId,
+        agentScope,
       ]).changes > 0
     );
   }
@@ -391,6 +395,22 @@ export class AgentRepository extends Repository {
 
   list(): AgentRecord[] {
     return this.db.all<AgentRecord>('SELECT * FROM agents WHERE enabled = 1 ORDER BY role, display_name');
+  }
+
+  allManaged(): AgentRecord[] {
+    return this.db.all<AgentRecord>('SELECT * FROM agents WHERE enabled >= 0 ORDER BY role, display_name');
+  }
+
+  configure(id: string, input: {name:string; accountId:string; provider:string; role:AgentRoleName; model:string|null; enabled:boolean; options:string}): AgentRecord {
+    this.db.run('UPDATE agents SET display_name=?, account_id=?, provider_id=?, role=?, adapter_id=?, model=?, enabled=?, runtime_options=? WHERE id=?',
+      [input.name,input.accountId,input.provider,input.role,input.provider === 'openai' ? 'codex-cli' : 'claude-code-cli', input.model,input.enabled?1:0,input.options,id]);
+    return this.require(id);
+  }
+
+  archive(id: string): void { this.db.run('UPDATE agents SET enabled=-1 WHERE id=?',[id]); }
+
+  busy(id: string): boolean {
+    return !!this.db.get("SELECT 1 FROM workspace_agents wa JOIN runs r ON r.workspace_id=wa.workspace_id WHERE wa.agent_id=? AND r.status IN ('RUNNING','QUEUED') LIMIT 1",[id]);
   }
 
   find(id: string): AgentRecord | undefined {
@@ -1814,6 +1834,7 @@ export class RunRepository extends Repository {
     startedAt: string;
     /** How the model was chosen; absent for an invocation that was not routed. */
     routing?: {
+      observation?: {actualModel:string|null;actualReasoning:string|null;ceiling:string;capped:string};
       requestedCapability: string | null;
       requestedReasoning: string | null;
       resolvedModel: string | null;
@@ -1909,6 +1930,7 @@ export class RunRepository extends Repository {
         diagnostics?.workingDirectory ?? null,
       ] as SqlValue[],
     );
+    if (routing?.observation) this.db.run('UPDATE agent_invocations SET routing_observation=? WHERE id=?',[JSON.stringify(routing.observation),id]);
     if (input.outcome !== 'running') this.addConsumption(input.runId, usage);
     return id;
   }

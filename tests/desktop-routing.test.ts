@@ -546,7 +546,7 @@ test("the orchestrator's fixed level the CLI does not support is replaced and sa
     assert.equal(orchestratorRows[0]!.model, 'gpt-5.1-codex');
     assert.equal(orchestratorRows[0]!.reasoning, 'xhigh');
     assert.equal(orchestratorRows[0]!.fallbackUsed, true);
-    assert.equal(orchestratorRows[0]!.selectionReason, NOTE);
+    assert.ok(orchestratorRows[0]!.selectionReason?.includes(NOTE));
   } finally {
     await prepared.cleanup();
   }

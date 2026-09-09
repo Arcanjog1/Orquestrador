@@ -205,6 +205,7 @@ export function toRunDetailView(
       startedAt: str(row.started_at) ?? '',
       requestedCapability: str(row.requested_capability),
       requestedReasoning: str(row.requested_reasoning),
+      routingObservation: str(row.routing_observation),
       model: str(row.resolved_model),
       reasoning: str(row.resolved_reasoning),
       selectionMode: str(row.selection_mode),

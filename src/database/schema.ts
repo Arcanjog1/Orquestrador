@@ -980,6 +980,25 @@ ALTER TABLE accounts ADD COLUMN allow_premium_models INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE runs ADD COLUMN cancel_requested_at TEXT;
 `,
   },
+  {
+    id: 20,
+    name: 'agent-session-identity',
+    sql: `
+ALTER TABLE agent_sessions RENAME TO agent_sessions_legacy;
+CREATE TABLE agent_sessions (
+ chat_session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+ connection_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+ agent_scope TEXT NOT NULL DEFAULT '',
+ provider_session_id TEXT NOT NULL, adapter_id TEXT NOT NULL,
+ working_directory TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(chat_session_id,connection_id,agent_scope)
+);
+INSERT INTO agent_sessions SELECT chat_session_id,connection_id,'',provider_session_id,adapter_id,working_directory,created_at,updated_at FROM agent_sessions_legacy;
+DROP TABLE agent_sessions_legacy;
+CREATE INDEX idx_agent_sessions_connection ON agent_sessions(connection_id,updated_at DESC);
+ALTER TABLE agent_invocations ADD COLUMN routing_observation TEXT;
+`,
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

@@ -156,6 +156,7 @@ export function safeExcerpt(raw: string, max = 240): string {
 
 /** One installation of the App, as `GET /user/installations` reports it. */
 export interface AppInstallation {
+  readonly permissions?: {contents:string|null;pullRequests:string|null};
   readonly id: number;
   readonly appSlug: string | null;
   readonly account: string | null;
@@ -350,11 +351,13 @@ export class GitHubClient {
           account?: { login?: unknown };
           repository_selection?: unknown;
           html_url?: unknown;
+          permissions?: {contents?:unknown;pull_requests?:unknown};
         };
         if (typeof item.id !== 'number') return [];
         return [
           {
             id: item.id,
+            permissions:{contents:typeof item.permissions?.contents==='string'?item.permissions.contents:null,pullRequests:typeof item.permissions?.pull_requests==='string'?item.permissions.pull_requests:null},
             appSlug: typeof item.app_slug === 'string' ? item.app_slug : null,
             account: typeof item.account?.login === 'string' ? item.account.login : null,
             repositorySelection:

@@ -28,7 +28,7 @@ import {
   type GitHubToken,
   type PullRequest,
 } from '../core.js';
-import type { GitHubStatusView } from '../../shared/ipc-contract.js';
+import type { GitHubStatusView, GitHubAccessView } from '../../shared/ipc-contract.js';
 import type { EventBus } from '../events.js';
 import type { UrlOpener } from './account-service.js';
 
@@ -199,6 +199,49 @@ export class GitHubService {
       this.database.settings.remove(key);
     }
     return this.status();
+  }
+
+  private connectionKind(): GitHubAccessView['kind'] {
+    const token = this.storedToken()?.accessToken;
+    return token?.startsWith('ghu_') ? 'github-app' : token?.startsWith('gho_') ? 'oauth' : 'unknown';
+  }
+
+  async access(): Promise<GitHubAccessView> {
+    const credential = await this.credential();
+    const base: GitHubAccessView = {kind:this.connectionKind(),credential:credential.state,login:null,
+      scopes:this.database.settings.get(KEYS.scope)??'',repositoryCount:null,checkedAt:new Date().toISOString(),installations:null,
+      message:credential.state==='absent'?'Conecte o GitHub.':credential.state==='expired'?'Autorização expirada. Reconecte o GitHub.':'Verificando acesso.'};
+    if (!credential.token) return base;
+    try {
+      const user = await this.client.user(credential.token);
+      const repos = await this.client.repositories(credential.token);
+      const installs = base.kind==='oauth' ? null : await this.client.installations(credential.token);
+      this.database.settings.set(KEYS.login,user.login);
+      return {...base,login:user.login,repositoryCount:repos.length,
+        installations:installs?.map(i=>({id:i.id,account:i.account,selection:i.repositorySelection,contents:i.permissions?.contents??null,pullRequests:i.permissions?.pullRequests??null}))??null,
+        message:base.kind==='oauth'
+          ? 'OAuth usa escopos da conta. Para repositórios privados, autorize o escopo repo e o acesso à organização quando necessário. OAuth não oferece seleção All/Only selected por instalação.'
+          : 'No GitHub App, escolha All repositories ou Only select repositories na instalação do owner correto. Contents permite ler/gravar arquivos; Pull requests permite abrir PRs. Repositórios privados exigem acesso do usuário e da instalação.'};
+    } catch(error) {
+      const status=error instanceof GitHubError?error.status:null;
+      return {...base,credential:status===401?'expired':base.credential,message:status===401?'GitHub recusou a autorização (401). Reconecte.':status===403?'GitHub recusou o acesso (403). Verifique permissões, organização e limites.':status===404?'GitHub respondeu 404: recurso ausente ou sem acesso. Confirme owner e instalação.':`Não foi possível verificar: ${describe(error)}`};
+    }
+  }
+
+  async grantAccess(installationId?: number): Promise<boolean> {
+    if (installationId) {
+      const installs=await this.installations();
+      const installation=installs?.find(i=>i.id===installationId);
+      if (!installation) throw new GitHubServiceError('Instalação não encontrada nesta autorização. Verifique novamente.');
+      // GitHub redirects to the owner's official installation settings when necessary.
+      await this.openUrl(`https://github.com/settings/installations/${installationId}`);
+    } else {
+      const clientId=this.database.settings.get(KEYS.clientId);
+      await this.openUrl(this.connectionKind()==='oauth' && clientId
+        ? `https://github.com/settings/connections/applications/${encodeURIComponent(clientId)}`
+        : 'https://github.com/settings/installations');
+    }
+    return true;
   }
 
   async repositories(): Promise<GitHubRepository[]> {
@@ -373,6 +416,7 @@ export class GitHubService {
         return renewed.accessToken;
       }
     }
+    if (stored.expiresAt && stored.expiresAt <= Date.now()) throw new GitHubServiceError('A autorização do GitHub expirou. Reconecte em Contas e integrações.', 'GITHUB_EXPIRED');
     return stored.accessToken;
   }
 }

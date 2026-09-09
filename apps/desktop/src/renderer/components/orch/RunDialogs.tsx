@@ -757,13 +757,14 @@ export function RunDetailDialog({
                     {inv.task && <p className="mt-0.5 truncate text-muted-foreground">{inv.task}</p>}
                     {inv.selectionMode && (
                       <p className="mt-0.5 text-muted-foreground" data-testid="invocation-routing">
-                        Modelo <span className="font-mono">{inv.model ?? "padrão do CLI"}</span>
+                        Enviado ao runtime: modelo <span className="font-mono">{inv.model ?? "padrão do CLI"}</span>
                         {" · "}Raciocínio {reasoningLabel(inv.reasoning) ?? inv.reasoning ?? "padrão do CLI"}
                         {" · "}Seleção {selectionModeLabel(inv.selectionMode) ?? inv.selectionMode}
                         {inv.fallbackUsed ? " (com fallback)" : ""}
                         {inv.requestedCapability
                           ? ` · Pedido ${inv.requestedCapability}/${inv.requestedReasoning ?? "-"}`
                           : ""}
+                        <span className="block" data-testid="invocation-actual">{observationLine(inv.routingObservation)}</span>
                         {inv.selectionReason && (
                           <span className="block truncate" title={inv.selectionReason}>
                             Motivo: {inv.selectionReason}
@@ -803,3 +804,10 @@ const PERMISSION_TONE: Record<PermissionRequestView["status"], string> = {
   denied: "bg-muted text-muted-foreground",
   superseded: "bg-muted text-muted-foreground",
 };
+
+function observationLine(raw: string | null | undefined): string {
+  try {
+    const o=JSON.parse(raw??'{}');
+    return `Teto: ${o.ceiling??'não registrado'} · Após limite: ${o.capped??'não registrado'} · Efetivo informado pelo provedor: ${o.actualModel??'não informado'} / ${o.actualReasoning??'não informado'}`;
+  } catch { return 'Modelo e raciocínio efetivos: não informados pelo provedor'; }
+}

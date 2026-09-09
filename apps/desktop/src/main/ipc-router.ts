@@ -152,6 +152,8 @@ export class IpcRouter {
       removed: s.accounts.remove((p as { accountId: string }).accountId),
     }));
 
+    this.handlers.set('github.access', () => s.github.access());
+    this.handlers.set('github.grantAccess', p => s.github.grantAccess((p as {installationId?:number}).installationId));
     this.handlers.set('github.status', () => s.github.status());
     this.handlers.set('github.configure', (p) => s.github.configure((p as { clientId: string }).clientId));
     this.handlers.set('github.connect', () => s.github.connect());
@@ -182,6 +184,10 @@ export class IpcRouter {
     this.handlers.set('workspace.openProject', (payload) =>
       s.workspaces.openFolder((payload as { localPath: string }).localPath, s.projects),
     );
+    this.handlers.set('agents.manage', () => s.agents.manage());
+    this.handlers.set('agents.create', p => s.agents.create(p as import('../shared/ipc-contract.js').AgentInputView));
+    this.handlers.set('agents.update', p => { const input=p as {agentId:string; agent:import('../shared/ipc-contract.js').AgentInputView};return s.agents.update(input.agentId,input.agent); });
+    this.handlers.set('agents.remove', p => s.agents.remove((p as {agentId:string}).agentId));
     this.handlers.set('agents.list', () => s.agents.list());
     this.handlers.set('agents.status', () => s.agents.status());
     this.handlers.set('repository.analyse', async (payload) => {

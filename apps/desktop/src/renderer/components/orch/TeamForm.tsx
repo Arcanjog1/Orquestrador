@@ -77,6 +77,7 @@ const STRATEGIES: WorkerSelection[] = ["auto", "speed", "quality"];
 const DEFAULT = "__default__";
 
 interface MemberDraft {
+  agentId?: string;
   accountId: string;
   model: string;
   reasoning: string;
@@ -100,6 +101,7 @@ function workerDraftsOf(
 
 function draftOf(member: TeamMemberView | undefined, fallback: AccountView | undefined): MemberDraft {
   return {
+    agentId: member?.agentId ?? undefined,
     accountId: member?.accountId ?? fallback?.id ?? "",
     model: member?.model ?? "",
     reasoning: member?.reasoning ?? DEFAULT,
@@ -144,6 +146,8 @@ export function TeamForm({
     draftOf(workspace?.team.orchestrator, byProvider.openai[0]),
   );
   const [workers, setWorkers] = useState<MemberDraft[]>(() => workerDraftsOf(workspace, byProvider));
+  const [agents, setAgents] = useState<import('@shared/ipc-contract').ManagedAgentView[]>([]);
+  useEffect(() => { void api.agents.manage().then(list=>setAgents([...list])).catch(()=>undefined); }, [accounts]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   // The runtime diagnostic, read here when the caller has none: the
@@ -171,15 +175,14 @@ export function TeamForm({
     setError(null);
   }, [workspace?.id, workspace?.team, byProvider]);
 
-  // Two workers on one connection would be one worker with two names: same
-  // credential, same session, same context. The form says so before saving
-  // rather than letting the main process refuse it later.
+  // Distinct agents may share a connection: each retains its own session.
+  // Reject reusing the same agent (or the same legacy default) in two slots.
   const duplicate = (() => {
     const used = new Set<string>();
     for (const worker of workers) {
       if (!worker.accountId) continue;
-      if (used.has(worker.accountId)) return true;
-      used.add(worker.accountId);
+      if (used.has(worker.agentId || worker.accountId)) return true;
+      used.add(worker.agentId || worker.accountId);
     }
     return false;
   })();
@@ -215,6 +218,7 @@ export function TeamForm({
 
   const toInput = (draft: MemberDraft) => ({
     accountId: draft.accountId,
+    ...(draft.agentId ? {agentId:draft.agentId} : {}),
     ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
     ...(draft.reasoning !== DEFAULT ? { reasoning: draft.reasoning as ReasoningLevel } : {}),
     selection: draft.selection,
@@ -346,7 +350,7 @@ export function TeamForm({
                 ) : (
                   <Select
                     value={draft.accountId}
-                    onValueChange={(accountId) => update(spec.role, { accountId })}
+                    onValueChange={(accountId) => update(spec.role, { accountId, agentId:undefined })}
                   >
                     <SelectTrigger
                       className="mt-1 h-8 text-xs"
@@ -368,6 +372,13 @@ export function TeamForm({
                 )}
               </Labeled>
 
+              <Labeled label="Agente">
+                <select aria-label={`Agente ${prefix}`} data-testid={`team-${prefix}-agent`} className="w-full rounded border border-border bg-surface p-2 text-xs"
+                  value={draft.agentId ?? ''} onChange={e=>updateRow({agentId:e.target.value || undefined})}>
+                  <option value="">Agente padrão da conta</option>
+                  {agents.filter(a=>a.enabled && a.accountId===draft.accountId && a.role===spec.role).map(a=><option key={a.id} value={a.id}>{a.name} · {a.id.slice(-6)}</option>)}
+                </select>
+              </Labeled>
               {/* Orchestrator, CLI default: two read-only cells that say so. */}
               {!isWorker && !manual && (
                 <>

@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { api, messageOf } from "@/lib/api";
 import { ProviderIcon } from "./primitives";
 import { LoginDialog } from "./dialogs";
-import type { GitHubStatusView } from "@shared/ipc-contract";
+import type { GitHubStatusView, GitHubAccessView } from "@shared/ipc-contract";
 
 /** The id the main process reports GitHub sign-in progress under. */
 export const GITHUB_ACCOUNT_ID = "github";
@@ -31,7 +31,12 @@ export function GitHubCard({
   const [busy, setBusy] = useState<"save" | "connect" | "disconnect" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [login, setLogin] = useState(false);
+  const [access,setAccess]=useState<GitHubAccessView|null>(null);
+  const [checking,setChecking]=useState(false);
+  const check=async()=>{setChecking(true);setError(null);try{setAccess(await api.github.access());onChanged();}catch(e){setError(messageOf(e));}finally{setChecking(false);}};
+  const grant=async(installationId?:number)=>{try{await api.github.grantAccess(installationId?{installationId}:{});}catch(e){setError(messageOf(e));}};
   const [showHelp, setShowHelp] = useState(false);
+  useEffect(()=>{let cancelled=false;if(status?.connected)void api.github.access().then(value=>{if(!cancelled)setAccess(value);}).catch(e=>{if(!cancelled)setError(messageOf(e));});else setAccess(null);return()=>{cancelled=true;};},[status?.connected,status?.login]);
 
   useEffect(() => {
     setClientId(status?.clientId ?? "");
@@ -129,6 +134,14 @@ export function GitHubCard({
         </div>
       )}
 
+      {connected && <div className="mt-3 space-y-2 text-xs" data-testid="github-access-panel">
+        <div className="flex gap-2"><Button variant="secondary" size="sm" data-testid="github-grant-access" onClick={()=>void grant()}>Liberar acesso</Button><Button variant="ghost" size="sm" disabled={checking} data-testid="github-recheck-access" onClick={()=>void check()}>{checking?'Verificando…':'Verificar novamente'}</Button></div>
+        {access && <><p>{access.login?`Identidade confirmada: ${access.login}. `:''}{access.repositoryCount!==null?`${access.repositoryCount} repositórios visíveis.`:''}</p><p>{access.message}</p>
+          {access.kind==='oauth' && <p>Escopos autorizados: {access.scopes||'não informados'}</p>}
+          {access.installations?.map(i=><div key={i.id} className="rounded border p-2"><p>{i.account??'Owner não informado'} · {i.selection==='all'?'Todos os repositórios':i.selection==='selected'?'Somente selecionados':'Seleção não informada'}</p><p>Contents: {i.contents??'não informado'} · Pull requests: {i.pullRequests??'não informado'}</p><button className="text-primary underline" onClick={()=>void grant(i.id)}>Gerenciar esta instalação</button></div>)}
+          <p className="text-muted-foreground">Verificado: {new Date(access.checkedAt).toLocaleString()}. Após criar um repositório ou alterar a seleção, verifique novamente.</p>
+        </>}
+      </div>}
       {!connected && (
         <div className="mt-3 space-y-3">
           {!compact && (
@@ -164,7 +177,7 @@ export function GitHubCard({
                 <strong>Checks: Read</strong>. Permissões de conta: <strong>Email addresses: Read</strong>.
               </li>
               <li>
-                Depois de criar, <strong>instale o app</strong> na sua conta (e nas organizações
+                Depois de criar, <strong>instale o app</strong>, escolhendo All repositories ou Only select repositories, na sua conta (e nas organizações
                 cujos repositórios privados você quer ver) e copie o <strong>Client ID</strong>.
               </li>
             </ol>

@@ -1,3 +1,4 @@
+import { AgentsCard } from '@/components/orch/AgentsCard';
 import { useEffect, useState } from "react";
 import { ArrowLeft, Check, Loader2, MoreHorizontal, Plus } from "lucide-react";
 import { toast } from "sonner";
@@ -45,6 +46,7 @@ const tabs = [
   { id: "general", label: "General" },
   { id: "appearance", label: "Appearance" },
   { id: "accounts", label: "Accounts & Integrations" },
+  { id: "agents", label: "Agentes" },
   { id: "execution", label: "Execution" },
   { id: "verifications", label: "Verificações do projeto" },
   { id: "git", label: "Git" },
@@ -173,6 +175,7 @@ export function SettingsPage({
             {tabs.find((t) => t.id === active)?.label}
           </h1>
 
+          {active === "agents" && <AgentsCard accounts={accounts} onChanged={reload} />}
           {active === "accounts" && (
             <div className="mt-8 space-y-8">
               <section>

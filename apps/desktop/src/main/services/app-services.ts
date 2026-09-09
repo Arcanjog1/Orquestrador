@@ -327,6 +327,7 @@ export class AppServices {
       const agent = this.database.agents.find(agentId);
       if (!agent) return `O agente ${what} este projeto não existe mais. Escolha a conta em Equipe.`;
 
+      if (agent.enabled !== 1) return 'O agente foi desativado ou removido. Escolha outro em Equipe.';
       // Every role runs on one of the user's own accounts, in that account's
       // isolated profile. A credential the machine happens to have is never
       // used, so an unbound agent is a configuration gap, not a fallback.
@@ -508,6 +509,7 @@ export class AppServices {
           providerId: account?.provider_id ?? null,
           connectionKind: 'api',
           agentId: binding.agentId,
+          routing:{provider:account?.provider_id==='openai'?'openai':'anthropic',selection:'manual',manual:{model:binding.model??agent?.model??account?.default_model??null,reasoning:binding.reasoning??account?.default_reasoning??null},capabilities:async()=>({modelFlag:true,effortFlag:true,declaredModels:null,declaredEfforts:['low','medium','high','max']})},
         });
         continue;
       }

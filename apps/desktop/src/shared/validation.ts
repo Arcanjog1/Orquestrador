@@ -21,6 +21,7 @@ import {
   ACCOUNT_REASONING_TIERS,
   REASONING_LEVELS,
   WORKER_SELECTIONS,
+  type AgentInputView,
   type IpcMap,
   type RequestChannel,
 } from './ipc-contract.js';
@@ -275,7 +276,16 @@ export const branchName: Validator<string> = (value, path) => {
 };
 
 /** One role of a workspace team: the account, and how it should run. */
+const agentInput = obj<AgentInputView>({
+  name: sessionTitle, role: oneOf(['ORCHESTRATOR', 'CODING_WORKER'] as const),
+  provider: oneOf(['openai', 'anthropic'] as const), accountId: id,
+  model: nullable(modelName), reasoning: nullable(oneOf(REASONING_LEVELS)),
+  maxCapability: nullable(oneOf(ACCOUNT_CAPABILITY_TIERS)),
+  maxReasoning: nullable(oneOf(ACCOUNT_REASONING_TIERS)), enabled: bool,
+});
+
 export const teamMember = obj<{
+  agentId?: string;
   accountId: string;
   model?: string;
   reasoning?: string;
@@ -284,12 +294,13 @@ export const teamMember = obj<{
 }>(
   {
     accountId: id,
+    agentId: id,
     model: modelName,
     reasoning: oneOf(REASONING_LEVELS),
     selection: oneOf(WORKER_SELECTIONS),
     label: str({ min: 1, max: 120 }),
   },
-  { optional: ['model', 'reasoning', 'selection', 'label'] },
+  { optional: ['agentId', 'model', 'reasoning', 'selection', 'label'] },
 );
 
 /**
@@ -392,6 +403,8 @@ export const REQUEST_VALIDATORS: {
     allowPremiumModels: bool,
   }),
 
+  'github.access': noArgs,
+  'github.grantAccess': obj({installationId:int({min:1,max:Number.MAX_SAFE_INTEGER})},{optional:['installationId']}),
   'github.status': noArgs,
   // Shape only: the service says, case by case, what is wrong with a value
   // (an App ID, the help example, a token), which a pattern here cannot.
@@ -417,6 +430,10 @@ export const REQUEST_VALIDATORS: {
   'workspace.commit': obj({ workspaceId: id, message: str({ min: 1, max: 5000 }) }),
   'workspace.push': obj({ workspaceId: id }),
 
+  'agents.manage': noArgs,
+  'agents.create': agentInput,
+  'agents.update': obj({agentId: id, agent: agentInput}),
+  'agents.remove': obj({agentId: id}),
   'agents.list': noArgs,
   'agents.status': noArgs,
 

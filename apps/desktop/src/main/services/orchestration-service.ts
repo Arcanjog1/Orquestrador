@@ -1,3 +1,6 @@
+import { agentConfig } from './agent-service.js';
+import { capabilityRank, reasoningRank } from '../../../../../src/routing/tiers.js';
+import { orchestratorSelectionOf } from './workspace-service.js';
 /**
  * The orchestration loop.
  *
@@ -1049,8 +1052,9 @@ export class OrchestrationService {
       );
     }
     this.step(runId, 0, 'capabilities', 'read', `${capabilitiesOf.size} worker(s) consultados`);
-    const attempts: PreviousAttempt[] = [];
-    const unavailableModels: string[] = [];
+    const attemptsByWorker = new Map(team.map(slot => [slot.id, [] as PreviousAttempt[]]));
+    const unavailableByWorker = new Map(team.map(slot => [slot.id, [] as string[]]));
+    let lastDelegatedWorkerId = team[0]?.id ?? 'worker-1';
     /** The last answer a worker gave, which is what a conversation run ends with. */
     let lastWorkerAnswer = '';
     /** This iteration's worker answer, which is what its report is about. */
@@ -1138,9 +1142,9 @@ export class OrchestrationService {
         // Say exactly what happened - the CLI's exit, or what it answered
         // instead of a decision - rather than a sentence that fits everything.
         const reason = asked.failure ?? 'O orquestrador não devolveu uma decisão válida.';
-        this.database.runs.setStatus(runId, 'FAILED', reason);
-        this.say(sessionId, runId, 'system', `Falhou: ${reason}`);
-        this.progress(runId, sessionId, 'failed', 'Falhou.', 'FAILED');
+        this.database.runs.setStatus(runId, asked.policyBlocked ? 'NEEDS_HUMAN' : 'FAILED', reason);
+        this.say(sessionId, runId, 'system', reason);
+        this.progress(runId, sessionId, asked.policyBlocked ? 'needs-human' : 'failed', reason, asked.policyBlocked ? 'NEEDS_HUMAN' : 'FAILED');
         return;
       }
       const decision = asked.decision;
@@ -1276,6 +1280,7 @@ export class OrchestrationService {
             } finally { this.branchTasks.delete(key); }
           }));
           if (this.stopping(runId,signal)) return this.finishCancelled(runId,sessionId);
+          if (this.database.runs.require(runId).status === 'NEEDS_HUMAN') return;
           const paths=new Set<string>();
           const taskPaths=new Map<string,string[]>();
           const changes: import('../../../../../src/github/repository-operations.js').RepositoryChange[]=[];
@@ -1339,6 +1344,7 @@ export class OrchestrationService {
         // that arrived while the supervisor was thinking used to be noticed
         // only after the worker had already been started.
         if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
+        lastDelegatedWorkerId = slot.id;
         const delegated = await this.delegate({
           runId,
           sessionId,
@@ -1353,13 +1359,15 @@ export class OrchestrationService {
           causationId: decisionMessageId,
           routing: slot.routing ?? null,
           capabilities: capabilitiesOf.get(slot.id) ?? NO_CAPABILITIES,
-          attempts,
-          unavailableModels,
+          attempts: attemptsByWorker.get(slot.id)!,
+          unavailableModels: unavailableByWorker.get(slot.id)!,
           signal,
           budget,
           github,
           fileReads: carriedReads,
         });
+        // A policy/budget pause must not invoke the supervisor again or apply proposals.
+        if (this.database.runs.require(runId).status === 'NEEDS_HUMAN') return;
         record.worker = delegated.record;
         iterationAnswer = delegated.answer;
         if (delegated.answer.trim()) lastWorkerAnswer = delegated.answer;
@@ -1514,7 +1522,7 @@ export class OrchestrationService {
       const tree = treeKey(evidence.statusShort, evidence.diff);
       if (record.worker) {
         record.worker.progressed = tree !== previousTree || (isReadOnlyObjective(objective) && carriedReads.some(r => r.ok) && !!iterationAnswer.trim());
-        attempts.push({
+        attemptsByWorker.get(lastDelegatedWorkerId)!.push({
           iteration,
           capability: record.worker.routing?.requestedCapability ?? 'BALANCED',
           reasoning: record.worker.routing?.requestedReasoning ?? 'MEDIUM',
@@ -2117,8 +2125,23 @@ export class OrchestrationService {
     budget: BudgetLedger;
     /** Told what the adapter actually sent for model and level, once per attempt. */
     onApplied?: (applied: NonNullable<AgentResult['applied']>) => void;
-  }): Promise<{ decision: Decision | null; failure?: string }> {
+  }): Promise<{ decision: Decision | null; failure?: string; policyBlocked?: boolean }> {
     const { runId, workspace, cwd, runners, iteration, signal } = input;
+    const accountId = this.orchestratorAccountId(workspace);
+    this.checkAgent(workspace.orchestrator_agent_id, accountId);
+    const policy = this.policyFor(accountId, workspace.orchestrator_agent_id);
+    const agent = workspace.orchestrator_agent_id ? this.database.agents.find(workspace.orchestrator_agent_id) : undefined;
+    const config = agent ? agentConfig(agent.runtime_options) : {};
+    const pinned = orchestratorSelectionOf(workspace) === 'manual';
+    const models = {FAST:'gpt-5.1-codex-mini',BALANCED:'gpt-5.1-codex',STRONG:'gpt-5.3-codex',MAX:'gpt-5.3-codex'};
+    const connection = accountId ? this.database.accounts.find(accountId) : undefined;
+    const model = pinned ? workspace.orchestrator_model : agent?.model ?? connection?.default_model ?? (policy.maxCapability ? models[policy.maxCapability] : null);
+    const reasoning = pinned ? workspace.orchestrator_reasoning : config.reasoning ?? connection?.default_reasoning ?? null;
+    const route = routeWorkerModel({provider:'openai', accountId, task:'supervision',requested:null,previousAttempts:[],selection:'manual',
+      manual:{model,reasoning},policy,capabilities:{modelFlag:true,effortFlag:true,declaredModels:null,declaredEfforts:['low','medium','high','xhigh','max']}});
+    const routeNote = `Orquestrador solicitado ${model ?? 'padrão'}/${reasoning ?? 'padrão'}; teto ${policy.maxCapability ?? 'sem teto'}/${policy.maxReasoning ?? 'sem teto'}; ${route.selectionReason}`;
+    this.step(runId,iteration,'routing',route.policyBlocked?'blocked':'resolved',routeNote);
+    if (route.policyBlocked) return {decision:null,failure:routeNote,policyBlocked:true};
     let currentPrompt = input.prompt;
     let lastProblem = 'nenhuma resposta';
     let lastExcerpt = '';
@@ -2128,6 +2151,8 @@ export class OrchestrationService {
       this.progress(runId, this.database.runs.require(runId).session_id ?? '', 'orchestrator', 'Codex analisando...', 'RUNNING');
       const result = await runners.orchestrator.run({
         prompt: currentPrompt,
+        routing:{model:route.resolvedModel,reasoning:route.resolvedReasoning},
+        strictRouting:!!(policy.maxCapability || policy.maxReasoning),
         workingDirectory: cwd,
         timeoutMs: this.options.agentTimeoutMs ?? DEFAULTS.agentTimeoutMs,
         runId,
@@ -2183,11 +2208,12 @@ export class OrchestrationService {
               requestedReasoning: null,
               resolvedModel: result.applied.model,
               resolvedReasoning: result.applied.reasoning,
+              observation:{actualModel:result.observed?.model??null,actualReasoning:result.observed?.reasoning??null,ceiling:`${policy.maxCapability??'sem teto'}/${policy.maxReasoning??'sem teto'}`,capped:`${route.capability}/${route.reasoning}`},
               selectionMode: 'fixed',
-              selectionReason: result.applied.note
+              selectionReason: routeNote + '; ' + (result.applied.note
                 ? result.applied.note
                 : 'configuração fixa do orquestrador' +
-                  (workspace.orchestrator_model || workspace.orchestrator_reasoning ? '' : ' (padrão do CLI)'),
+                  (workspace.orchestrator_model || workspace.orchestrator_reasoning ? '' : ' (padrão do CLI)')),
               fallbackUsed: result.applied.fallbackUsed,
             }
           : null,
@@ -3167,7 +3193,26 @@ export class OrchestrationService {
    * to spend. An unreadable account gets the same defaults rather than an
    * exception - a routing decision must not fail on a settings lookup.
    */
-  private policyFor(accountId: string | null): AccountRoutingPolicy {
+  private policyFor(accountId: string | null, agentId?: string | null): AccountRoutingPolicy {
+    const account = this.accountPolicyFor(accountId);
+    const agent = agentId ? this.database.agents.find(agentId) : undefined;
+    const config = agent ? agentConfig(agent.runtime_options) : {};
+    const c = config.maxCapability ?? null, r = config.maxReasoning ?? null;
+    return {maxCapability: c && (!account.maxCapability || capabilityRank(c)<capabilityRank(account.maxCapability)) ? c : account.maxCapability,
+      maxReasoning: r && (!account.maxReasoning || reasoningRank(r)<reasoningRank(account.maxReasoning)) ? r : account.maxReasoning,
+      allowPremiumModels: account.allowPremiumModels};
+  }
+
+  private checkAgent(agentId: string | null, accountId: string | null): void {
+    if (!agentId) return;
+    const agent = this.database.agents.find(agentId);
+    if (!agent) return; // Scripted fixtures without a persisted agent.
+    if (agent.enabled !== 1) throw new Error('O agente foi desativado ou removido. Escolha outro na equipe.');
+    if ((accountId !== null || agentConfig(agent.runtime_options).managed) && agent.account_id !== accountId) throw new Error('A conta do agente mudou. Reabra a equipe antes de executar.');
+    if (agentConfig(agent.runtime_options).managed && this.database.accounts.find(accountId ?? '')?.auth_state !== 'connected') throw new Error('A conta deste agente não está conectada.');
+  }
+
+  private accountPolicyFor(accountId: string | null): AccountRoutingPolicy {
     if (!accountId) return DEFAULT_ACCOUNT_POLICY;
     try {
       const account = this.database.accounts.find(accountId);
@@ -3417,23 +3462,35 @@ export class OrchestrationService {
     }
 
     for (let attempt = 0; attempt <= MODEL_RETRIES; attempt += 1) {
-      const routed: RouterOutput | null = input.routing
+      this.checkAgent(slot.agentId ?? workspace.worker_agent_id, slot.accountId);
+      const persistedAgent = slot.agentId ? this.database.agents.find(slot.agentId) : undefined;
+      const agentOptions = persistedAgent ? agentConfig(persistedAgent.runtime_options) : {};
+      const agentManual = persistedAgent?.model ? {model:persistedAgent.model,reasoning:agentOptions.reasoning ?? null} : undefined;
+      let routed: RouterOutput | null = input.routing
         ? routeWorkerModel({
             provider: input.routing.provider,
-            accountId: runners.workerAccountId,
+            accountId: slot.accountId,
             task,
             requested: input.decision.workerRequirements ?? null,
             previousAttempts: input.attempts,
             capabilities: input.capabilities,
-            selection: input.routing.selection,
-            manual: input.routing.manual,
+            selection: agentManual ? 'manual' : input.routing.selection,
+            manual: agentManual ?? input.routing.manual,
             unavailableModels: input.unavailableModels,
             // What this account is allowed to spend on. Read per delegation,
             // from the account actually being used, so two Claude accounts can
             // hold different ceilings and neither is a global switch.
-            policy: this.policyFor(slot.accountId),
+            policy: this.policyFor(slot.accountId,slot.agentId),
           })
         : null;
+
+      if (routed && !routed.policyBlocked && !agentManual && agentOptions.reasoning && input.routing) {
+        const fixed = routeWorkerModel({provider:input.routing.provider,accountId:slot.accountId,task,
+          requested:input.decision.workerRequirements??null,previousAttempts:[],capabilities:input.capabilities,
+          selection:'manual',manual:{model:routed.resolvedModel,reasoning:agentOptions.reasoning},policy:this.policyFor(slot.accountId,slot.agentId)});
+        routed={...routed,resolvedReasoning:fixed.resolvedReasoning,policyBlocked:fixed.policyBlocked,
+          fallbackUsed:routed.fallbackUsed||fixed.fallbackUsed,selectionReason:routed.selectionReason+'; raciocínio do agente: '+fixed.selectionReason};
+      }
 
       // The policy left nothing to run. That is a question for the person, not
       // a model choice: falling through to the CLI default here would run the
@@ -3502,7 +3559,7 @@ export class OrchestrationService {
       // another - and only when the working directory matches, because both
       // tools store sessions per project.
       const previousSession = slot.accountId
-        ? this.database.agentSessions.find(input.sessionId, slot.accountId, cwd)
+        ? this.database.agentSessions.find(input.sessionId, slot.accountId, cwd, agentOptions.managed ? slot.agentId ?? '' : '')
         : undefined;
 
       const startedAt = new Date().toISOString();
@@ -3555,7 +3612,7 @@ export class OrchestrationService {
           onActivity: (snapshot) => this.sayActivity(runId, sessionId, slot, snapshot),
           ...(resumeSessionId ? { resumeSessionId } : {}),
           ...(routed
-            ? { routing: { model: routed.resolvedModel, reasoning: routed.resolvedReasoning } }
+            ? { routing: { model: routed.resolvedModel, reasoning: routed.resolvedReasoning }, strictRouting: !!(this.policyFor(slot.accountId,slot.agentId).maxCapability || this.policyFor(slot.accountId,slot.agentId).maxReasoning || (input.routing?.provider === 'anthropic' && !this.policyFor(slot.accountId,slot.agentId).allowPremiumModels)) }
             : {}),
         });
 
@@ -3569,7 +3626,7 @@ export class OrchestrationService {
       // simply be gone. Forget it and do the same delegation once more with a
       // fresh session, rather than failing a run over bookkeeping.
       if (!branchCancelled && !this.stopping(runId,input.signal) && previousSession && sessionMissing(result)) {
-        this.database.agentSessions.forget(input.sessionId, slot.accountId!);
+        this.database.agentSessions.forget(input.sessionId, slot.accountId!, agentOptions.managed ? slot.agentId ?? '' : '');
         this.step(runId, iteration, 'worker', 'session-expired', `${slot.label}: sessão anterior expirou`, {
           workerId: slot.id,
         });
@@ -3583,6 +3640,7 @@ export class OrchestrationService {
         this.database.agentSessions.remember({
           chatSessionId: input.sessionId,
           connectionId: slot.accountId,
+          agentScope: agentOptions.managed ? slot.agentId ?? '' : '',
           providerSessionId: result.sessionId,
           adapterId: slot.runner.kind,
           workingDirectory: cwd,
@@ -3594,6 +3652,7 @@ export class OrchestrationService {
       const recorded: RoutingRecord | null = planned
         ? {
             ...planned,
+            observation:{actualModel:result.observed?.model??null,actualReasoning:result.observed?.reasoning??null,ceiling:`${this.policyFor(slot.accountId,slot.agentId).maxCapability??'sem teto'}/${this.policyFor(slot.accountId,slot.agentId).maxReasoning??'sem teto'}`,capped:`${routed?.capability??'não informado'}/${routed?.reasoning??'não informado'}`},
             resolvedModel: result.applied ? result.applied.model : planned.resolvedModel,
             resolvedReasoning: result.applied ? result.applied.reasoning : planned.resolvedReasoning,
             fallbackUsed: planned.fallbackUsed || (result.applied?.fallbackUsed ?? false),
