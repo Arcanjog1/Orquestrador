@@ -23,6 +23,8 @@
 
 import {
   candidateSequence,
+  modelCapability,
+  EFFORT_ORDER,
   resolveEffortForTier,
   resolveFixedEffort,
   type WorkerRuntimeCapabilities,
@@ -38,6 +40,7 @@ import {
 } from './account-policy.js';
 import {
   DEFAULT_REQUIREMENTS,
+  capabilityRank,
   higherCapability,
   higherReasoning,
   promoteCapability,
@@ -128,40 +131,32 @@ export function routeWorkerModel(input: RouterInput): RouterOutput {
   //    against the account's policy. A typed model is still a request, and a
   //    policy that a manual choice could step over would not be a policy.
   if (input.selection === 'manual') {
-    const typed = input.capabilities.modelFlag ? input.manual?.model?.trim() || null : null;
-    let model = typed;
-    if (typed && refusesModel(typed, policy)) {
-      model = null;
-      fallbackUsed = true;
-      reasons.push(
-        `"${typed}" exige créditos extras e a política desta conta não permite; ` +
-          'usando o padrão do CLI',
-      );
-    }
+    const typed = input.manual?.model?.trim() || null;
+    const known = typed ? modelCapability(input.provider, typed) : null;
+    const ceiling = applyCeiling(known ?? requested.capability, requested.reasoning, policy);
+    const savedEffort = input.manual?.reasoning ?? null;
+    const maxEffort = policy.maxReasoning?.toLowerCase() ?? null;
+    const effortRequest = maxEffort && (!savedEffort || EFFORT_ORDER.indexOf(savedEffort) > EFFORT_ORDER.indexOf(maxEffort)) ? maxEffort : savedEffort;
     const effort = input.capabilities.effortFlag
-      ? resolveFixedEffort(input.manual?.reasoning ?? null, input.capabilities.declaredEfforts)
-      : { value: null, fallbackUsed: false, note: null };
-    if (input.manual?.model && !input.capabilities.modelFlag) {
-      fallbackUsed = true;
-      reasons.push('o CLI não aceita --model; padrão do CLI');
-    }
-    if (effort.note) {
-      fallbackUsed = true;
-      reasons.push(effort.note);
-    }
-    reasons.unshift('seleção manual');
+      ? resolveFixedEffort(effortRequest, input.capabilities.declaredEfforts)
+      : {value:null, fallbackUsed:false, note:null};
+    const blocked = !!(typed && refusesModel(typed, policy)) ||
+      !!(input.provider === 'anthropic' && !policy.allowPremiumModels && (!typed || !input.capabilities.modelFlag)) ||
+      !!(policy.maxCapability && (!known || !input.capabilities.modelFlag || capabilityRank(known) > capabilityRank(policy.maxCapability))) ||
+      !!(policy.maxReasoning && (!input.capabilities.effortFlag || !effort.value));
+    reasons.unshift(`seleção manual: ${typed ?? 'padrão'}/${savedEffort ?? 'padrão'}`);
+    if (typed && refusesModel(typed, policy)) reasons.push('exige créditos extras e a política desta conta não permite');
+    if (blocked) reasons.push('modelo solicitado fora do teto, premium não autorizado ou limite impossível de garantir; execução bloqueada');
+    if (ceiling.note) reasons.push(ceiling.note);
+    if (effortRequest !== savedEffort) reasons.push(`raciocínio limitado a ${effortRequest} pelo teto ${policy.maxReasoning}`);
+    if (effort.note) reasons.push(effort.note);
     return {
-      requestedCapability: requested.capability,
-      requestedReasoning: requested.reasoning,
-      capability: requested.capability,
-      reasoning: requested.reasoning,
-      resolvedModel: model,
-      resolvedReasoning: effort.value,
-      selectionMode: 'manual',
-      selectionReason: reasons.join('; '),
-      fallbackUsed,
-      alternatives: [],
-      policyBlocked: false,
+      requestedCapability: known ?? requested.capability, requestedReasoning: requested.reasoning,
+      capability: ceiling.capability, reasoning: ceiling.reasoning,
+      resolvedModel: !blocked && input.capabilities.modelFlag ? typed : null, resolvedReasoning: effort.value,
+      selectionMode:'manual', selectionReason:reasons.join('; '),
+      fallbackUsed:blocked || effort.fallbackUsed || effortRequest !== savedEffort,
+      alternatives:[], policyBlocked:blocked,
     };
   }
 
@@ -236,23 +231,22 @@ export function routeWorkerModel(input: RouterInput): RouterOutput {
   if (!input.capabilities.modelFlag) {
     fallbackUsed = true;
     reasons.push('o CLI não aceita --model; padrão do CLI');
+    if (policy.maxCapability || (input.provider === 'anthropic' && !policy.allowPremiumModels)) policyBlocked = true;
   } else {
     const sequence = candidateSequence(input.provider, capability, input.unavailableModels ?? [], (model) =>
-      refusesModel(model, policy),
+      refusesModel(model, policy) || !!(policy.maxCapability &&
+        (!modelCapability(input.provider, model) || capabilityRank(modelCapability(input.provider, model)!) > capabilityRank(policy.maxCapability))),
     );
     const withoutPolicy = candidateSequence(input.provider, capability, input.unavailableModels ?? []);
     const first = sequence[0];
     if (!first) {
       fallbackUsed = true;
-      // Nothing left *because of the policy* is a different situation from
-      // nothing left at all: the first is a decision the person can change,
-      // and falling back to the CLI default there would run a model the
-      // policy exists to keep out.
-      policyBlocked = withoutPolicy.length > 0;
+      // Exhaustion never delegates the policy decision to an unknown CLI default.
+      policyBlocked = true;
       reasons.push(
-        policyBlocked
-          ? 'todos os modelos deste nível exigem créditos extras e a política desta conta não permite'
-          : 'nenhum modelo disponível na política; padrão do CLI',
+        withoutPolicy.length > 0 && withoutPolicy.every(entry => refusesModel(entry.model, policy))
+          ? 'todos os modelos disponíveis exigem créditos extras e a política desta conta não permite'
+          : 'nenhum modelo disponível respeita o teto e a política de créditos extras; execução bloqueada',
       );
     } else {
       resolvedModel = first.model;
@@ -291,6 +285,7 @@ export function routeWorkerModel(input: RouterInput): RouterOutput {
     if (effort.note) reasons.push(effort.note);
   }
 
+  if (policy.maxReasoning && !resolvedReasoning) policyBlocked = true;
   return {
     requestedCapability: requested.capability,
     requestedReasoning: requested.reasoning,

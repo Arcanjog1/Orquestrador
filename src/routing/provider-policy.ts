@@ -191,3 +191,20 @@ export function codexSupportedEfforts(version: string | null | undefined): reado
   const base = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
   return compareVersions(version, '0.140.0') >= 0 ? [...base, 'max'] : base;
 }
+
+/** Application capability classification. Unknown names require a policy update. */
+export function modelCapability(provider: RoutingProvider, model: string): CapabilityTier | null {
+  const name = model.trim().toLowerCase();
+  if (provider === 'anthropic') {
+    if (/^(?:claude-)?haiku(?:-|$)/.test(name)) return 'FAST';
+    if (/^(?:claude-)?sonnet(?:-|$)/.test(name)) return 'BALANCED';
+    if (/^(?:claude-)?opus(?:-|$)/.test(name)) return 'STRONG';
+    if (/^(?:claude-)?fable(?:-|$)/.test(name)) return 'MAX';
+  }
+  if (provider === 'openai') {
+    if (['gpt-5.1-codex-mini', 'gpt-5-mini'].includes(name)) return 'FAST';
+    if (['gpt-5.1-codex', 'gpt-5-codex'].includes(name)) return 'BALANCED';
+    if (['gpt-5.1-codex-max', 'gpt-5.2-codex', 'gpt-5.3-codex'].includes(name)) return 'STRONG';
+  }
+  return null;
+}

@@ -231,6 +231,7 @@ export interface InvocationRouting {
  * invocation, shown in the timeline and the run's details.
  */
 export interface RoutingRecord {
+  observation?: {actualModel:string|null; actualReasoning:string|null; ceiling:string; capped:string};
   requestedCapability: CapabilityTier | null;
   requestedReasoning: ReasoningTier | null;
   resolvedModel: string | null;
@@ -277,6 +278,8 @@ export interface AgentInput {
   env?: Record<string, string | undefined>;
   /** Model and reasoning for this invocation; absent means the adapter's defaults. */
   routing?: InvocationRouting;
+  /** Do not drop or increase an enforced routing value at the adapter boundary. */
+  strictRouting?: boolean;
   /**
    * The provider-side session this invocation should continue.
    *
@@ -340,6 +343,7 @@ export interface AgentResult {
    * What the adapter actually sent for model and reasoning, after checking
    * them against the CLI - with a note when it had to change something.
    */
+  observed?: {model:string|null;reasoning:string|null};
   applied?: InvocationRouting & { fallbackUsed: boolean; note: string | null };
   /** Tokens and estimated cost, when the provider reports them. */
   usage?: InvocationUsage;

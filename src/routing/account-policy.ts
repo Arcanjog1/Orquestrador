@@ -49,7 +49,7 @@ import {
 export const PREMIUM_MODELS: ReadonlySet<string> = new Set(['fable']);
 
 export function isPremiumModel(model: string | null | undefined): boolean {
-  return typeof model === 'string' && PREMIUM_MODELS.has(model.trim().toLowerCase());
+  return typeof model === 'string' && (/^(?:claude-)?fable(?:-|$)/i.test(model.trim()));
 }
 
 export interface AccountRoutingPolicy {

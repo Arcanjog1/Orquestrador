@@ -112,6 +112,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
     };
     const resume = input.resumeSessionId ?? this.options.resumeSessionId?.() ?? null;
     const plan = await this.buildArgs(executable, input.workingDirectory, routing, resume);
+    if (input.strictRouting && ((routing.model && plan.applied.model !== routing.model) || (routing.reasoning && !plan.applied.reasoning))) throw new Error('O runtime não permite garantir o teto configurado. Atualize o runtime.');
     const env = { ...this.options.buildEnvironment(), ...(input.env ?? {}) };
 
     const controller = new AbortController();
@@ -215,6 +216,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
         truncated: result.truncated,
         executable,
         applied: plan.applied,
+        observed: {model:reportedClaudeModel(result.stdout),reasoning:null},
         // Exactly what `--allowedTools` carried, so an authorisation can be
         // proven at the runtime instead of inferred from a grant row.
         authorisedTools: plan.authorisedTools,
@@ -801,4 +803,19 @@ function stallSummary(stalled: boolean, idleTimeoutMs: number, monitor: Activity
     `O worker ficou ${seconds}s sem produzir nenhuma saída e foi interrompido.` +
     `${doing} Isso não é falta de capacidade: um modelo mais forte não destrava um processo parado.`
   );
+}
+
+/** Only structured provider events count; prose or our own flags never do. */
+export function reportedClaudeModel(stdout: string): string | null {
+  for (const line of stdout.split(/\r?\n/)) {
+    try {
+      const event=JSON.parse(line);
+      if (event?.type==='system' && event.subtype==='init' && typeof event.model==='string') return event.model;
+      if (event?.type==='result' && event.modelUsage && typeof event.modelUsage==='object') {
+        const names=Object.keys(event.modelUsage);
+        if (names.length===1) return names[0]!;
+      }
+    } catch { /* Non-JSON transcript lines are not evidence of the model. */ }
+  }
+  return null;
 }

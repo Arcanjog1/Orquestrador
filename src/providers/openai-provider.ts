@@ -140,6 +140,7 @@ export class OpenAiApiProvider implements AgentProvider {
 
     const requested = input.routing?.reasoning ?? this.options.reasoningEffort ?? null;
     const effort = requested && OPENAI_EFFORTS.includes(requested) ? requested : null;
+    if (input.strictRouting && requested && !effort) return this.failure(startedAt,new ProviderError('invalid-request','A API não aceita o raciocínio necessário para garantir o teto.'));
     const notes: string[] = [];
     if (requested && !effort) {
       notes.push(`a API da OpenAI não aceita o nível "${requested}"; enviado sem nível`);
@@ -196,6 +197,7 @@ export class OpenAiApiProvider implements AgentProvider {
         stdout: text,
         stderr,
         executable: `${this.baseUrl()}/responses`,
+        observed:{model:response.model??null,reasoning:null},
         applied: {
           model,
           reasoning: effort,

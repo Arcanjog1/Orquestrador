@@ -123,6 +123,7 @@ export class AnthropicApiProvider implements AgentProvider {
 
     const requested = input.routing?.reasoning ?? this.options.reasoningEffort ?? null;
     const effort = requested && ANTHROPIC_EFFORTS.includes(requested) ? requested : null;
+    if (input.strictRouting && requested && !effort) return this.failure(startedAt,new ProviderError('invalid-request','A API não aceita o raciocínio necessário para garantir o teto.'));
     const notes: string[] = [];
     if (requested && !effort) {
       notes.push(`a API da Anthropic não aceita o nível "${requested}"; enviado sem nível`);
@@ -167,6 +168,7 @@ export class AnthropicApiProvider implements AgentProvider {
         stdout: textOf(response),
         stderr: problem,
         executable: `${this.baseUrl()}/messages`,
+        observed:{model:response.model??null,reasoning:null},
         applied: {
           model,
           reasoning: effort,

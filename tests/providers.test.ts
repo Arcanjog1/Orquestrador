@@ -449,3 +449,11 @@ test('an unknown model has no price rather than a guessed one', () => {
   assert.equal(estimateCostUsd('claude-opus-5-20260401', 1_000_000, 0), 5);
   assert.equal(estimateCostUsd('claude-sonnet-5', 0, 1_000_000), 10);
 });
+test('audit: an enforced API effort cannot silently disappear before the HTTP request',async()=>{
+ for(const Provider of [OpenAiApiProvider,AnthropicApiProvider]) {
+  const {transport,calls}=scripted(reply(200,{content:[{type:'text',text:'ok'}],output_text:'ok',status:'completed'}));
+  const provider=new Provider({connectionId:'audit',apiKey:()=> 'fixture-only',model:'sonnet',transport});
+  const result=await provider.run({...INPUT,routing:{model:'sonnet',reasoning:'unsupported'},strictRouting:true});
+  assert.equal(calls.length,0);assert.equal(result.failure,'invalid-request');
+ }
+});

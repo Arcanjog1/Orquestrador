@@ -111,6 +111,7 @@ export class CodexAdapter implements AgentRunner {
       // runs under exactly the environment the real invocation will.
       const env = this.environment(input.env);
       const plan = await this.buildArgs(executable, input.workingDirectory, scratch, routing, env);
+      if (input.strictRouting && ((routing.model && plan.applied.model !== routing.model) || (routing.reasoning && !plan.applied.reasoning))) throw new Error('O runtime não permite garantir o teto configurado. Atualize o runtime.');
 
       // Liveness for the supervisor too.
       //

@@ -446,7 +446,7 @@ function workspaceOverRepository(repoPath: string, script: Map<string, string[]>
 const CODEX_HELP = 'Usage: codex [OPTIONS]\n\nCommands:\n  exec     Run Codex non-interactively\n\nOptions:\n  -h, --help  Print help\n';
 const CODEX_EXEC_HELP =
   'Usage: codex exec [OPTIONS]\n\nOptions:\n      --skip-git-repo-check\n          Allow running outside a repo\n  -o, --output-last-message <FILE>\n          Write the last message\n';
-const CLAUDE_HELP = 'Usage: claude [options]\n\nOptions:\n  -p, --print   Print response and exit\n';
+const CLAUDE_HELP = 'Usage: claude [options]\n\nOptions:\n  -p, --print   Print response and exit\n  --model <model>   Choose model\n';
 
 test('a run finishes and is recorded with no desktop connected at any point', async () => {
   const repo = createGitFixture('lao-coordinator-');
