@@ -154,6 +154,15 @@ export function safeExcerpt(raw: string, max = 240): string {
   return scrubbed.length > max ? `${scrubbed.slice(0, max)}…` : scrubbed;
 }
 
+/** One installation of the App, as `GET /user/installations` reports it. */
+export interface AppInstallation {
+  readonly id: number;
+  readonly appSlug: string | null;
+  readonly account: string | null;
+  readonly repositorySelection: string | null;
+  readonly htmlUrl: string | null;
+}
+
 export interface GitHubClientOptions {
   endpoints?: GitHubEndpoints;
   fetchImpl?: typeof fetch;
@@ -310,6 +319,90 @@ export class GitHubClient {
    * Every repository the person can reach - own, collaborator, organisation -
    * private ones included, newest activity first.
    */
+  /**
+   * The App installations this user can see.
+   *
+   * > lists installations of your GitHub App that the authenticated user has
+   * > explicit permission to access, and you must use a user access token
+   * >
+   * > — <https://docs.github.com/en/rest/apps/installations>
+   *
+   * This is what tells "the App is not installed here" apart from "the
+   * repository does not exist" - two situations GitHub deliberately answers
+   * with the same 404, so that a token cannot be used to discover which
+   * private repositories exist.
+   *
+   * Returns null rather than throwing when the endpoint cannot be used: an
+   * OAuth App token, an old build, a network hiccup. Null means "could not
+   * ask", which the diagnosis reports honestly instead of guessing.
+   */
+  async installations(token: string): Promise<AppInstallation[] | null> {
+    try {
+      const body = await this.api(token, '/user/installations');
+      const rows = Array.isArray((body as { installations?: unknown }).installations)
+        ? ((body as { installations: unknown[] }).installations)
+        : [];
+      return rows.flatMap((row) => {
+        if (!row || typeof row !== 'object') return [];
+        const item = row as {
+          id?: unknown;
+          app_slug?: unknown;
+          account?: { login?: unknown };
+          repository_selection?: unknown;
+          html_url?: unknown;
+        };
+        if (typeof item.id !== 'number') return [];
+        return [
+          {
+            id: item.id,
+            appSlug: typeof item.app_slug === 'string' ? item.app_slug : null,
+            account: typeof item.account?.login === 'string' ? item.account.login : null,
+            repositorySelection:
+              typeof item.repository_selection === 'string' ? item.repository_selection : null,
+            htmlUrl: typeof item.html_url === 'string' ? item.html_url : null,
+          },
+        ];
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Whether one installation actually covers a repository.
+   *
+   * `GET /user/installations/{id}/repositories`. Null when it could not be
+   * asked - the difference between "not included" and "I could not check" is
+   * the difference between an instruction and a guess.
+   */
+  async installationCovers(
+    token: string,
+    installationId: number,
+    fullName: string,
+    maxPages = 5,
+  ): Promise<boolean | null> {
+    const wanted = fullName.toLowerCase();
+    try {
+      for (let page = 1; page <= maxPages; page += 1) {
+        const body = await this.api(
+          token,
+          `/user/installations/${installationId}/repositories?per_page=100&page=${page}`,
+        );
+        const rows = Array.isArray((body as { repositories?: unknown }).repositories)
+          ? ((body as { repositories: unknown[] }).repositories)
+          : [];
+        for (const row of rows) {
+          const name = (row as { full_name?: unknown }).full_name;
+          if (typeof name === 'string' && name.toLowerCase() === wanted) return true;
+        }
+        if (rows.length < 100) return false;
+      }
+      return false;
+    } catch {
+      return null;
+    }
+  }
+
   async repositories(token: string, maxPages = REPOS_MAX_PAGES): Promise<GitHubRepository[]> {
     const out: GitHubRepository[] = [];
     for (let page = 1; page <= maxPages; page += 1) {

@@ -653,6 +653,21 @@ export interface RepositoryCapabilitiesView {
   /** Null means "not known": an anonymous read is told nothing about this. */
   readonly canWrite: boolean | null;
   readonly problem: string | null;
+  /**
+   * Which situation a refusal actually is.
+   *
+   * `ok` | `not-connected` | `credential-expired` | `app-not-installed` |
+   * `repository-not-in-installation` | `insufficient-permission` |
+   * `repository-missing` | `rate-limited` | `network` | `unknown`.
+   *
+   * GitHub answers 404 to four different situations - not signed in, a login
+   * that expired, an App installed elsewhere, and a repository that really is
+   * gone - because revealing which would reveal that a private repository
+   * exists. Three of the four are fixable, and each on a different page.
+   */
+  readonly access: string;
+  /** The official GitHub page that fixes it. Null when no page would. */
+  readonly action: { readonly label: string; readonly url: string } | null;
   /** `none` | `local-temporary`. Never the GitHub API. */
   readonly execution: string;
 }

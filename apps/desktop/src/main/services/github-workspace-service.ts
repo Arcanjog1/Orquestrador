@@ -41,6 +41,14 @@ import {
   type RepositoryTree,
 } from '../../../../../src/github/repository-operations.js';
 import { parseRepositoryUrl, type RepositoryRef } from '../../../../../src/github/repository-reader.js';
+import { GitHubError } from '../../../../../src/github/github-client.js';
+import {
+  diagnoseAccess,
+  type AccessAction,
+  type AccessDiagnosis,
+  type AccessProblem,
+  type RequestOutcome,
+} from '../../../../../src/github/access-diagnosis.js';
 import type { GitHubService } from './github-service.js';
 
 export class GitHubWorkspaceError extends Error {
@@ -76,6 +84,17 @@ export interface RepositoryCapabilities {
   readonly canWrite: boolean | null;
   /** Why reading or writing is unavailable, in words for a person. */
   readonly problem: string | null;
+  /**
+   * Which of the situations a 404 can mean, once they have been told apart.
+   *
+   * `problem` used to be the raw GitHub sentence - "o GitHub respondeu não
+   * encontrado" - for a private repository the person had just created and
+   * authorised. That is four different situations wearing one status code, and
+   * three of them are fixable. This says which, and `action` says where.
+   */
+  readonly access: AccessProblem;
+  /** The official GitHub page that fixes it, when there is one. */
+  readonly action: AccessAction | null;
   /** Where code would run, if a task needed code run. Never "the API". */
   readonly execution: 'none' | 'local-temporary';
 }
@@ -139,6 +158,10 @@ export class GitHubWorkspaceService {
         canRead: false,
         canWrite: null,
         problem: error instanceof Error ? error.message : String(error),
+        // The project has no readable address at all, so no GitHub page fixes
+        // it: this one is settled in the project's own settings.
+        access: 'unknown',
+        action: null,
         execution: 'none',
       };
     }
@@ -155,19 +178,79 @@ export class GitHubWorkspaceService {
         // know" is a different answer from "you may not".
         canWrite: meta.canPush,
         problem: null,
+        access: 'ok',
+        action: null,
         execution: 'none',
       };
     } catch (error) {
+      // Never the raw status. What a person can do about it is the answer.
+      const diagnosis = await this.diagnose(ref, error, signal);
       return {
         fullName: null,
         defaultBranch: null,
         isPrivate: null,
         canRead: false,
         canWrite: null,
-        problem: error instanceof Error ? error.message : String(error),
+        problem: diagnosis.summary,
+        access: diagnosis.problem,
+        action: diagnosis.action,
         execution: 'none',
       };
     }
+  }
+
+  /**
+   * Why the repository could not be read, measured rather than assumed.
+   *
+   * Everything here is a fact the application went and got: how the request
+   * ended, whether a credential was actually sent, who GitHub says that
+   * credential is, and what the App installation covers. A stored token is
+   * never taken as proof of access - that assumption is exactly what made a
+   * private repository look like a missing one.
+   */
+  private async diagnose(
+    ref: RepositoryRef,
+    error: unknown,
+    signal?: AbortSignal,
+  ): Promise<AccessDiagnosis> {
+    const repository = `${ref.owner}/${ref.repo}`;
+    const outcome = outcomeOf(error);
+    const { state } = await this.github.credential();
+    // With no usable credential the answer is already decided, and asking
+    // GitHub who we are would be a request with nothing to send.
+    if (state !== 'usable') {
+      return diagnoseAccess({
+        repository,
+        owner: ref.owner,
+        credential: state,
+        identity: null,
+        outcome,
+        installations: null,
+        repositoryInInstallation: null,
+      });
+    }
+    const identity = await this.github.identity().catch(() => null);
+    const installations = await this.github.installations().catch(() => null);
+    let repositoryInInstallation: boolean | null = null;
+    for (const installation of installations ?? []) {
+      if ((installation.account ?? '').toLowerCase() !== ref.owner.toLowerCase()) continue;
+      const covers = await this.github.installationCovers(installation.id, repository).catch(() => null);
+      if (covers === true) {
+        repositoryInInstallation = true;
+        break;
+      }
+      if (covers === false) repositoryInInstallation = false;
+    }
+    void signal;
+    return diagnoseAccess({
+      repository,
+      owner: ref.owner,
+      credential: state,
+      identity,
+      outcome,
+      installations,
+      repositoryInInstallation,
+    });
   }
 
   /**
@@ -387,4 +470,25 @@ export class GitHubWorkspaceService {
 export function workBranchName(runId: string): string {
   const suffix = runId.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
   return `orquestrador/${suffix || 'run'}`;
+}
+
+/** How the repository request ended, in the diagnosis's vocabulary. */
+function outcomeOf(error: unknown): RequestOutcome {
+  if (!(error instanceof GitHubError)) return 'network';
+  switch (error.kind) {
+    case 'auth':
+    case 'expired':
+      return 'auth';
+    case 'forbidden':
+    case 'denied':
+      return 'forbidden';
+    case 'not-found':
+      return 'not-found';
+    case 'rate-limit':
+      return 'rate-limit';
+    case 'network':
+      return 'network';
+    default:
+      return 'api';
+  }
 }

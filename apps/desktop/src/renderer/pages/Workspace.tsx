@@ -37,6 +37,7 @@ import {
   spanBetween,
   type TimelineEntry,
 } from "@/lib/timeline";
+import { isRunOver, participantsOf, stepsFrom } from "@shared/activity";
 import { api, messageOf } from "@/lib/api";
 import { Link, useRouter } from "@/router";
 import type {
@@ -565,7 +566,16 @@ export function WorkspacePage({
         }
         // A terminal stage means the run record changed; re-read it rather than
         // guessing the new status here.
-        if (["done", "failed", "cancelled", "blocked"].includes(event.stage)) {
+        // `needs-human` and `awaiting-approval` were missing here, so a run
+        // that stopped for a person never had its record re-read: the page
+        // went on believing the run was RUNNING, the clock went on counting
+        // and the steps went on spinning. Every stage that ends a run belongs
+        // in this list.
+        if (
+          ["done", "failed", "cancelled", "blocked", "needs-human", "awaiting-approval"].includes(
+            event.stage,
+          )
+        ) {
           void api.run
             .get({ runId: event.runId })
             .then(setRun)
@@ -576,6 +586,15 @@ export function WorkspacePage({
             .catch(() => {});
         }
         // The working copy moved: the panel's file count is read again.
+        // A new invocation means a new participant, and the panel reads them
+        // from the run's detail - so it is re-read when one starts, not only
+        // when the run ends.
+        if (["worker", "orchestrator"].includes(event.stage)) {
+          void api.run
+            .detail({ runId: event.runId })
+            .then(setRunDetail)
+            .catch(() => {});
+        }
         if (["evidence", "verification", "done", "failed", "cancelled", "blocked"].includes(event.stage)) {
           void refreshChanges();
         }
@@ -640,10 +659,11 @@ export function WorkspacePage({
   // -- Derived -------------------------------------------------------------
 
   const runState = runStateOf(run, stage);
+  // The run's own status, not the panel's derived state: `runState` folds a
+  // live stage into it, and the question here is only "has it stopped?".
+  const runOver = isRunOver(run?.status);
   const iteration = run?.iterations ?? 0;
-  const running = !["IDLE", "DONE", "CANCELLED", "FAILED", "PAUSED", "NEEDS_HUMAN"].includes(
-    runState,
-  );
+  const running = runState !== "IDLE" && runState !== "PAUSED" && !runOver;
 
   // A finished run has no "now". Keeping the last snapshot on screen would
   // show "executando há 4m" for an agent that stopped ten minutes ago, which
@@ -690,6 +710,23 @@ export function WorkspacePage({
     };
   }, [workspace]);
 
+  /**
+   * The verification tally of the run on screen, and of no other.
+   *
+   * `runDetail` is re-read whenever the run changes, so between a new run
+   * starting and its detail arriving the previous run's detail is still in
+   * hand. Counting it here would put the last run's numbers beside this run's
+   * name, which is the same class of untruth as a spinner that never stops.
+   */
+  const tests = useMemo(() => {
+    if (!run || !runDetail || runDetail.run.id !== run.id) return null;
+    if (runDetail.verifications.length === 0) return null;
+    return {
+      passed: runDetail.verifications.filter((v) => v.passed).length,
+      total: runDetail.verifications.length,
+    };
+  }, [run?.id, runDetail]);
+
   const entries = useMemo(
     () =>
       buildTimeline({
@@ -699,15 +736,9 @@ export function WorkspacePage({
         branch: workspace?.branch ?? null,
         liveStage: stage,
         filesChanged: changes?.isRepository ? changes.files.length : null,
-        tests:
-          runDetail && runDetail.verifications.length > 0
-            ? {
-                passed: runDetail.verifications.filter((v) => v.passed).length,
-                total: runDetail.verifications.length,
-              }
-            : null,
+        tests,
       }),
-    [messages, run, identity, workspace, stage, changes, runDetail],
+    [messages, run, identity, workspace, stage, changes, tests],
   );
 
   const team: Agent[] = useMemo(() => {
@@ -719,6 +750,25 @@ export function WorkspacePage({
     return out;
   }, [identity, workspace]);
 
+  // Who actually took part in *this* run.
+  //
+  // The panel used to show `agents.status()` whole, which is the application's
+  // roster: every registered agent, with a status about whatever it happened
+  // to be doing, in any conversation. A run that stopped for a person without
+  // invoking anybody therefore listed two agents as participants. The roster
+  // is still what says whether a connection is signed in; the run's own
+  // invocations are what say who was there.
+  const participants = useMemo(
+    () =>
+      participantsOf(
+        agentStatus,
+        runDetail && run && runDetail.run.id === run.id ? runDetail.invocations : [],
+        run?.id ?? null,
+        runOver,
+      ),
+    [agentStatus, runDetail, run?.id, runOver],
+  );
+
   const currentAgent = useMemo(() => {
     if (stage === "worker") return agentOfAuthor("worker", identity);
     if (stage === "orchestrator" || stage === "analysing" || stage === "review")
@@ -726,18 +776,16 @@ export function WorkspacePage({
     return null;
   }, [stage, identity]);
 
-  const steps: Step[] = useMemo(
-    () =>
-      stages.map((s) => ({
-        label: s.label,
-        status:
-          s.status === "RUNNING" ? "running" : s.status === "FAILED" ? "failed" : "done",
-        time: "—",
-      })),
-    [stages],
-  );
+  // A finished run has no step still in progress. The stage rows are kept
+  // exactly as they arrived - the closing is decided by the run's own status,
+  // which is why a run stopped at the iteration limit no longer leaves the two
+  // stages before it spinning for ever.
+  const steps: Step[] = useMemo(() => stepsFrom(stages, runOver), [stages, runOver]);
 
-  const isOpen = !["IDLE", "DONE", "CANCELLED", "FAILED"].includes(runState);
+  // The one-second tick exists to move the clock while a run is going. A run
+  // waiting on a person is not going, and its clock is already frozen by
+  // `finishedAt` - ticking for it only redrew the same number for ever.
+  const isOpen = runState !== "IDLE" && !runOver;
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!isOpen) return;
@@ -993,19 +1041,12 @@ export function WorkspacePage({
                 currentAgent={currentAgent}
                 steps={steps}
                 filesChanged={changes?.isRepository ? changes.files.length : null}
-                tests={
-                  runDetail && runDetail.verifications.length > 0
-                    ? {
-                        passed: runDetail.verifications.filter((v) => v.passed).length,
-                        total: runDetail.verifications.length,
-                      }
-                    : null
-                }
+                tests={tests}
                 contextPercent={null}
                 onOpenStep={() => (run ? setDetailRunId(run.id) : setEvidenceOpen(true))}
                 liveness={liveness}
                 exchange={exchange}
-                agents={agentStatus}
+                agents={participants}
                 onCancel={() => setCancelOpen(true)}
               />
             </div>

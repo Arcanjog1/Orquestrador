@@ -55,6 +55,63 @@ aplicada, e volta como explicação para a rodada seguinte.
   caminho repetido, conteúdo enviado duas vezes ou nenhuma: cada um recusado
   pelo nome, com o motivo e a alternativa que funcionaria.
 
+## Descobrir os arquivos, sem pasta e sem pedir caminho
+
+Um projeto sem checkout não tem pasta para procurar — e ler um arquivo que não
+se pode **nomear** não é uma capacidade. Por isso a árvore de arquivos é lida
+uma vez, pela API, **antes da primeira chamada a modelo**, e vai no prompt do
+supervisor:
+
+```
+FILES IN THIS REPOSITORY at 08495d913e72 (3 arquivo(s) no total):
+  README.md (31 bytes)
+  src/auth/login.ts (52 bytes)
+  src/index.ts (35 bytes)
+```
+
+Com isso, "consegue ler os arquivos q tem nesse repositorio?" é respondida pelo
+próprio aplicativo, sem worker, sem clone e sem pedir caminho a ninguém. Para
+um repositório grande a listagem inicial é limitada, e o supervisor pede o
+resto — ou um recorte — com `listFiles`:
+
+```json
+{ "listFiles": { "prefix": "src/", "contains": "login", "limit": 200 } }
+```
+
+Três coisas que não acontecem:
+
+- **A árvore truncada nunca é apresentada como completa.** Quando o GitHub
+  trunca, isso é dito, no passo `repository-tree/truncated` e no prompt.
+- **Um arquivo que não existe é a ausência daquele arquivo**, e não um
+  repositório vazio.
+- **Faltar a lista de arquivos não é motivo para revisão humana.** Se o
+  supervisor parar dizendo que precisa dela, o aplicativo a busca e a
+  execução continua. `NEEDS_HUMAN` fica para o que o aplicativo realmente não
+  consegue obter sozinho — uma permissão, uma decisão, um acesso.
+
+## Quando o GitHub responde "não encontrado"
+
+Quatro situações diferentes chegam como o mesmo 404, de propósito: um token não
+pode servir para descobrir quais repositórios privados existem. O aplicativo
+não repete o código de status — ele diz qual das quatro é, e abre a página
+oficial que resolve:
+
+| o que está acontecendo | o que aparece | onde se resolve |
+|---|---|---|
+| ninguém conectado | a leitura saiu anônima, e um repositório privado responde "não encontrado" a isso | Contas e integrações |
+| login expirado e não renovado | a mesma coisa, e por isso mesmo | Contas e integrações |
+| App autorizado na conta, mas **não instalado** no dono | autorizar a conta e instalar o App são coisas diferentes | github.com/settings/installations |
+| instalado, mas sem **este** repositório na instalação | "Only select repositories" não inclui este | a instalação, direto |
+| o repositório realmente não existe, ou mudou de nome | confira o nome, com maiúsculas e minúsculas | — |
+
+Nada disso é deduzido de haver um token guardado: a resposta vem do que o
+GitHub respondeu à requisição, mais o que a instalação cobre. Uma leitura
+autenticada que falha **nunca** é repetida sem credencial — o 404 anônimo de um
+repositório privado é indistinguível de ausência, e essa repetição era o que
+transformava "sem acesso" em "não existe". E depois de acertar a instalação,
+**Verificar de novo** mede outra vez; não supõe nada por você ter aberto a
+página.
+
 ## Evidência
 
 Vem do GitHub, não do relato do worker: o diff que o próprio GitHub calcula

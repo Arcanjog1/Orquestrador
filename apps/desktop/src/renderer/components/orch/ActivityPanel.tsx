@@ -1,14 +1,20 @@
-import { Check, ChevronRight, Loader2, PanelRightClose, X } from "lucide-react";
+import { Check, ChevronRight, Loader2, MinusCircle, PanelRightClose, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { runStateMeta, type Agent, type RunState } from "@/lib/orchestrator-data";
 import { formatElapsed } from "@/lib/timeline";
+import type { ActivityStep } from "@shared/activity";
 import { AgentIdentity, SectionLabel, StatBlock, toneDot } from "./primitives";
 
-export type Step = {
-  label: string;
-  status: "done" | "failed" | "running" | "pending";
-  time: string;
-};
+/**
+ * One row of the step list.
+ *
+ * `stopped` is the status a stage gets when the run ended while it was still
+ * open - the iteration limit, a cancellation, a stop for a person. It used to
+ * be drawn as `running`, so a run that had been over for an hour still had two
+ * spinners turning. It is a distinct status rather than a hidden row: the
+ * stage really did start and really did not finish, and that is worth seeing.
+ */
+export type Step = ActivityStep;
 
 /**
  * What the agent running right now is doing.
@@ -46,6 +52,8 @@ export type AgentStatus = {
   connectionKind: string | null;
   status: "idle" | "running" | "offline" | "blocked";
   currentTask: string | null;
+  /** Which run it is busy in. An agent busy elsewhere is not busy here. */
+  currentRunId: string | null;
   runningForMs: number | null;
   awaitingReply: number;
 };
@@ -329,6 +337,11 @@ export function ActivityPanel({
                 )}
                 {s.status === "pending" && (
                   <span className="size-3.5 rounded-full border border-border" />
+                )}
+                {/* Started, never finished: the run ended first. Not a tick,
+                    not a spinner - both of those would be untrue. */}
+                {s.status === "stopped" && (
+                  <MinusCircle className="size-3.5 text-muted-foreground" />
                 )}
                 <span className="truncate text-sm text-foreground/85">{s.label}</span>
                 <span className="ml-auto shrink-0 font-mono text-[11px] text-muted-foreground">

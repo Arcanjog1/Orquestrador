@@ -76,6 +76,10 @@ export function parseDecision(raw: string): ParseResult {
   if (reads.error) return fail(reads.error, raw);
   decision.fileReads = reads.value;
 
+  const listing = readListFiles(obj.listFiles);
+  if (listing.error) return fail(listing.error, raw);
+  if (listing.value) decision.listFiles = listing.value;
+
   const files = readStringArray(obj.relevantFiles, 'relevantFiles');
   if (files.error) return fail(files.error, raw);
   if (files.value.length) decision.relevantFiles = files.value;
@@ -120,7 +124,15 @@ export function parseDecision(raw: string): ParseResult {
   if (
     action === 'verify' &&
     decision.verificationCommands.length === 0 &&
-    decision.fileChecks.length === 0
+    decision.fileChecks.length === 0 &&
+    // Reading is a real thing to ask the application to go and do, and coming
+    // back with it is a real next round. Without this, a supervisor working on
+    // a repository it has no checkout of had no way to say "fetch me this file
+    // and ask me again": `fileReads` alone was rejected, the repair prompt sent
+    // it back for a *proof* it had no reason to want yet, and the round was
+    // wasted. Listing paths is the same kind of ask.
+    decision.fileReads.length === 0 &&
+    !decision.listFiles
   ) {
     return fail(EMPTY_VERIFY_ERROR, raw);
   }
@@ -224,12 +236,15 @@ export function buildRepairPrompt(error: string, raw: string): string {
 
 /** The one error whose fix is a *different field*, not a different shape. */
 export const EMPTY_VERIFY_ERROR =
-  '"verify" requires at least one entry in "verificationCommands" or "fileChecks".';
+  '"verify" requires at least one entry in "verificationCommands", "fileChecks", "fileReads" or ' +
+  '"listFiles".';
 
 const EMPTY_VERIFY_GUIDANCE = [
-  'You asked to verify without saying what to verify with. "verify" needs at least one of:',
-  '  - a verification id registered for this workspace, in "verificationCommands"; or',
-  '  - a file check, in "fileChecks", which needs no registration at all.',
+  'You asked to verify without saying what to do. "verify" needs at least one of:',
+  '  - a verification id registered for this workspace, in "verificationCommands";',
+  '  - a file check, in "fileChecks", which needs no registration at all;',
+  '  - a file to read, in "fileReads"; or',
+  '  - a listing of repository paths, in "listFiles".',
   'If this workspace has no registered verifications, the second is the way: name the file,',
   'say what its bytes must be, and list in "criteria" the acceptance criteria it proves.',
   'Do not repeat the same empty "verify". Do not invent a verification id.',
@@ -304,6 +319,48 @@ function truncate(text: string, max: number): string {
  * shows content; it settles no criterion, which is why it takes no `criteria`
  * and cannot be mistaken for proof.
  */
+/**
+ * A request for repository paths, or nothing.
+ *
+ * Data only, like every other field of this contract: a prefix, a substring
+ * and a count. There is no pattern language and no command, because the
+ * application answers this by filtering a list it already holds.
+ */
+function readListFiles(value: unknown): {
+  value: { prefix?: string | null; contains?: string | null; limit?: number | null } | null;
+  error?: string;
+} {
+  if (value === undefined || value === null) return { value: null };
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return { value: null, error: '"listFiles" must be an object or null.' };
+  }
+  const row = value as Record<string, unknown>;
+  const unknown = Object.keys(row).filter((key) => !['prefix', 'contains', 'limit'].includes(key));
+  if (unknown.length > 0) {
+    return { value: null, error: `"listFiles" has unknown field(s): ${unknown.join(', ')}.` };
+  }
+  const text = (key: 'prefix' | 'contains'): string | null | undefined => {
+    const given = row[key];
+    if (given === undefined || given === null) return null;
+    if (typeof given !== 'string') return undefined;
+    return given.trim() || null;
+  };
+  const prefix = text('prefix');
+  if (prefix === undefined) return { value: null, error: '"listFiles.prefix" must be a string or null.' };
+  const contains = text('contains');
+  if (contains === undefined) {
+    return { value: null, error: '"listFiles.contains" must be a string or null.' };
+  }
+  let limit: number | null = null;
+  if (row.limit !== undefined && row.limit !== null) {
+    if (typeof row.limit !== 'number' || !Number.isInteger(row.limit) || row.limit < 1) {
+      return { value: null, error: '"listFiles.limit" must be a positive integer or null.' };
+    }
+    limit = Math.min(row.limit, 2000);
+  }
+  return { value: { prefix, contains, limit } };
+}
+
 function readFileReads(value: unknown): { value: FileReadRequest[]; error?: string } {
   if (value === undefined || value === null) return { value: [] };
   if (!Array.isArray(value)) return { value: [], error: '"fileReads" must be an array.' };

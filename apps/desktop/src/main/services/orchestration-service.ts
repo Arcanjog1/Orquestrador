@@ -108,6 +108,12 @@ import {
 } from '../../../../../src/github/change-proposal.js';
 import { collectGitHubEvidence } from '../../../../../src/github/github-evidence.js';
 import {
+  listFiles,
+  renderListing,
+  renderTreePreview,
+} from '../../../../../src/github/repository-tree.js';
+import type { RepositoryTree } from '../../../../../src/github/repository-operations.js';
+import {
   runGitHubFileChecks,
   runGitHubFileReads,
   type GitHubFileSource,
@@ -212,6 +218,17 @@ interface GitHubRunContext {
   /** Every commit this run created, oldest first. */
   readonly commits: string[];
   pullRequestUrl: string | null;
+  /**
+   * The repository's file paths, read once at the top of the run.
+   *
+   * Without this the supervisor is told to read files and given no way to
+   * learn a single path - which is exactly how a question about a repository
+   * became a delegation to search an empty folder. Null only when GitHub could
+   * not be asked, and that is said rather than hidden.
+   */
+  tree: RepositoryTree | null;
+  /** Why the listing is absent, when it is. */
+  treeProblem: string | null;
 }
 
 export interface OrchestrationOptions {
@@ -999,6 +1016,12 @@ export class OrchestrationService {
      * only one of them is something the next round can fix.
      */
     let proposalFeedback: string | null = null;
+    /**
+     * Whether the repository listing has already been put in front of the
+     * supervisor after it said it was blocked. Once: a second offer of the
+     * same list would be a loop, and the second refusal is a real one.
+     */
+    let listingOffered = false;
 
     // Routing state for this run: what each worker's CLI can take (read once
     // per worker), the attempts so far as the router reads them, the models a
@@ -1069,6 +1092,7 @@ export class OrchestrationService {
         iterations,
         history,
         conversation,
+        github,
         team,
         preflight,
       });
@@ -1123,6 +1147,27 @@ export class OrchestrationService {
       // 2. Act on it.
       if (decision.action === 'blocked') {
         const reason = decision.reason ?? 'Sem motivo informado.';
+        // Stopping for a person is for something the application genuinely
+        // cannot get. The file listing is not that: the incident this guards
+        // was a run that ended in human review saying it lacked the file tree,
+        // while the application held a repository, a branch and a commit and
+        // could have fetched it in one request. So it is fetched and offered,
+        // once, before anybody is asked to intervene.
+        if (github && !listingOffered) {
+          listingOffered = true;
+          const offered = await this.offerRepositoryListing(runId, iteration, github, signal);
+          if (offered) {
+            feedback = offered;
+            this.step(
+              runId,
+              iteration,
+              'blocked',
+              'answered',
+              'A pendência era a lista de arquivos, e o aplicativo a obteve; seguindo sem intervenção.',
+            );
+            continue;
+          }
+        }
         this.database.runs.setStatus(runId, 'BLOCKED', reason);
         this.say(sessionId, runId, 'orchestrator', `Bloqueado: ${reason}`);
         this.progress(runId, sessionId, 'blocked', 'Bloqueado.', 'BLOCKED');
@@ -1442,6 +1487,47 @@ export class OrchestrationService {
       // the application opens the file at the commit the work is at and
       // compares the same bytes with the same rule. A read is not a check and
       // neither is a functional test, in either mode.
+      // The listing the supervisor asked for, answered by the application from
+      // the tree it already holds. No worker, no shell, no clone - and no
+      // asking the person for a path they should never have to know.
+      let listingBlock: string | null = null;
+      if (github && decision.listFiles) {
+        if (github.tree) {
+          const listing = listFiles(github.tree, decision.listFiles);
+          listingBlock = renderListing(
+            listing,
+            github.tree,
+            `FILES YOU ASKED FOR (${describeListRequest(decision.listFiles)}), ` +
+              `${listing.matched} correspondente(s):`,
+          );
+          this.step(
+            runId,
+            iteration,
+            'repository-tree',
+            'listed',
+            `${describeListRequest(decision.listFiles)} -> ${listing.paths.length} de ${listing.matched}`,
+          );
+        } else {
+          // One more attempt, because the supervisor asking is the moment it
+          // matters most - and because a run must not stop for something the
+          // application can still go and fetch.
+          try {
+            github.tree = await github.service.tree(github.workspaceId, github.headCommit, signal);
+            github.treeProblem = null;
+            const listing = listFiles(github.tree, decision.listFiles);
+            listingBlock = renderListing(listing, github.tree, 'FILES YOU ASKED FOR:');
+            this.step(runId, iteration, 'repository-tree', 'read', `${listing.matched} arquivo(s)`);
+          } catch (error) {
+            const problem = error instanceof Error ? error.message : String(error);
+            github.treeProblem = problem;
+            listingBlock =
+              `NÃO CONSEGUI LISTAR OS ARQUIVOS: ${problem}. Isso não diz que o repositório está ` +
+              'vazio; diz que a listagem falhou.';
+            this.step(runId, iteration, 'repository-tree', 'unavailable', problem.slice(0, 500));
+          }
+        }
+      }
+
       const fileChecks =
         decision.fileChecks.length === 0
           ? []
@@ -1658,7 +1744,16 @@ export class OrchestrationService {
           // which the gate reads as no proof at all. That is the honest answer
           // and the one the person asked for: never an invented PASS.
           verifier: verifier ?? verifierWithoutExecutor(NO_EXECUTOR),
-          allowNoChanges: this.options.allowNoChanges ?? false,
+          // A question is not a failed change. In a GitHub project a run that
+          // never proposed a change was answering something - "which files are
+          // here?", "what does the README say?" - and demanding a diff from it
+          // would make every read-only question end at the iteration limit,
+          // which is exactly what the incident run did. The protection against
+          // a *change* task slipping through this way is the ledger: a task
+          // with acceptance criteria still has to prove them, and unproven
+          // criteria refuse DONE a few lines below.
+          allowNoChanges:
+            this.options.allowNoChanges ?? (github !== null && github.commits.length === 0),
           fileChecks: [...requestedFileChecks.values()],
           workspaceRoot: cwd,
           ...(github ? { readFileChecks: (requests) => this.githubChecks(github!, requests, signal) } : {}),
@@ -1715,7 +1810,16 @@ export class OrchestrationService {
           // which the gate reads as no proof at all. That is the honest answer
           // and the one the person asked for: never an invented PASS.
           verifier: verifier ?? verifierWithoutExecutor(NO_EXECUTOR),
-          allowNoChanges: this.options.allowNoChanges ?? false,
+          // A question is not a failed change. In a GitHub project a run that
+          // never proposed a change was answering something - "which files are
+          // here?", "what does the README say?" - and demanding a diff from it
+          // would make every read-only question end at the iteration limit,
+          // which is exactly what the incident run did. The protection against
+          // a *change* task slipping through this way is the ledger: a task
+          // with acceptance criteria still has to prove them, and unproven
+          // criteria refuse DONE a few lines below.
+          allowNoChanges:
+            this.options.allowNoChanges ?? (github !== null && github.commits.length === 0),
           fileChecks: [...requestedFileChecks.values()],
           workspaceRoot: cwd,
           ...(github ? { readFileChecks: (requests) => this.githubChecks(github!, requests, signal) } : {}),
@@ -1820,6 +1924,8 @@ export class OrchestrationService {
       previousEvidence = evidence;
 
       feedback = this.buildFeedback(evidence, verification, unknownIds, record, ledger);
+      // The paths the supervisor asked for, in front of it for the next round.
+      if (listingBlock) feedback = `${listingBlock}\n\n${feedback}`;
       // A proposal that was refused says something the diff cannot: the next
       // round has to hear *why* nothing landed, or it proposes the same thing
       // again. Consumed here so one refusal is reported once.
@@ -2123,11 +2229,26 @@ export class OrchestrationService {
             'The evidence you will be shown is the diff GitHub itself computes between the base',
             'commit and the work branch. It is a measurement, not a report from the worker.',
             '',
+            'HOW TO FIND A FILE. You cannot know a path until you are told one: there is no folder',
+            'to look in, and asking a worker to list files would be asking it to search an empty',
+            'directory. The paths are below, and "listFiles" gets you more of them:',
+            '  "listFiles": {"prefix": "src/", "contains": "login", "limit": 200}',
+            'Every field may be null. The application answers it from the tree it already holds -',
+            'no worker, no shell, no clone. Then use "fileReads" on the paths you chose.',
+            '',
+            input.github.tree
+              ? renderTreePreview(input.github.tree)
+              : 'FILES IN THIS REPOSITORY: não consegui ler a árvore' +
+                `${input.github.treeProblem ? ` (${input.github.treeProblem})` : ''}. ` +
+                'Isso NÃO significa que o repositório está vazio. Peça "listFiles" para tentar de novo.',
+            '',
           ]
         : []),
-      ...(input.conversation
+      ...(input.conversation || input.github
         ? [
-            'THIS IS A CONVERSATION RUN. There is no working folder and no command to run.',
+            input.github
+              ? 'THERE IS NO WORKING FOLDER. Do not delegate anything that would need one, and'
+              : 'THIS IS A CONVERSATION RUN. There is no working folder and no command to run.',
             'Nothing you or a worker says will change a file, and you must not claim',
             'otherwise, ask for a verification, or describe a diff. Finish by answering the',
             'objective: reply with action "done", put the final answer for the person in',
@@ -2513,11 +2634,18 @@ export class OrchestrationService {
       problem: error instanceof Error ? error.message : String(error),
       fullName: null,
       defaultBranch: null,
+      action: null as { label: string; url: string } | null,
     }));
     if (!capabilities.canRead) {
+      // `problem` is now the diagnosis, not the status code: which of the four
+      // situations a 404 was, and what to do about it. The page that fixes it
+      // travels with the sentence, because a person reading this in the
+      // conversation has nowhere else to find it.
+      const action = 'action' in capabilities && capabilities.action ? capabilities.action : null;
       return stop(
-        `Não consegui ler ${workspace.repository_url ?? 'o repositório deste projeto'}: ` +
-          `${capabilities.problem ?? 'motivo não informado'}`,
+        `Não consegui ler ${workspace.repository_url ?? 'o repositório deste projeto'}. ` +
+          `${capabilities.problem ?? 'O GitHub não disse por quê.'}` +
+          (action ? `\n\n${action.label}: ${action.url}` : ''),
       );
     }
     const baseBranch =
@@ -2544,6 +2672,29 @@ export class OrchestrationService {
           `${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    // The file paths, once, at the top of the run. This is the thing whose
+    // absence turned "which files are in this repository?" into a delegation
+    // to search a folder that does not exist.
+    let tree: RepositoryTree | null = null;
+    let treeProblem: string | null = null;
+    try {
+      tree = await service.tree(workspace.id, baseCommit);
+      this.step(
+        runId,
+        0,
+        'repository-tree',
+        tree.truncated ? 'truncated' : 'read',
+        `${tree.entries.filter((entry) => entry.type === 'blob').length} arquivo(s) em ` +
+          `${baseCommit.slice(0, 12)}${tree.truncated ? ' (o GitHub truncou a árvore)' : ''}`,
+      );
+    } catch (error) {
+      // Not fatal: a run can still proceed, and the supervisor is told the
+      // listing is missing rather than left to conclude the repository is
+      // empty.
+      treeProblem = error instanceof Error ? error.message : String(error);
+      this.step(runId, 0, 'repository-tree', 'unavailable', treeProblem.slice(0, 500));
+    }
+
     this.step(
       runId,
       0,
@@ -2562,6 +2713,8 @@ export class OrchestrationService {
       headCommit: baseCommit,
       commits: [],
       pullRequestUrl: null,
+      tree,
+      treeProblem,
     };
   }
 
@@ -2642,6 +2795,40 @@ export class OrchestrationService {
           `aberto: ${problem}`,
       );
     }
+  }
+
+  /**
+   * The file listing, fetched if necessary, as feedback for the next round.
+   *
+   * Returns null when there is genuinely nothing to offer - the tree could not
+   * be read - which is when a person actually is the next step.
+   */
+  private async offerRepositoryListing(
+    runId: string,
+    iteration: number,
+    github: GitHubRunContext,
+    signal: AbortSignal,
+  ): Promise<string | null> {
+    if (!github.tree) {
+      try {
+        github.tree = await github.service.tree(github.workspaceId, github.headCommit, signal);
+        github.treeProblem = null;
+      } catch (error) {
+        github.treeProblem = error instanceof Error ? error.message : String(error);
+        this.step(runId, iteration, 'repository-tree', 'unavailable', github.treeProblem.slice(0, 500));
+        return null;
+      }
+    }
+    const listing = listFiles(github.tree, {});
+    this.step(runId, iteration, 'repository-tree', 'offered', `${listing.matched} arquivo(s)`);
+    return [
+      'VOCÊ DISSE QUE ESTAVA BLOQUEADO, E A PENDÊNCIA ERA A LISTA DE ARQUIVOS.',
+      'O aplicativo a obteve pela API do GitHub. Não peça a um worker para listar arquivos: não',
+      'existe pasta neste computador para ele procurar. Use "listFiles" para filtrar e "fileReads"',
+      'para abrir o que escolher.',
+      '',
+      renderListing(listing, github.tree, `ARQUIVOS EM ${github.headCommit.slice(0, 12)}:`),
+    ].join('\n');
   }
 
   /** The measurement, taken at GitHub rather than in a folder. */
@@ -4372,6 +4559,20 @@ const NO_EXECUTOR =
   'Este projeto trabalha direto no GitHub, e a API do GitHub não executa código: ' +
   'este comando não foi executado. Para rodar testes ou ferramentas, use um executor ' +
   'temporário neste computador.';
+
+/** One line naming what a listing request asked for. */
+export function describeListRequest(request: {
+  prefix?: string | null;
+  contains?: string | null;
+  limit?: number | null;
+}): string {
+  const parts = [
+    request.prefix ? `prefix "${request.prefix}"` : null,
+    request.contains ? `contains "${request.contains}"` : null,
+    request.limit ? `limite ${request.limit}` : null,
+  ].filter((part): part is string => part !== null);
+  return parts.length > 0 ? parts.join(', ') : 'árvore inteira';
+}
 
 /** True when a file check already decided this criterion, either way. */
 function settledByFileCheck(checks: readonly FileCheckResult[], criterion: string): boolean {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Check, Cloud, Copy, ExternalLink, Github, HardDrive, Loader2, MessageSquare, X } from "lucide-react";
 import {
   Dialog,
@@ -599,6 +599,7 @@ export function AddProjectDialog({
   const [error, setError] = useState<string | null>(null);
   const [repos, setRepos] = useState<readonly GitHubRepositoryView[] | null>(null);
   const [reposError, setReposError] = useState<string | null>(null);
+  const [reposLoading, setReposLoading] = useState(false);
   const [repoQuery, setRepoQuery] = useState("");
   // What connecting a repository actually reported back, shown before the
   // dialog closes so the person sees the real branch rather than a promise.
@@ -616,8 +617,51 @@ export function AddProjectDialog({
   } | null>(null);
   /** Set while the person is naming a repository for the application to create. */
   const [newRepoName, setNewRepoName] = useState<string | null>(null);
+  /** True while the access is being measured again after a trip to GitHub. */
+  const [rechecking, setRechecking] = useState(false);
 
-  // The person's repositories, read once per opening, private ones included.
+  /**
+   * Measures the access again, after the person changed something at GitHub.
+   *
+   * Nothing here is inferred from the trip to the settings page: the answer
+   * comes from asking GitHub for the repository again, exactly as the first
+   * attempt did. A person who added the repository to the installation gets a
+   * project that works without closing anything; one who did not gets the same
+   * honest refusal, not a hopeful "pronto".
+   */
+  const recheckAccess = async () => {
+    if (!capabilities) return;
+    setRechecking(true);
+    try {
+      const view = await api.workspace.githubCapabilities({ workspaceId: capabilities.workspaceId });
+      setCapabilities({ workspaceId: capabilities.workspaceId, view });
+    } catch (e) {
+      fail(e);
+    } finally {
+      setRechecking(false);
+    }
+  };
+
+  /**
+   * The person's repositories, private ones included.
+   *
+   * Read when the dialog opens, and again on request. The second half matters:
+   * a repository that has just been added to the App's installation does not
+   * appear in a list read before that happened, and closing and reopening the
+   * dialog to find it is an errand with no reason to exist.
+   */
+  const loadRepositories = useCallback(async () => {
+    setReposLoading(true);
+    setReposError(null);
+    try {
+      setRepos(await api.github.repositories());
+    } catch (e) {
+      setReposError(messageOf(e));
+    } finally {
+      setReposLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!open || !githubConnected) {
       setRepos(null);
@@ -625,15 +669,8 @@ export function AddProjectDialog({
       setRepoQuery("");
       return;
     }
-    let alive = true;
-    api.github
-      .repositories()
-      .then((list) => alive && setRepos(list))
-      .catch((e: unknown) => alive && setReposError(messageOf(e)));
-    return () => {
-      alive = false;
-    };
-  }, [open, githubConnected]);
+    void loadRepositories();
+  }, [open, githubConnected, loadRepositories]);
 
   // The chosen repository's branches, read from GitHub - a cloud project has
   // no working copy on this computer to read them from.
@@ -1041,6 +1078,31 @@ export function AddProjectDialog({
                   {capabilities.view.problem}
                 </p>
               )}
+              {/* The fix, on the page GitHub itself serves. No token is asked
+                  for here or anywhere: authorising an App and choosing which
+                  repositories it covers are things only the person can do,
+                  and both are one click away. */}
+              {capabilities.view.action && (
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    className="flex-1"
+                    onClick={() => void api.app.openExternal({ url: capabilities.view.action!.url })}
+                    data-testid="capability-action"
+                  >
+                    {capabilities.view.action.label}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="flex-1"
+                    disabled={rechecking}
+                    onClick={() => void recheckAccess()}
+                    data-testid="capability-recheck"
+                  >
+                    {rechecking ? "Verificando..." : "Verificar de novo"}
+                  </Button>
+                </div>
+              )}
               <Button
                 className="w-full"
                 onClick={() => {
@@ -1112,7 +1174,17 @@ export function AddProjectDialog({
 
           {githubConnected && mode !== "empty" && (
             <div className="border-t border-border pt-4">
-              <SectionLabel>Seus repositórios no GitHub</SectionLabel>
+              <div className="flex items-center gap-2">
+                <SectionLabel>Seus repositórios no GitHub</SectionLabel>
+                <button
+                  className="ml-auto text-[11px] text-primary underline-offset-2 hover:underline disabled:opacity-50"
+                  disabled={reposLoading}
+                  onClick={() => void loadRepositories()}
+                  data-testid="repo-refresh"
+                >
+                  {reposLoading ? "Atualizando…" : "Atualizar lista"}
+                </button>
+              </div>
               <Input
                 value={repoQuery}
                 onChange={(e) => setRepoQuery(e.target.value)}

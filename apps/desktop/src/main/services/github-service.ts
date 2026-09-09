@@ -24,6 +24,7 @@ import {
   type DeviceCode,
   type GitHubClientOptions,
   type GitHubRepository,
+  type AppInstallation,
   type GitHubToken,
   type PullRequest,
 } from '../core.js';
@@ -310,11 +311,53 @@ export class GitHubService {
    * credential.
    */
   async accessTokenIfConnected(): Promise<string | null> {
-    if (!this.storedToken()) return null;
+    return (await this.credential()).token;
+  }
+
+  /**
+   * The credential, **and why there isn't one** when there isn't.
+   *
+   * `accessTokenIfConnected` used to answer null for two situations that are
+   * not the same: nobody is signed in, and a stored login could not be
+   * renewed. The caller then read anonymously in both cases - and an anonymous
+   * read of a private repository is a 404, which the application reported as
+   * "repositório não encontrado" for a repository that plainly existed.
+   *
+   * So the state travels with the token. A caller reading something public can
+   * still proceed without one; a caller that just got a 404 can say which of
+   * the two happened instead of blaming the repository.
+   */
+  async credential(): Promise<{ state: 'absent' | 'usable' | 'expired'; token: string | null }> {
+    if (!this.storedToken()) return { state: 'absent', token: null };
     try {
-      return await this.accessToken();
+      return { state: 'usable', token: await this.accessToken() };
     } catch {
-      // A refresh that failed is not a reason to abandon an anonymous read.
+      // Stored, and not usable. Never silently the same as "not signed in".
+      return { state: 'expired', token: null };
+    }
+  }
+
+  /** The App installations this login can see, or null when it could not ask. */
+  async installations(): Promise<AppInstallation[] | null> {
+    const { token } = await this.credential();
+    if (!token) return null;
+    return this.client.installations(token);
+  }
+
+  /** Whether an installation actually covers a repository. Null: not checked. */
+  async installationCovers(installationId: number, fullName: string): Promise<boolean | null> {
+    const { token } = await this.credential();
+    if (!token) return null;
+    return this.client.installationCovers(token, installationId, fullName);
+  }
+
+  /** The login GitHub reports for the stored credential, or null. */
+  async identity(): Promise<string | null> {
+    const { token } = await this.credential();
+    if (!token) return null;
+    try {
+      return (await this.client.user(token)).login;
+    } catch {
       return null;
     }
   }

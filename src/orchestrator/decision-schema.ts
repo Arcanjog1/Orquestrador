@@ -23,7 +23,7 @@
 import { ALLOWED_ACTIONS } from './decision-parser.js';
 import { CAPABILITY_TIERS, REASONING_TIERS } from '../routing/tiers.js';
 
-export const DECISION_SCHEMA_VERSION = 6;
+export const DECISION_SCHEMA_VERSION = 7;
 
 /** The tiers as the decision JSON spells them (lowercase). */
 export const WIRE_CAPABILITIES = CAPABILITY_TIERS.map((tier) => tier.toLowerCase());
@@ -40,6 +40,7 @@ export const DECISION_JSON_SCHEMA = {
     'verificationCommands',
     'fileChecks',
     'fileReads',
+    'listFiles',
     'summary',
     'reason',
     'relevantFiles',
@@ -136,6 +137,34 @@ export const DECISION_JSON_SCHEMA = {
               'exactly the criteria it names and no others; one that names none is ' +
               'recorded and settles nothing.',
           },
+        },
+      },
+    },
+    listFiles: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['prefix', 'contains', 'limit'],
+      description:
+        'Ask the application for the repository\'s file paths. Only meaningful for a project ' +
+        'that works directly on GitHub, where there is no folder to look in and you cannot ' +
+        'know a path until you are told one. The listing you were given at the top may have ' +
+        'been capped; this is how you get the rest, or narrow it. Null when you are not asking.',
+      properties: {
+        prefix: {
+          type: ['string', 'null'],
+          description: 'Only paths starting with this, e.g. "src/". Null for the whole tree.',
+        },
+        contains: {
+          type: ['string', 'null'],
+          description: 'Only paths containing this text, matched case-insensitively. Null for all.',
+        },
+        limit: {
+          type: ['integer', 'null'],
+          // `minimum`/`maximum` are not part of the strict subset the API
+          // accepts, so the bound lives in the parser, which caps at 2000 and
+          // refuses anything below 1 - and is said here so the model knows it.
+          description:
+            'How many paths to return, from 1 to 2000. Null for the default.',
         },
       },
     },

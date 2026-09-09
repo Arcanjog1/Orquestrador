@@ -145,6 +145,23 @@ export interface Decision {
    */
   fileChecks: FileCheckRequest[];
   /**
+   * A request for the repository's file paths.
+   *
+   * The gap this closes: in a project that works directly on GitHub there is
+   * no folder to look in, and `fileReads` needs a path the supervisor has no
+   * way to learn. It was told to read files and given no way to find out what
+   * files there are - so it delegated the search to a worker whose working
+   * directory is deliberately empty, the worker correctly said so, and the run
+   * ended in human review over a listing the application could have fetched.
+   *
+   * Null when nothing is being asked for.
+   */
+  listFiles?: {
+    readonly prefix?: string | null;
+    readonly contains?: string | null;
+    readonly limit?: number | null;
+  } | null;
+  /**
    * Files the supervisor wants to *see*.
    *
    * The application opens them and puts a bounded excerpt, the size and the

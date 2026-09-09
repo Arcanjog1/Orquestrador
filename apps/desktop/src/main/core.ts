@@ -87,6 +87,15 @@ export type { ProcessResult, RunProcessOptions } from '../../../../src/process/p
 
 export { GitEvidenceCollector, parseStatusShort } from '../../../../src/git/git-evidence-collector.js';
 export { redact } from '../../../../src/security/secret-redactor.js';
+export type { AppInstallation } from '../../../../src/github/github-client.js';
+export { diagnoseAccess, isFixable } from '../../../../src/github/access-diagnosis.js';
+export type {
+  AccessDiagnosis,
+  AccessFacts,
+  AccessProblem,
+  CredentialState,
+  RequestOutcome,
+} from '../../../../src/github/access-diagnosis.js';
 export { buildScopes } from '../../../../src/permissions/rule-syntax.js';
 export { decideResumption, explainRefusal } from '../../../../src/permissions/resumption.js';
 export type { ResumptionDecision, ResumptionRefusal } from '../../../../src/permissions/resumption.js';

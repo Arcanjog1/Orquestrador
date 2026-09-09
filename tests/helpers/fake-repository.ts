@@ -50,6 +50,36 @@ export interface FakeRepositoryOptions {
   readonly isPrivate?: boolean;
   /** When false, every write answers 403, as a read-only token would. */
   readonly canWrite?: boolean;
+  /**
+   * Whether an anonymous read of a **private** repository answers 404.
+   *
+   * This is what GitHub really does, and modelling it is the only way to test
+   * the difference between "you are not signed in" and "it does not exist".
+   * Defaults to true; a public repository is unaffected either way.
+   */
+  readonly hideWhenAnonymous?: boolean;
+  /**
+   * Whether the credential in hand can see this repository at all.
+   *
+   * False is GitHub's answer to a valid user-to-server token whose App is not
+   * installed here, or is installed without this repository selected: a plain
+   * 404, identical to the one a repository that does not exist gets. Which of
+   * those it was is decided from the installations, never from the status.
+   */
+  readonly visibleToCredential?: boolean;
+  /**
+   * The App installations `GET /user/installations` reports, and what each
+   * one covers. Absent means the endpoint answers 404 - which is what an
+   * OAuth-App token gets, and which the diagnosis has to survive.
+   */
+  readonly installations?: readonly {
+    readonly id: number;
+    readonly account: string;
+    readonly repositorySelection?: 'all' | 'selected';
+    readonly htmlUrl?: string;
+    /** `owner/name` entries this installation includes. */
+    readonly repositories: readonly string[];
+  }[];
 }
 
 export interface FakePullRequest {
@@ -76,13 +106,29 @@ export class FakeRepository {
   private readonly pulls: FakePullRequest[] = [];
   private clock = 0;
 
-  readonly calls: Array<{ method: string; path: string; body: unknown }> = [];
+  /**
+   * Every request, with whether it carried a credential.
+   *
+   * `authorised` is there for one rule in particular: a read that fails with a
+   * credential must never be retried without one. An anonymous retry against a
+   * private repository answers 404, which reads as "it does not exist" - the
+   * exact untruth the diagnosis exists to prevent.
+   */
+  readonly calls: Array<{ method: string; path: string; body: unknown; authorised: boolean }> = [];
+
+  /**
+   * Whether the credential can see the repository. Writable, so a test can
+   * grant access between two measurements and prove the second one measured
+   * again rather than remembering the first.
+   */
+  visible = true;
   /** Set by a test to make the next matching request fail. */
   failNext: { method: string; pathIncludes: string; status: number; message?: string } | null = null;
   /** Set by a test to move the branch behind the application's back. */
   onBeforeRefUpdate: (() => void) | null = null;
 
   constructor(private readonly options: FakeRepositoryOptions) {
+    this.visible = options.visibleToCredential !== false;
     const tree = new Map<string, { sha: string; mode: string }>();
     for (const [path, text] of Object.entries(options.files)) {
       tree.set(path, { sha: this.putBlob(Buffer.from(text, 'utf8')), mode: '100644' });
@@ -156,7 +202,12 @@ export class FakeRepository {
           ? (JSON.parse(raw) as unknown)
           : Object.fromEntries(new URLSearchParams(raw));
     const path = url.pathname;
-    this.calls.push({ method, path: `${path}${url.search}`, body });
+    this.calls.push({
+      method,
+      path: `${path}${url.search}`,
+      body,
+      authorised: Boolean((init?.headers as Record<string, string> | undefined)?.Authorization),
+    });
 
     if (this.failNext && this.failNext.method === method && path.includes(this.failNext.pathIncludes)) {
       const failure = this.failNext;
@@ -212,10 +263,56 @@ export class FakeRepository {
     if (method === 'GET' && path === '/user') {
       return this.json({ login: 'arcanjo', name: 'Arcanjo', avatar_url: '', html_url: '' });
     }
+    // The App installations, and what each covers. Without them the
+    // application cannot tell "installed elsewhere" from "does not exist" -
+    // GitHub answers 404 to both on purpose.
+    if (method === 'GET' && path === '/user/installations') {
+      if (!this.options.installations) return this.json({ message: 'Not Found' }, 404);
+      return this.json({
+        total_count: this.options.installations.length,
+        installations: this.options.installations.map((installation) => ({
+          id: installation.id,
+          app_slug: 'orquestrador',
+          account: { login: installation.account },
+          repository_selection: installation.repositorySelection ?? 'selected',
+          html_url:
+            installation.htmlUrl ?? `https://github.com/settings/installations/${installation.id}`,
+        })),
+      });
+    }
+    const covers = /^\/user\/installations\/(\d+)\/repositories$/.exec(path);
+    if (method === 'GET' && covers) {
+      const installation = (this.options.installations ?? []).find(
+        (row) => row.id === Number(covers[1]),
+      );
+      if (!installation) return this.json({ message: 'Not Found' }, 404);
+      return this.json({
+        total_count: installation.repositories.length,
+        repositories: installation.repositories.map((fullName) => ({ full_name: fullName })),
+      });
+    }
 
     const prefix = `/repos/${this.options.owner}/${this.options.repo}`;
     if (!path.startsWith(prefix)) return this.json({ message: 'Not Found' }, 404);
     const rest = path.slice(prefix.length);
+
+    // A private repository read without a credential is "não encontrado", the
+    // same answer a repository that does not exist gets. GitHub does this so a
+    // token cannot be used to discover which private repositories exist, and a
+    // fake that answered helpfully here would hide the bug being tested.
+    const authorised = Boolean(
+      (init?.headers as Record<string, string> | undefined)?.Authorization,
+    );
+    if (
+      this.options.isPrivate === true &&
+      this.options.hideWhenAnonymous !== false &&
+      !authorised
+    ) {
+      return this.json({ message: 'Not Found' }, 404);
+    }
+    // Authorised, and still invisible: the App is not installed here, or is
+    // installed without this repository. GitHub says 404 to both.
+    if (this.visible !== true) return this.json({ message: 'Not Found' }, 404);
 
     if (method !== 'GET' && this.options.canWrite === false) {
       return this.json({ message: 'Resource not accessible by integration' }, 403);
