@@ -170,7 +170,7 @@ export function SettingsPage({
       </aside>
 
       <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl px-8 py-10">
+        <div className={active === "agents" ? "mx-auto max-w-6xl px-4 py-8 sm:px-8 sm:py-10" : "mx-auto max-w-3xl px-8 py-10"}>
           <h1 className="text-xl font-semibold tracking-tight">
             {tabs.find((t) => t.id === active)?.label}
           </h1>

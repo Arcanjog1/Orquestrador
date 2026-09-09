@@ -2204,12 +2204,13 @@ test('audit: native project overflow click and keyboard open one menu without na
 
 test('audit: create, edit, disable and remove agents through the real renderer',async()=>{
  const window=await openWindow();
- await window.webContents.executeJavaScript("window.api.accounts.create({name:'Audit shared account',provider:'anthropic'})");
+ const account=await window.webContents.executeJavaScript("window.api.accounts.create({name:'Audit shared account',provider:'anthropic'})");
  await window.webContents.executeJavaScript("location.hash='#/configuracoes?tab=agents'");
  await reloadWindow(window);
  if(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=skip-onboarding]')"))await click(window,'skip-onboarding');
  await click(window,'agent-create');
  await window.webContents.executeJavaScript(`(()=>{const e=document.querySelector('[data-testid=agent-name]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'Audit Backend');e.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+ await formValue(window,'agent-account',account.id);await waitUntil(async()=>window.webContents.executeJavaScript("!!document.querySelector('[data-testid=agent-allow-sonnet]')"),10000,'catalog');await click(window,'agent-allow-sonnet');
  await nativeClick(window,'agent-save');
  const a=await waitFor(async()=>window.webContents.executeJavaScript("window.api.agents.manage().then(list=>list.find(a=>a.name==='Audit Backend'))"),10000,'saved agent');
  await click(window,`agent-edit-${a.id}`);
@@ -2220,7 +2221,7 @@ test('audit: create, edit, disable and remove agents through the real renderer',
  const saved=await window.webContents.executeJavaScript(`window.api.agents.manage().then(list=>list.find(a=>a.id==='${a.id}'))`);
  assert.equal(saved.enabled,false);assert.equal(saved.name,'Audit Backend');
  if(process.env.ELECTRON_AUDIT_SCREENSHOT)writeFileSync(process.env.ELECTRON_AUDIT_SCREENSHOT,(await window.webContents.capturePage()).toPNG());
- await click(window,`agent-remove-${a.id}`);
+ await click(window,`agent-edit-${a.id}`);await window.webContents.executeJavaScript("document.querySelector('[data-testid=agent-advanced] summary').click()");await click(window,`agent-remove-${a.id}`);
  await waitUntil(async()=>window.webContents.executeJavaScript(`window.api.agents.manage().then(list=>!list.some(a=>a.id==='${a.id}'))`),10000,'removed agent');
 });
 
@@ -2511,27 +2512,64 @@ async function waitForText(window, pattern, timeoutMs) {
 
 test('phase2: role provider independence and fixed model policy persist through the real renderer',async()=>{
  const window=await openWindow();
- await window.webContents.executeJavaScript("window.api.accounts.create({name:'Phase2 OpenAI',provider:'openai'})");
+ const account=await window.webContents.executeJavaScript("window.api.accounts.create({name:'Phase2 OpenAI',provider:'openai'})");
  await window.webContents.executeJavaScript("location.hash='#/configuracoes?tab=agents'");await reloadWindow(window);
  if(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=skip-onboarding]')"))await click(window,'skip-onboarding');
  await click(window,'agent-create');
  const input=async(id,value,tag='HTMLInputElement')=>window.webContents.executeJavaScript('(()=>{const e=document.querySelector('+JSON.stringify('[data-testid='+id+']')+');Object.getOwnPropertyDescriptor('+tag+'.prototype,"value").set.call(e,'+JSON.stringify(value)+');e.dispatchEvent(new Event('+JSON.stringify(tag==='HTMLSelectElement'?'change':'input')+',{bubbles:true}));})()');
- await input('agent-name','Phase2 Reviewer');await input('agent-role','ANALYST','HTMLSelectElement');await input('agent-provider','openai','HTMLSelectElement');await input('agent-model','gpt-test');
+ await input('agent-name','Phase2 Reviewer');await input('agent-role','ANALYST','HTMLSelectElement');await input('agent-provider','openai','HTMLSelectElement');await input('agent-account',account.id,'HTMLSelectElement');await waitUntil(async()=>window.webContents.executeJavaScript("!!document.querySelector('[data-testid=\"agent-allow-gpt-5.3-codex-spark\"]')"),10000,'OpenAI catalog');await click(window,'agent-allow-gpt-5.3-codex-spark');
  await waitUntil(async()=>window.webContents.executeJavaScript("!!document.querySelector('[data-testid=agent-policy-fields]')"),5000,'policy fields');
  await nativeClick(window,'agent-save');
  const agent=await waitFor(async()=>window.webContents.executeJavaScript("window.api.agents.manage().then(list=>list.find(a=>a.name==='Phase2 Reviewer'))"),10000,'phase2 agent');
- assert.equal(agent.role,'ANALYST');assert.equal(agent.provider,'openai');assert.equal(agent.policy.modelMode,'FIXED');assert.equal(agent.policy.primaryModel,'gpt-test');assert.equal(agent.policy.tools.includes('write'),false);
+ assert.equal(agent.role,'ANALYST');assert.equal(agent.provider,'openai');assert.equal(agent.policy.modelMode,'FIXED');assert.equal(agent.policy.primaryModel,'gpt-5.3-codex-spark');assert.equal(agent.policy.tools.includes('write'),false);
  await reloadWindow(window);
- assert.equal((await window.webContents.executeJavaScript('window.api.agents.manage().then(list=>list.find(a=>a.id==='+JSON.stringify(agent.id)+'))')).policy.primaryModel,'gpt-test');
+ assert.equal((await window.webContents.executeJavaScript('window.api.agents.manage().then(list=>list.find(a=>a.id==='+JSON.stringify(agent.id)+'))')).policy.primaryModel,'gpt-5.3-codex-spark');
  await waitForText(window,/Phase2 Reviewer/,10000);
  await window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
  if(process.env.ELECTRON_PHASE2_SCREENSHOT)writeFileSync(process.env.ELECTRON_PHASE2_SCREENSHOT,(await window.webContents.capturePage()).toPNG());
- await click(window,'model-rule-add');
+ await click(window,'agents-policies-tab');await click(window,'model-rule-add');
  await window.webContents.executeJavaScript(`(()=>{const e=document.querySelector('[aria-label="Modelo da regra"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(e,"gpt-phase2-blocked");e.dispatchEvent(new Event("input",{bubbles:true}));})()`);
  await window.webContents.executeJavaScript(`document.querySelector('[aria-label="allowed gpt-phase2-blocked"]').click()`);
  await nativeClick(window,'model-policies-save');
  await waitUntil(async()=>window.webContents.executeJavaScript("window.api.agents.policies().then(p=>p.models.some(m=>m.modelId==='gpt-phase2-blocked'&&!m.allowed))"),10000,'global block');
  await window.webContents.executeJavaScript("window.api.agents.savePolicies({models:[],defaults:{},routing:{}})");
+});
+
+async function formValue(window,id,value) {
+ await window.webContents.executeJavaScript('(()=>{const e=document.querySelector('+JSON.stringify('[data-testid="'+id+'"]')+');const proto=e.tagName==="SELECT"?HTMLSelectElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,"value").set.call(e,'+JSON.stringify(value)+');e.dispatchEvent(new Event(e.tagName==="SELECT"?"change":"input",{bubbles:true}));})()');
+}
+
+test('cards: dynamic account models, reasoning, policy locks and no manual IDs',async()=>{
+ const window=await openWindow();const original=services.agentModels.bind(services);
+ const a=services.accounts.create('Claude 1 · Cards','anthropic'),b=services.accounts.create('Claude 2 · Cards','anthropic');
+ services.database.accounts.updateAuth(a.id,'connected','fixture');services.database.accounts.updateAuth(b.id,'connected','fixture');
+ const {decorateAgentModels}=await load('apps/desktop/src/main/services/agent-model-catalog.js');
+ let locked=false,missing=false;
+ services.agentModels=async(id,role)=>decorateAgentModels((id===a.id?['opus','sonnet','haiku']:missing?['haiku']:['sonnet','haiku',...(locked?['fable']:[])]).map(id=>({id,provider:'anthropic',source:'runtime',reasoning:['low','medium','high'],accountAllowed:true})),services.database.accounts.require(id),services.agents.policies(),role);
+ try {
+ await window.webContents.executeJavaScript("location.hash='#/configuracoes?tab=agents'");await reloadWindow(window);if(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=skip-onboarding]')"))await click(window,'skip-onboarding');
+ assert.equal(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=model-policies]')"),false,'global policies separated');
+ await click(window,'agent-create');await formValue(window,'agent-name','Claude Designer');await formValue(window,'agent-role','DESIGNER');await formValue(window,'agent-account',a.id);
+ await waitUntil(async()=>window.webContents.executeJavaScript("document.querySelectorAll('[data-testid=agent-model-options] input').length===3"),10000,'three runtime models');
+ assert.deepEqual(await window.webContents.executeJavaScript("[...document.querySelectorAll('[data-testid=agent-model-options] label span.font-medium')].map(e=>e.textContent)"),['Opus','Sonnet','Haiku']);
+ await click(window,'agent-allow-opus');await formValue(window,'agent-account',b.id);
+ await waitUntil(async()=>window.webContents.executeJavaScript("document.querySelectorAll('[data-testid=agent-model-options] input').length===2"),10000,'account B models');
+ assert.equal(await window.webContents.executeJavaScript("document.querySelector('[data-testid=agent-model]').value"),'','old account selection cleared');
+ await click(window,'agent-allow-sonnet');await click(window,'agent-allow-haiku');await click(window,'agent-mode-CONTROLLED_AUTO');await formValue(window,'agent-reasoning','medium');
+ assert.deepEqual(await window.webContents.executeJavaScript("[...document.querySelector('[data-testid=agent-reasoning]').options].map(o=>o.text)"),['Automático','Baixo','Médio','Alto']);
+ assert.equal(await window.webContents.executeJavaScript("document.querySelector('[data-testid=agent-model]').tagName"),'SELECT');
+ assert.equal(await window.webContents.executeJavaScript("document.querySelector('[data-testid=agent-advanced]').open"),false);
+ if(process.env.ELECTRON_CARDS_FORM_SCREENSHOT){window.setSize(1200,1050);await window.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');writeFileSync(process.env.ELECTRON_CARDS_FORM_SCREENSHOT,(await window.webContents.capturePage()).toPNG());}
+ await nativeClick(window,'agent-save');
+ const agent=await waitFor(async()=>services.agents.manage().find(a=>a.name==='Claude Designer'),10000,'Designer saved');assert.equal(agent.accountId,b.id);assert.deepEqual(agent.policy.allowedModels,['sonnet','haiku']);assert.equal(agent.policy.reasoning,'medium');assert.deepEqual(agent.policy.fallbackModels,['haiku']);
+ await reloadWindow(window);await waitForText(window,/Claude Designer/,10000);
+ const card=await window.webContents.executeJavaScript('document.querySelector('+JSON.stringify('[data-testid="agent-card-'+agent.id+'"]')+').innerText');assert.ok(card.includes('Sonnet')&&card.includes('Haiku')&&card.includes('Médio'));assert.ok(!card.includes(agent.id)&&!card.includes('Legado')&&!card.includes('Teto'));
+ if(process.env.ELECTRON_CARDS_SCREENSHOT){window.setSize(1600,1000);await window.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');writeFileSync(process.env.ELECTRON_CARDS_SCREENSHOT,(await window.webContents.capturePage()).toPNG());}
+ locked=true;services.agents.savePolicies({models:[{provider:'anthropic',modelId:'fable',allowed:false,premium:true,confirmationRequired:false,allowedRoles:[],capability:null}],defaults:{},routing:{}});
+ await click(window,'agent-edit-'+agent.id);await waitUntil(async()=>window.webContents.executeJavaScript("!!document.querySelector('[data-testid=agent-allow-fable]')"),10000,'Fable rule');assert.equal(await window.webContents.executeJavaScript("document.querySelector('[data-testid=agent-allow-fable]').disabled"),true);assert.ok((await window.webContents.executeJavaScript('document.body.innerText')).includes('Bloqueado pela política global'));
+ await click(window,'agent-mode-FIXED');await nativeClick(window,'agent-save');await waitUntil(async()=>services.agents.manage().find(a=>a.id===agent.id)?.policy.modelMode==='FIXED',10000,'fixed saved');await reloadWindow(window);
+ await waitUntil(async()=>window.webContents.executeJavaScript("!!document.querySelector('[data-testid=agent-card-grid]')"),10000,'cards after reload');window.setSize(900,850);await window.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');assert.equal(await window.webContents.executeJavaScript("getComputedStyle(document.querySelector('[data-testid=agent-card-grid]')).gridTemplateColumns.split(' ').length"),1);missing=true;await reloadWindow(window);await waitForText(window,/Modelo indisponível/,10000);assert.equal(services.agents.manage().find(a=>a.id===agent.id).policy.primaryModel,'sonnet','FIXED/primary never replaced by catalog refresh');
+ } finally {services.agentModels=original;services.agents.savePolicies({models:[],defaults:{},routing:{}});}
 });
 
 /* --------------------------------------------------------------- the run */

@@ -10,6 +10,7 @@
  * Enabled by `AI_ORCHESTRATOR_SMOKE=1`, so it can never fire in normal use.
  */
 
+import {agentCardsSmoke} from './agent-card-smoke.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { BrowserWindow } from 'electron';
@@ -246,6 +247,7 @@ export async function runSmokeChecks(
     if(screenshot)await save(window,screenshot.replace(/\.png$/,'-agents.png'));
     return 'OpenAI reviewer, FIXED policy, restricted tools, global model block and role routing survive renderer reload and process restart.';
   });
+  await check('agent-cards-create-select-save-reopen',()=>agentCardsSmoke(services,window));
   return checks;
 }
 
