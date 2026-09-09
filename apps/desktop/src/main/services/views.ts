@@ -125,6 +125,8 @@ export function toRunView(record: RunRecord, steps: readonly RunStepRecord[]): R
 function failureKindOf(steps: readonly RunStepRecord[]): RunFailureKind {
   const last = steps[steps.length - 1];
   switch (last?.phase) {
+    case 'no-progress':
+      return 'no-progress';
     case 'readiness':
       return 'readiness';
     case 'orchestrator':

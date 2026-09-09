@@ -862,7 +862,7 @@ export interface RunView {
  * spawn error) - distinct from `decision`, where the CLI answered but not
  * with a usable decision.
  */
-export type RunFailureKind = 'readiness' | 'cli' | 'decision' | 'limit' | 'interrupted' | 'error';
+export type RunFailureKind = 'readiness' | 'cli' | 'decision' | 'limit' | 'interrupted' | 'no-progress' | 'error';
 
 /** One recorded step of a run, with its diagnostics when it left any. */
 export interface RunStepView {

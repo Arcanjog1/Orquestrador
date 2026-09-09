@@ -102,7 +102,9 @@ import {
   type AccountRoutingPolicy,
 } from '../../../../../src/routing/account-policy.js';
 import { classifyCreditFailure } from '../../../../../src/routing/credit-failure.js';
-import { isReadOnlyObjective, queryProofProblems } from '../../../../../src/orchestrator/query-proof.js';
+import { isReadOnlyObjective, readProofProblems, type QueryEvidence } from '../../../../../src/orchestrator/query-proof.js';
+import { classifyObjective } from '../../../../../src/orchestrator/objective-intent.js';
+import { RejectedProgressGuard, equivalentAnswer, mechanicalGateFailure, publicGateAnswer } from '../../../../../src/orchestrator/rejected-progress.js';
 import { fileContext, missingFilePayload } from '../../../../../src/orchestrator/file-context.js';
 import { buildWorkerPrompt } from '../../../../../src/orchestrator/worker-prompt.js';
 import type { ContextEntry } from '../../../../../src/context/project-context.js';
@@ -813,9 +815,11 @@ export class OrchestrationService {
     const sessionId = this.database.runs.require(runId).session_id!;
     const signal = controller.signal;
     const maxIterations = this.options.maxIterations ?? DEFAULTS.maxIterations;
+    const objectiveIntent = classifyObjective(objective);
 
     this.database.runs.setStatus(runId, 'RUNNING');
     this.progress(runId, sessionId, 'analysing', 'Analisando...', 'RUNNING');
+    this.step(runId, startIteration, 'objective-intent', 'classified', objectiveIntent.kind, { intent: objectiveIntent });
 
     // The person's goal, sent once. Everything the agents say afterwards
     // hangs off this exchange, which is what lets the timeline show a run as
@@ -1040,6 +1044,22 @@ export class OrchestrationService {
      * same list would be a loop, and the second refusal is a real one.
      */
     let listingOffered = false;
+    const queryEvidence: QueryEvidence[] = [];
+    if(github) {
+      const snapshot={repository:github.fullName,branch:github.baseBranch,commit:github.headCommit};
+      queryEvidence.push({kind:'REPOSITORY_ACCESS',...snapshot},{kind:'REPOSITORY_METADATA',...snapshot});
+      if(github.tree)for(const kind of ['REPOSITORY_TREE','FILE_EXISTENCE'] as const)queryEvidence.push({kind,...snapshot,paths:github.tree.entries.map(e=>e.path),complete:!github.tree.truncated});
+      if(objectiveIntent.readProofs.includes('COMMIT')) {
+        try {
+          const source=await this.githubSource(github,signal);
+          const commits=await source.operations.commits(source.ref,source.at,source.token,20,signal);
+          queryEvidence.push({kind:'COMMIT',...snapshot,commits});
+        } catch(error) {this.step(runId,0,'query-evidence','unavailable',String(error));}
+      }
+    } else if(baseline.isGitRepository&&baseline.commit&&baseline.branch) {
+      const snapshot={repository:String(workspace.repository_url??workspace.name??cwd),branch:baseline.branch,commit:baseline.commit};
+      queryEvidence.push({kind:'REPOSITORY_ACCESS',...snapshot},{kind:'REPOSITORY_METADATA',...snapshot});
+    }
 
     // Routing state for this run: what each worker's CLI can take (read once
     // per worker), the attempts so far as the router reads them, the models a
@@ -1073,6 +1093,20 @@ export class OrchestrationService {
     let stagnantRounds = 0;
     const batchSignatures = new Set<string>();
     let unresolvedDelegations = false;
+    const rejectedProgress = new RejectedProgressGuard();
+    const displayedDoneAnswers = new Set<string>();
+    const stopRepeatedRejection=(gate:import('../core.js').DoneGateResult, record:IterationRecord, fresh:GitEvidence):boolean=>{
+      if(mechanicalGateFailure(gate))for(const attempts of attemptsByWorker.values()) {
+        const last=attempts.at(-1);if(last)last.mechanical=true;
+      }
+      if(!rejectedProgress.observe({answer:record.decision?.summary??'',evidence:fresh,reads:iterations.flatMap(r=>r.fileReads??[]),criteria:ledger.pending(),gate}))return false;
+      const reason='GATE_MISMATCH: duas propostas de conclusão têm a mesma resposta, evidência, critérios e rejeição. A execução foi interrompida sem escalar modelos; falta uma prova compatível com o objetivo.';
+      this.database.runs.setStatus(runId,'FAILED',reason);
+      this.step(runId,record.iteration,'no-progress','stopped',reason,{failures:gate.failures});
+      this.say(sessionId,runId,'system',reason);
+      this.progress(runId,sessionId,'failed',reason,'FAILED');
+      return true;
+    };
     // What was said in this conversation before this run, so a follow-up
     // ("continue", "now also do X") is read against what came before it.
     const history = this.conversationBefore(sessionId, runId);
@@ -1117,7 +1151,10 @@ export class OrchestrationService {
         github,
         team,
         preflight,
-      }) + '\n\n' + supervisorFiles.text;
+      }) + '\n\nOBJECTIVE INTENT: '+JSON.stringify(objectiveIntent)+
+        '\nMEASURED QUERY EVIDENCE (application-owned, not model claims): '+JSON.stringify(queryEvidence.filter(e=>objectiveIntent.readProofs.includes(e.kind)).map(e=>({...e,...(e.paths?{paths:e.paths.slice(0,200),totalPaths:e.paths.length,complete:e.complete&&e.paths.length<=200}:{})})))+
+        '\nA simple query about access, metadata or the tree can be answered with done immediately using these facts. Do not delegate it, invent a change, or ask for a CLI flag. File-content questions still require fileReads and byte-grounded queryProof citations. Mixed requests must prove every requested operation.'+
+        '\n\n' + supervisorFiles.text;
       if (supervisorFiles.deliveries.length) this.step(runId, iteration, 'file-context', 'supervisor-carried', 'Conteúdo incluído no prompt do supervisor.', { deliveries: supervisorFiles.deliveries });
       const asked = await this.askForDecision({
         runId,
@@ -1170,7 +1207,10 @@ export class OrchestrationService {
       ledger.add(decision.acceptanceCriteria, iteration);
 
       if (decision.summary) {
-        this.say(sessionId, runId, 'orchestrator', decision.summary);
+        const answer=publicGateAnswer(decision.summary);
+        const key=equivalentAnswer(answer);
+        if(decision.action!=='done'||!displayedDoneAnswers.has(key))this.say(sessionId, runId, 'orchestrator', answer);
+        if(decision.action==='done')displayedDoneAnswers.add(key);
       }
 
       // Files the supervisor asked to *see*. The application opens them, so
@@ -1777,11 +1817,24 @@ export class OrchestrationService {
         );
       }
 
-      if (decision.action === 'done' && decision.queryProof && isReadOnlyObjective(objective) && !evidence.changedSinceBaseline && resolvedCommands.size === 0) {
+      let objectiveProofProblems: string[] = [];
+      if (decision.action === 'done' && objectiveIntent.readProofs.length) {
         const delivered = iterations.slice(0, -1).flatMap(r => r.fileReads ?? []).flatMap(r => { const d=supervisorFiles.deliveries.find(d=>d.path===r.request.path && d.sha256===r.sha256 && d.range.start===(r.request.offsetBytes??0) && d.state==='SUPERVISOR_CARRIED'); return d && r.text!==null ? [{...r,text:Buffer.from(r.text).subarray(0,d.bytesSent).toString('utf8')}] : []; });
-        const problems = queryProofProblems(objective, decision.summary ?? '', decision.queryProof, delivered);
-        this.step(runId, iteration, 'query-proof', problems.length ? 'rejected' : 'passed', problems.join('; ') || 'Resposta revisada e citações conferidas nos bytes entregues.', { proof: decision.queryProof });
-        if (!problems.length) for (const criterion of decision.queryProof.criteria) ledger.markByText(criterion, 'satisfied', iteration, 'Consulta: revisão do supervisor com citações conferidas nos bytes entregues.');
+        // Metadata facts are tied to the opened snapshot, never to a worker's
+        // proposed write. Content still must have reached the supervisor.
+        const currentFacts=queryEvidence.filter(f=>!github||f.commit===github.headCommit);
+        const readIntent=objectiveIntent.targets.length?objectiveIntent:{...objectiveIntent,targets:decision.fileChecks.map(c=>c.path)};
+        objectiveProofProblems = readProofProblems(readIntent, decision.summary ?? '', decision.queryProof, delivered, currentFacts);
+        if(objectiveIntent.kind==='READ_ONLY_QUERY'&&evidence.changedSinceBaseline)objectiveProofProblems.push('A read-only objective unexpectedly changed files.');
+        this.step(runId, iteration, 'query-proof', objectiveProofProblems.length ? 'rejected' : 'passed', objectiveProofProblems.join('; ') || 'Consulta comprovada: '+objectiveIntent.readProofs.join(', '), { proof: decision.queryProof, evidence:currentFacts });
+        if (!objectiveProofProblems.length) {
+          for(const criterion of decision.queryProof?.criteria??decision.acceptanceCriteria) {
+            const criterionIntent=classifyObjective(criterion);
+            // Auto-proof of metadata cannot certify a test/change criterion.
+            if(!decision.queryProof && (criterionIntent.kind!=='READ_ONLY_QUERY'||readProofProblems(criterionIntent,decision.summary??'',undefined,delivered,currentFacts).length))continue;
+            ledger.markByText(criterion,'satisfied',iteration,'Consulta comprovada por evidência independente.');
+          }
+        }
       }
 
       // 4a. What the worker did, assembled from what already came back.
@@ -1876,6 +1929,8 @@ export class OrchestrationService {
           ? await collector.collectEvidence(baseline)
           : await this.collectGitHubEvidence(github!, signal);
         const gate = await evaluateDone({
+          objectiveIntent,
+          objectiveProofProblems: objectiveIntent.readProofs.length ? ['Read obligations require supervisor review.'] : [],
           ledger,
           verificationCommands: [...resolvedCommands],
           iterations,
@@ -1885,16 +1940,8 @@ export class OrchestrationService {
           // which the gate reads as no proof at all. That is the honest answer
           // and the one the person asked for: never an invented PASS.
           verifier: verifier ?? verifierWithoutExecutor(NO_EXECUTOR),
-          // A question is not a failed change. In a GitHub project a run that
-          // never proposed a change was answering something - "which files are
-          // here?", "what does the README say?" - and demanding a diff from it
-          // would make every read-only question end at the iteration limit,
-          // which is exactly what the incident run did. The protection against
-          // a *change* task slipping through this way is the ledger: a task
-          // with acceptance criteria still has to prove them, and unproven
-          // criteria refuse DONE a few lines below.
-          allowNoChanges:
-            this.options.allowNoChanges ?? (github !== null && github.commits.length === 0 && isReadOnlyObjective(objective)),
+          // Only the requested operations determine whether a diff is required.
+          allowNoChanges: !objectiveIntent.requiresChanges,
           fileChecks: [...requestedFileChecks.values()],
           workspaceRoot: cwd,
           ...(github ? { readFileChecks: (requests) => this.githubChecks(github!, requests, signal) } : {}),
@@ -1930,6 +1977,7 @@ export class OrchestrationService {
         // The gate said no. Nothing is lost: the run goes on exactly as it
         // would have, with the gate's reasons as the orchestrator's feedback.
         record.doneRejection = gate;
+        if(stopRepeatedRejection(gate,record,fresh))return;
         feedback = formatDoneRejection(gate);
         this.say(sessionId, runId, 'system', 'A validação final não passou; o orquestrador vai revisar.');
         continue;
@@ -1942,6 +1990,8 @@ export class OrchestrationService {
           ? await collector.collectEvidence(baseline)
           : await this.collectGitHubEvidence(github!, signal);
         const gate = await evaluateDone({
+          objectiveIntent,
+          objectiveProofProblems,
           ledger,
           verificationCommands: [...resolvedCommands],
           iterations,
@@ -1951,16 +2001,8 @@ export class OrchestrationService {
           // which the gate reads as no proof at all. That is the honest answer
           // and the one the person asked for: never an invented PASS.
           verifier: verifier ?? verifierWithoutExecutor(NO_EXECUTOR),
-          // A question is not a failed change. In a GitHub project a run that
-          // never proposed a change was answering something - "which files are
-          // here?", "what does the README say?" - and demanding a diff from it
-          // would make every read-only question end at the iteration limit,
-          // which is exactly what the incident run did. The protection against
-          // a *change* task slipping through this way is the ledger: a task
-          // with acceptance criteria still has to prove them, and unproven
-          // criteria refuse DONE a few lines below.
-          allowNoChanges:
-            this.options.allowNoChanges ?? (github !== null && github.commits.length === 0 && isReadOnlyObjective(objective)),
+          // Only the requested operations determine whether a diff is required.
+          allowNoChanges: !objectiveIntent.requiresChanges,
           fileChecks: [...requestedFileChecks.values()],
           workspaceRoot: cwd,
           ...(github ? { readFileChecks: (requests) => this.githubChecks(github!, requests, signal) } : {}),
@@ -1975,13 +2017,14 @@ export class OrchestrationService {
           // does not open an empty PR to look productive.
           if (github) await this.publishGitHubWork(runId, sessionId, github, objective, signal);
           this.database.runs.setStatus(runId, 'DONE', 'Validação independente aprovada.');
-          this.say(sessionId, runId, 'orchestrator', 'Tarefa concluída e verificada.');
+          if(objectiveIntent.kind!=='READ_ONLY_QUERY')this.say(sessionId, runId, 'orchestrator', 'Tarefa concluída e verificada.');
           this.sayCost(sessionId, runId, budget);
           this.progress(runId, sessionId, 'done', 'Tarefa concluída.', 'DONE');
           return;
         }
+        if(stopRepeatedRejection(gate,record,fresh))return;
         feedback = formatDoneRejection(gate);
-        this.say(sessionId, runId, 'system', 'A validação final não passou; o orquestrador vai corrigir.');
+        this.say(sessionId, runId, 'system', 'A validação final não passou; o orquestrador vai revisar a prova necessária.');
         continue;
       }
 
@@ -3032,6 +3075,11 @@ export class OrchestrationService {
     const github = input.github;
     const result = readChangeProposal(input.answer, github.headCommit);
     if (result.kind === 'none') return { applied: false, feedback: null };
+    if(!classifyObjective(input.objective).requiresChanges) {
+      const feedback='Esta consulta não autoriza alterações. A proposta foi recusada antes de criar branch, commit ou PR; responda usando evidência de leitura/execução.';
+      this.step(input.runId,input.iteration,'proposal','refused',feedback);
+      return {applied:false,feedback};
+    }
     if (result.kind === 'invalid') {
       this.step(input.runId, input.iteration, 'proposal', 'rejected', result.problem.slice(0, 500));
       this.say(input.sessionId, input.runId, 'system', `Alteração não aplicada. ${result.problem}`);

@@ -155,7 +155,7 @@ export function executionGraph(
         status,
         label: worker
           ? (invocation.workerId ?? "Worker")
-          : "Codex · revisão e decisão",
+          : detail.steps.some(s=>s.phase==='objective-intent'&&s.summary==='READ_ONLY_QUERY') ? 'Codex · consulta' : "Codex · revisão e decisão",
         summary: compactText(
           report?.headline ??
             (worker
@@ -221,7 +221,7 @@ export function executionGraph(
               ? `${steps.length} operações`
               : group === "task-join"
                 ? "Join · resultados reunidos"
-                : group,
+              : group === 'query-proof' ? 'Consulta · prova independente' : group,
           summary: compactText(last.summary ?? last.status),
           fullText: steps
             .map(

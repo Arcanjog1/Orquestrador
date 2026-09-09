@@ -279,7 +279,7 @@ test('authorising continues the original run, in the same run, with the rule on 
     const sent = value<{ run: { id: string } }>(
       await prepared.fixture.router.handle('chat.sendMessage', {
         sessionId: prepared.sessionId,
-        text: 'O orquestrador consegue acessar o repositório?',
+        text: 'Crie hello.txt no repositório.',
       }),
     );
     const stopped = await prepared.fixture.services.orchestration.waitFor(sent.run.id);

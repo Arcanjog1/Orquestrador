@@ -266,7 +266,8 @@ test('caso 2: "leia o README" descobre o caminho e recebe o conteúdo real', asy
         action: 'done',
         acceptanceCriteria: [],
         verificationCommands: [],
-        summary: 'É um botão para o Revit.',
+        summary: 'README.md: Um botão para o Revit.',
+        queryProof: { criteria: [], citations: [{ path: 'README.md', quote: 'Um botão para o Revit.' }] },
       });
     },
     maxIterations: 3,
@@ -322,6 +323,7 @@ test('caso 3: "onde está a lógica de login?" filtra a árvore e abre o candida
         acceptanceCriteria: [],
         verificationCommands: [],
         summary: 'A lógica de login está em src/auth/login.ts.',
+        queryProof: { criteria: [], citations: [{ path: 'src/auth/login.ts', quote: 'export function login(user: string) { return user; }' }] },
       });
     },
     maxIterations: 4,
@@ -480,7 +482,7 @@ test('um "blocked" por falta da lista de arquivos é respondido, não vira revis
     maxIterations: 3,
   });
   try {
-    const { run, steps } = await ask(prepared, 'analise este repositório');
+    const { run, steps } = await ask(prepared, 'quais arquivos tem neste repositório?');
     assert.equal(offered, true, 'o aplicativo ofereceu a lista em vez de parar');
     assert.equal(run.status, 'DONE');
     assert.notEqual(run.status, 'BLOCKED');
@@ -549,8 +551,8 @@ test('real service runs independent workers concurrently in isolated directories
   const a=new ScriptedAgent('mock-claude','Claude A',[work]), b=new ScriptedAgent('mock-claude','Claude B',[work]);
   const prepared=await prepare({files:PROJECT,workers:[a,b],orchestrator:input=>{
     round++;
-    if(round===1)return JSON.stringify({action:'delegate',delegations:[{taskId:'backend',workerId:'worker-1',task:'Analisar backend',dependsOn:[],requiresTools:false},{taskId:'ui',workerId:'worker-2',task:'Analisar UI',dependsOn:[],requiresTools:false}]});
-    assert.ok(input.prompt.includes('JOIN')); assert.equal(active,0); return JSON.stringify({action:'done',summary:'Análises revisadas.'});
+    if(round===1)return JSON.stringify({action:'delegate',fileReads:[{path:'README.md',maxBytes:null}],delegations:[{taskId:'backend',workerId:'worker-1',task:'Analisar backend',dependsOn:[],requiresTools:false},{taskId:'ui',workerId:'worker-2',task:'Analisar UI',dependsOn:[],requiresTools:false}]});
+    assert.ok(input.prompt.includes('JOIN')); assert.equal(active,0); return JSON.stringify({action:'done',summary:'README.md: Um botão para o Revit.',queryProof:{criteria:[],citations:[{path:'README.md',quote:'Um botão para o Revit.'}]}});
   }});
   try {const result=await ask(prepared,'analise o projeto');assert.equal(result.run.status,'DONE',JSON.stringify(result));assert.equal(peak,2);assert.notEqual(dirs[0],dirs[1]);assert.ok(result.steps.some(s=>s.phase==='task-join'));}finally{await prepared.cleanup();}
 });
