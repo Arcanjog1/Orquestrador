@@ -135,9 +135,15 @@ export async function runSmokeChecks(
   }
 
   await check('execution-worktree-render-details-zoom-reload', async () => {
-    const workspace=services.workspaces.createConversation({name:'Execution Worktree · smoke fixture'});
-    const session=services.chat.createSession(workspace.id,'Analisar arquitetura');
-    const runId='run-smoke-'+Date.now();
+    let workspace: {id:string}, session: {id:string}, runId: string;
+    if (process.env.AI_ORCHESTRATOR_SMOKE_REOPEN === '1') {
+      const saved=JSON.parse(services.database.settings.get('smoke.graph') ?? '{}');
+      workspace={id:saved.workspaceId}; session={id:saved.sessionId}; runId=saved.runId;
+      if(!runId || services.database.runs.require(runId).status!=='DONE')throw new Error('Persisted run missing after process restart.');
+    } else {
+    workspace=services.workspaces.createConversation({name:'Execution Worktree · smoke fixture'});
+    session=services.chat.createSession(workspace.id,'Analisar arquitetura');
+    runId='run-smoke-'+Date.now();
     services.database.runs.create({id:runId,sessionId:session.id,workspaceId:workspace.id,objective:'Localizar a lógica do botão e revisar a interface',orchestratorAgentId:null,maxIterations:3});
     services.database.runs.setStatus(runId,'RUNNING');
     services.database.chat.addMessage({sessionId:session.id,runId,author:'user',body:'Localizar a lógica do botão e revisar a interface'});
@@ -148,6 +154,8 @@ export async function runSmokeChecks(
     services.database.runs.addStep({runId,iteration:1,phase:'task-join',status:'completed',summary:'Duas análises reunidas para revisão.'});
     services.database.runs.addStep({runId,iteration:1,phase:'evidence',status:'read',summary:'Script.py e wall_modeling.py · conteúdo conferido'});
     services.database.runs.setStatus(runId,'DONE','Consulta concluída. Fixture de UI; nenhum modelo foi chamado.');
+      services.database.settings.set('smoke.graph',JSON.stringify({workspaceId:workspace.id,sessionId:session.id,runId}));
+    }
     await window.webContents.executeJavaScript("location.hash='#/'; true");
     window.webContents.reload();
     await waitForBody(window,/Pular onboarding/,20000);
@@ -161,6 +169,15 @@ export async function runSmokeChecks(
     await window.webContents.executeJavaScript('document.querySelector(\'[aria-label="Ajustar à tela"]\').click()');
     await new Promise(r=>setTimeout(r,200));
     if(screenshot)await save(window,screenshot.replace(/\.png$/,'-overview.png'));
+    const surface = await window.webContents.executeJavaScript('(()=>{const r=document.querySelector(".worktree-canvas").getBoundingClientRect();return {x:Math.round(r.left+18),y:Math.round(r.top+110)}})()');
+    const transform=await window.webContents.executeJavaScript('document.querySelector(".worktree-world").style.transform');
+    window.webContents.sendInputEvent({type:'mouseDown',...surface,button:'left',clickCount:1});
+    window.webContents.sendInputEvent({type:'mouseMove',x:surface.x+50,y:surface.y+35});
+    window.webContents.sendInputEvent({type:'mouseUp',x:surface.x+50,y:surface.y+35,button:'left',clickCount:1});
+    await new Promise(r=>setTimeout(r,200));
+    if(transform===await window.webContents.executeJavaScript('document.querySelector(".worktree-world").style.transform'))throw new Error('Pan did not move the canvas.');
+    await window.webContents.executeJavaScript('document.querySelector(\'[aria-label="Ajustar à tela"]\').click()');
+    await new Promise(r=>setTimeout(r,200));
     const fitted=await window.webContents.executeJavaScript('JSON.stringify([...document.querySelectorAll("[data-node-id]")].map(n=>n.dataset.nodeId).sort())');
     await window.webContents.executeJavaScript('[...document.querySelectorAll("button")].find(b=>b.textContent==="Minimizar concluídas").click()');
     await waitForBody(window,/Expandir/,5000);
@@ -186,6 +203,9 @@ export async function runSmokeChecks(
     await new Promise(r=>setTimeout(r,200));
     const reopened=await window.webContents.executeJavaScript('JSON.stringify([...document.querySelectorAll("[data-node-id]")].map(n=>n.dataset.nodeId).sort())');
     if(fitted!==reopened)throw new Error('Visible node identities changed after reload.');
+    const savedNodes=services.database.settings.get('smoke.graphNodes');
+    if(process.env.AI_ORCHESTRATOR_SMOKE_REOPEN==='1' && fitted!==savedNodes)throw new Error('Graph changed after restarting the packaged process.');
+    services.database.settings.set('smoke.graphNodes',fitted);
     return 'Persisted nodes, details, zoom, resize, maximize/restore and reload checked in Chromium. Fixture agents only.';
   });
   return checks;

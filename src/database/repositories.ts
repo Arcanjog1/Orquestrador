@@ -1669,6 +1669,8 @@ export class RunRepository extends Repository {
     // forgotten is the one that leaves a spinner turning for ever.
     if (stopped) {
       this.closePendingSteps(id, status === 'CANCELLED' ? 'cancelled' : 'ended');
+      const pending = this.db.all("SELECT id FROM agent_invocations WHERE run_id = ? AND outcome = 'running'", [id]);
+      for (const _ of pending) this.addConsumption(id, null);
       this.db.run("UPDATE agent_invocations SET outcome = ?, finished_at = ? WHERE run_id = ? AND outcome = 'running'", [status === 'CANCELLED' ? 'cancelled' : 'stopped', finished, id]);
     }
   }

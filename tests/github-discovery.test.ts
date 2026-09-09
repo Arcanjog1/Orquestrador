@@ -601,5 +601,6 @@ test('whole-run cancellation stops every active branch and ignores both late ans
     assert.equal(detail.run.status,'CANCELLED');
     const workers=detail.invocations.filter(i=>i.role==='CODING_WORKER');
     assert.equal(workers.length,2);assert.ok(workers.every(i=>i.outcome==='cancelled'));
+    assert.equal(prepared.fixture.services.database.runs.require(sent.run.id).invocation_count,3);
   }finally{release();await prepared.cleanup();}
 });

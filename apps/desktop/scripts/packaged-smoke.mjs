@@ -7,7 +7,8 @@
  * left open - rather than only working in a dev tree.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { existsSync, readdirSync, mkdtempSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -55,8 +56,14 @@ const needsXvfb = process.platform === 'linux' && !process.env.DISPLAY;
 const command = needsXvfb ? 'xvfb-run' : args.shift();
 if (needsXvfb) args.unshift('-a');
 
-const result = spawnSync(command, args, {
-  stdio: 'inherit',
-  env: { ...process.env, AI_ORCHESTRATOR_SMOKE: '1', ELECTRON_DISABLE_SECURITY_WARNINGS: '1' },
-});
-process.exit(result.status ?? 1);
+const home = process.env.AI_ORCHESTRATOR_HOME ?? mkdtempSync(join(tmpdir(),'orchestrator-packaged-'));
+for (const reopen of [false, true]) {
+  console.log(reopen ? '# restarting packaged application with the same SQLite database' : '# first packaged process');
+  const result = spawnSync(command, args, {
+    stdio: 'inherit',
+    timeout: 180000,
+    env: { ...process.env, AI_ORCHESTRATOR_HOME: home, AI_ORCHESTRATOR_SMOKE: '1', AI_ORCHESTRATOR_SMOKE_REOPEN: reopen ? '1' : '0', ELECTRON_DISABLE_SECURITY_WARNINGS: '1' },
+  });
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+process.exit(0);
