@@ -654,6 +654,10 @@ export class AppServices {
     // Before the database closes: the sweep reads it, and a tick that fires
     // against a closed handle would throw on the way out.
     this.orchestration.dispose();
+    // And a run still going reads it too. Stopping the loops and waiting for
+    // them is the difference between a clean shutdown and a rejected promise
+    // saying "database is not open" from somewhere nobody is watching.
+    await this.orchestration.drain();
     await this.processManager.cancelAll();
     this.database.close();
   }

@@ -3673,6 +3673,25 @@ export class OrchestrationService {
   }
 
   /**
+   * Stops every run that is still going, and waits for it to actually stop.
+   *
+   * Called on the way down, before the database closes. Without it a loop
+   * mid-iteration keeps reading a handle that is about to be pulled out from
+   * under it, and the failure surfaces as "database is not open" from a
+   * rejected promise nobody is waiting on - which is exactly what made CI red
+   * once the run resumed on approval instead of ending there.
+   *
+   * Bounded: a runner that will not stop must not hold the shutdown for ever.
+   */
+  async drain(timeoutMs = 10_000): Promise<void> {
+    for (const runId of [...this.active.keys()]) this.cancel(runId);
+    const deadline = Date.now() + timeoutMs;
+    while (this.active.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+
+  /**
    * Records how a run ended, and closes anything it left in flight.
    *
    * Called from `finally`, so it runs on every exit - a clean finish, a throw,

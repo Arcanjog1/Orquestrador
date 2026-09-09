@@ -409,32 +409,25 @@ test('an approved rule reaches the next delegation, and nothing was repeated to 
     const [request] = value<PermissionRequestView[]>(
       await prepared.fixture.router.handle('permission.forRun', { runId: first.run.id }),
     );
+    // Approving continues the run that stopped for it. Nothing is re-executed
+    // behind the person's back: the loop picks up where it was, with the grant
+    // now in force, and the worker stops being refused.
+    prepared.worker.denyNext = null;
     value(
       await prepared.fixture.router.handle('permission.approve', {
         requestId: request!.id,
         rule: 'Bash(node check.mjs)',
       }),
     );
+    const run = await prepared.fixture.services.orchestration.waitFor(first.run.id);
 
-    // Approving runs nothing on its own. This is the promise the dialog makes,
-    // and the one that keeps a non-idempotent operation from being repeated
-    // behind the person's back.
-    assert.equal(existsSync(join(prepared.repo.dir, 'hello.txt')), false, 'approval executes nothing');
+    // The same run, not a second one. Having to ask again is what escalated a
+    // read-only question to a stronger model in the incident this closes.
     const runsAfterApproval = prepared.fixture.services.orchestration.listForWorkspace(
       prepared.workspaceId,
     );
-    assert.equal(runsAfterApproval.length, 1, 'and starts no run by itself');
-
-    // The person sends the task again. Now the worker can see the grant.
-    prepared.worker.denyNext = null;
-    const second = value<{ run: { id: string } }>(
-      await prepared.fixture.router.handle('chat.sendMessage', {
-        sessionId: prepared.sessionId,
-        text: 'Continue: a autorização foi concedida.',
-      }),
-    );
-    const run = await prepared.fixture.services.orchestration.waitFor(second.run.id);
-
+    assert.equal(runsAfterApproval.length, 1, 'no second run was needed');
+    assert.equal(run.id, first.run.id);
     assert.equal(run.status, 'DONE');
     assert.equal(readFileSync(join(prepared.repo.dir, 'hello.txt'), 'utf8').trim(), EXPECTED);
     assert.match(
@@ -442,7 +435,7 @@ test('an approved rule reaches the next delegation, and nothing was repeated to 
       /Approved by the person for this project, and only these: Bash\(node check\.mjs\)/,
     );
     // Same conversation, same workspace: the history is one thread.
-    assert.equal(run.sessionId, first.run.id === second.run.id ? run.sessionId : run.sessionId);
+    assert.equal(run.sessionId, prepared.sessionId);
     assert.equal(
       prepared.fixture.services.database.chat.requireSession(prepared.sessionId).workspace_id,
       prepared.workspaceId,
