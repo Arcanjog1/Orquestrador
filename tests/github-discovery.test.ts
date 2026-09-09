@@ -71,6 +71,7 @@ async function prepare(options: {
   isPrivate?: boolean;
   defaultBranch?: string;
   maxIterations?: number;
+  worker?: (input: AgentInput) => string;
 }): Promise<Prepared> {
   const github = new FakeRepository({
     owner: OWNER,
@@ -87,6 +88,7 @@ async function prepare(options: {
       // The real worker's honest answer, kept verbatim: there is no checkout,
       // so it cannot list anything. If the engine delegates discovery here,
       // this is what comes back and the case fails.
+      if (options.worker) return options.worker(input);
       return 'Não existe checkout local neste projeto; não há como listar arquivos daqui.';
     },
   ]);
@@ -484,4 +486,55 @@ test('um "blocked" por falta da lista de arquivos é respondido, não vira revis
   } finally {
     await prepared.cleanup();
   }
+});
+
+
+test('fileReads: discovered bytes reach the worker in the SAME delegation, then cited query reaches DONE', async () => {
+  let round = 0;
+  let scriptPath = '';
+  let logicPath = '';
+  const prepared = await prepare({
+    files: { 'Script.py': 'from nuvem.core import wall_modeling', 'AGENTS.md': 'Project instructions', 'nuvem/core/wall_modeling.py': 'def build_wall(): return 42' },
+    maxIterations: 4,
+    orchestrator: input => {
+      round++;
+      if (round === 1) {
+        scriptPath = pathsVisibleTo(input.prompt).find(p => p.endsWith('.py') && !p.includes('/'))!;
+        return JSON.stringify({ action: 'verify', fileReads: [{path: scriptPath}] });
+      }
+      if (round === 2) {
+        assert.ok(input.prompt.includes('from nuvem.core import wall_modeling'));
+        const module = /from (\w+)\.(\w+) import (\w+)/.exec(input.prompt)!;
+        logicPath = [module[1], module[2], module[3]].join('/') + '.py';
+        return JSON.stringify({ action: 'delegate', task: 'Explique a lógica nos arquivos fornecidos.', fileReads: [{path: logicPath}], acceptanceCriteria: ['Localizar a lógica'] });
+      }
+      return JSON.stringify({action: 'done', summary: 'A lógica está em ' + logicPath + ', função build_wall.', queryProof: { criteria: ['Localizar a lógica'], citations: [{path: logicPath, quote: 'def build_wall(): return 42'}] } });
+    },
+    worker: input => {
+      assert.ok(input.prompt.includes('from nuvem.core import wall_modeling'));
+      assert.ok(input.prompt.includes('def build_wall(): return 42'));
+      return 'A lógica está em nuvem/core/wall_modeling.py.';
+    },
+  });
+  try {
+    const result = await ask(prepared, 'onde está a lógica do botão?');
+    assert.equal(result.run.status, 'DONE', JSON.stringify(result));
+    assert.equal(prepared.workerCalls.length, 1);
+    assert.ok(result.steps.some(s => s.phase === 'file-context' && s.status === 'worker-carried'));
+    assert.ok(result.steps.some(s => s.phase === 'query-proof' && s.status === 'passed'));
+  } finally { await prepared.cleanup(); }
+});
+
+test('missing payload report stops before a repeated delegation or escalation', async () => {
+  const prepared = await prepare({
+    files: {'Script.py': 'print(42)'}, maxIterations: 8,
+    orchestrator: input => JSON.stringify({action:'delegate', task:'Analise o arquivo fornecido.', fileReads: [{path: pathsVisibleTo(input.prompt)[0]}]}),
+    worker: () => 'não recebi o conteúdo de nenhum arquivo',
+  });
+  try {
+    const result = await ask(prepared, 'onde está a lógica?');
+    assert.equal(result.run.status, 'NEEDS_HUMAN');
+    assert.equal(prepared.workerCalls.length, 1);
+    assert.ok(result.steps.some(s => s.phase === 'file-read' && s.status === 'not-carried'));
+  } finally { await prepared.cleanup(); }
 });

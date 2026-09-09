@@ -124,7 +124,7 @@ export async function runGitHubFileCheck(
     sha256: createHash('sha256').update(bytes).digest('hex'),
     // There is no path on this computer: the file was never here. Saying so
     // beats inventing one that a person could try to open.
-    resolvedPath: `${source.ref.owner}/${source.ref.repo}@${short(source.at)}:${request.path}`,
+    resolvedPath: `${source.ref.owner}/${source.ref.repo}@${source.at}:${request.path}`,
   };
   const problem = compareFileBytes(request, bytes);
   if (problem) {
@@ -194,7 +194,8 @@ export async function runGitHubFileRead(
 
   const bytes = Buffer.from(file.text, 'utf8');
   const cap = Math.max(1, Math.min(request.maxBytes ?? budget, budget));
-  const slice = bytes.subarray(0, cap);
+  const offset = Math.max(0, request.offsetBytes ?? 0);
+  const slice = bytes.subarray(offset, offset + cap);
   return {
     request,
     ok: true,

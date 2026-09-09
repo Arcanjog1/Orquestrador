@@ -76,6 +76,11 @@ export function parseDecision(raw: string): ParseResult {
   if (reads.error) return fail(reads.error, raw);
   decision.fileReads = reads.value;
 
+  if (obj.queryProof != null) {
+    const p = obj.queryProof as Record<string, unknown>;
+    if (typeof p !== 'object' || Array.isArray(p) || !Array.isArray(p.criteria) || !p.criteria.every(c => typeof c === 'string') || !Array.isArray(p.citations) || p.citations.length > 20 || !p.citations.every(c => c && typeof c.path === 'string' && typeof c.quote === 'string' && c.quote.length <= 16000)) return fail('Invalid queryProof: expected criteria and path/quote citations.', raw);
+    decision.queryProof = { criteria: p.criteria as string[], citations: p.citations as {path: string; quote: string}[] };
+  }
   const listing = readListFiles(obj.listFiles);
   if (listing.error) return fail(listing.error, raw);
   if (listing.value) decision.listFiles = listing.value;
@@ -373,7 +378,7 @@ function readFileReads(value: unknown): { value: FileReadRequest[]; error?: stri
     }
     const row = entry as Record<string, unknown>;
     for (const key of Object.keys(row)) {
-      if (key !== 'path' && key !== 'maxBytes') {
+      if (key !== 'path' && key !== 'maxBytes' && key !== 'offsetBytes') {
         return { value: [], error: `"fileReads[${index}].${key}" is not a field of a file read.` };
       }
     }
@@ -386,6 +391,10 @@ function readFileReads(value: unknown): { value: FileReadRequest[]; error?: stri
         return { value: [], error: `"fileReads[${index}].maxBytes" must be a positive integer.` };
       }
       request.maxBytes = row.maxBytes;
+    }
+    if (row.offsetBytes !== undefined && row.offsetBytes !== null) {
+      if (typeof row.offsetBytes !== 'number' || !Number.isSafeInteger(row.offsetBytes) || row.offsetBytes < 0) return { value: [], error: 'offsetBytes must be a non-negative safe integer.' };
+      request.offsetBytes = row.offsetBytes;
     }
     out.push(request as unknown as FileReadRequest);
   }

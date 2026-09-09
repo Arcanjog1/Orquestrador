@@ -98,6 +98,8 @@ import {
   type AccountRoutingPolicy,
 } from '../../../../../src/routing/account-policy.js';
 import { classifyCreditFailure } from '../../../../../src/routing/credit-failure.js';
+import { isReadOnlyObjective, queryProofProblems } from '../../../../../src/orchestrator/query-proof.js';
+import { fileContext, missingFilePayload } from '../../../../../src/orchestrator/file-context.js';
 import { buildWorkerPrompt } from '../../../../../src/orchestrator/worker-prompt.js';
 import type { ContextEntry } from '../../../../../src/context/project-context.js';
 import type { ActivitySnapshot } from '../../../../../src/agents/activity-monitor.js';
@@ -1082,6 +1084,7 @@ export class OrchestrationService {
       if (verdict.warning) this.say(sessionId, runId, 'system', verdict.warning);
 
       this.progress(runId, sessionId, 'orchestrator', 'Orquestrador analisando...', 'RUNNING');
+      const supervisorFiles = fileContext(iterations.flatMap(r => r.fileReads ?? []), 'SUPERVISOR');
       const prompt = this.buildOrchestratorPrompt({
         workspace,
         cwd,
@@ -1095,7 +1098,8 @@ export class OrchestrationService {
         github,
         team,
         preflight,
-      });
+      }) + '\n\n' + supervisorFiles.text;
+      if (supervisorFiles.deliveries.length) this.step(runId, iteration, 'file-context', 'supervisor-carried', 'Conteúdo incluído no prompt do supervisor.', { deliveries: supervisorFiles.deliveries });
       const asked = await this.askForDecision({
         runId,
         workspace,
@@ -1144,6 +1148,30 @@ export class OrchestrationService {
         this.say(sessionId, runId, 'orchestrator', decision.summary);
       }
 
+      // Files the supervisor asked to *see*. The application opens them, so
+      // nobody has to ask a worker to copy a file into an answer - which is
+      // what the run that prompted this did, four files at a time, getting
+      // truncated copies back and going round again.
+      const fileReads =
+        decision.fileReads.length === 0
+          ? []
+          : github
+            ? await runGitHubFileReads(await this.githubSource(github, signal), decision.fileReads)
+            : environment?.kind === 'local'
+              ? await runFileReads(cwd, decision.fileReads)
+              : [];
+      if (fileReads.length > 0) {
+        record.fileReads = fileReads;
+        this.step(
+          runId,
+          iteration,
+          'file-read',
+          fileReads.every((read) => read.ok) ? 'read' : 'partial',
+          fileReads.map(describeFileRead).join('; ').slice(0, 500),
+          { deliveries: fileContext(fileReads, 'WORKER').deliveries.map(d => ({ ...d, state: 'READ', bytesSent: 0, payloadHash: null })) },
+        );
+      }
+      const carriedReads = iterations.flatMap(r => r.fileReads ?? []);
       // 2. Act on it.
       if (decision.action === 'blocked') {
         const reason = decision.reason ?? 'Sem motivo informado.';
@@ -1222,10 +1250,22 @@ export class OrchestrationService {
           signal,
           budget,
           github,
+          fileReads: carriedReads,
         });
         record.worker = delegated.record;
         iterationAnswer = delegated.answer;
         if (delegated.answer.trim()) lastWorkerAnswer = delegated.answer;
+
+        if (carriedReads.length && missingFilePayload(delegated.answer)) {
+          const reason = 'file-read/not-carried: o worker relatou ausência do conteúdo esperado. Entrega de contexto precisa ser reparada; repetir ou escalar não resolve.';
+          record.worker.mechanical = true;
+          this.reportDelegation({ runId, sessionId, iteration, worker: record.worker, answer: delegated.answer, evidence: null, previousEvidence: null, readFiles: [], verifications: [], unproven: ledger.pending().map(c => c.text), failedCriteria: [] });
+          this.step(runId, iteration, 'file-read', 'not-carried', reason);
+          this.database.runs.setStatus(runId, 'NEEDS_HUMAN', reason);
+          this.say(sessionId, runId, 'system', reason);
+          this.progress(runId, sessionId, 'needs-human', reason, 'NEEDS_HUMAN');
+          return;
+        }
 
         // The worker described a change; the application performs it. This is
         // the line that keeps a paragraph about an edit from being counted as
@@ -1365,7 +1405,7 @@ export class OrchestrationService {
       // one that did is "no progress", and the router must hear that.
       const tree = treeKey(evidence.statusShort, evidence.diff);
       if (record.worker) {
-        record.worker.progressed = tree !== previousTree;
+        record.worker.progressed = tree !== previousTree || (carriedReads.some(r => r.ok) && !!iterationAnswer.trim());
         attempts.push({
           iteration,
           capability: record.worker.routing?.requestedCapability ?? 'BALANCED',
@@ -1536,28 +1576,6 @@ export class OrchestrationService {
             : environment?.kind === 'local'
               ? await runFileChecks(cwd, decision.fileChecks)
               : [];
-      // Files the supervisor asked to *see*. The application opens them, so
-      // nobody has to ask a worker to copy a file into an answer - which is
-      // what the run that prompted this did, four files at a time, getting
-      // truncated copies back and going round again.
-      const fileReads =
-        decision.fileReads.length === 0
-          ? []
-          : github
-            ? await runGitHubFileReads(await this.githubSource(github, signal), decision.fileReads)
-            : environment?.kind === 'local'
-              ? await runFileReads(cwd, decision.fileReads)
-              : [];
-      if (fileReads.length > 0) {
-        record.fileReads = fileReads;
-        this.step(
-          runId,
-          iteration,
-          'file-read',
-          fileReads.every((read) => read.ok) ? 'read' : 'partial',
-          fileReads.map(describeFileRead).join('; ').slice(0, 500),
-        );
-      }
       for (const request of decision.fileChecks) {
         requestedFileChecks.set(JSON.stringify(request), request);
       }
@@ -1641,6 +1659,13 @@ export class OrchestrationService {
           iteration,
           verificationNote(verification),
         );
+      }
+
+      if (decision.action === 'done' && decision.queryProof && isReadOnlyObjective(objective) && !evidence.changedSinceBaseline && resolvedCommands.size === 0) {
+        const delivered = iterations.slice(0, -1).flatMap(r => r.fileReads ?? []);
+        const problems = queryProofProblems(objective, decision.summary ?? '', decision.queryProof, delivered);
+        this.step(runId, iteration, 'query-proof', problems.length ? 'rejected' : 'passed', problems.join('; ') || 'Resposta revisada e citações conferidas nos bytes entregues.', { proof: decision.queryProof });
+        if (!problems.length) for (const criterion of decision.queryProof.criteria) ledger.markByText(criterion, 'satisfied', iteration, 'Consulta: revisão do supervisor com citações conferidas nos bytes entregues.');
       }
 
       // 4a. What the worker did, assembled from what already came back.
@@ -1753,7 +1778,7 @@ export class OrchestrationService {
           // with acceptance criteria still has to prove them, and unproven
           // criteria refuse DONE a few lines below.
           allowNoChanges:
-            this.options.allowNoChanges ?? (github !== null && github.commits.length === 0),
+            this.options.allowNoChanges ?? (github !== null && github.commits.length === 0 && isReadOnlyObjective(objective)),
           fileChecks: [...requestedFileChecks.values()],
           workspaceRoot: cwd,
           ...(github ? { readFileChecks: (requests) => this.githubChecks(github!, requests, signal) } : {}),
@@ -1819,7 +1844,7 @@ export class OrchestrationService {
           // with acceptance criteria still has to prove them, and unproven
           // criteria refuse DONE a few lines below.
           allowNoChanges:
-            this.options.allowNoChanges ?? (github !== null && github.commits.length === 0),
+            this.options.allowNoChanges ?? (github !== null && github.commits.length === 0 && isReadOnlyObjective(objective)),
           fileChecks: [...requestedFileChecks.values()],
           workspaceRoot: cwd,
           ...(github ? { readFileChecks: (requests) => this.githubChecks(github!, requests, signal) } : {}),
@@ -1894,7 +1919,7 @@ export class OrchestrationService {
       // instructions that leave the workspace, the verifications and the
       // ledger exactly as they were are the same round twice.
       const fingerprint = evidenceFingerprint({
-        tree,
+        tree: tree + JSON.stringify(carriedReads.map(r => [r.request.path, r.sha256, r.request.offsetBytes ?? 0])),
         verification,
         fileChecks,
         pending: ledger.pending().map((criterion) => `${criterion.status}:${criterion.text}`),
@@ -2316,6 +2341,7 @@ export class OrchestrationService {
           ]),
       'Answer with a single JSON object and nothing else:',
       '{',
+      'For read-only queries, done may include queryProof: {criteria: [exact criterion], citations: [{path, quote}]}. Quote only bytes delivered in FILE CONTENTS and cite each path in summary. This cannot prove edits or tests.',
       '  "action": "delegate" | "verify" | "done" | "blocked",',
       '  "task": "what the coding agent must do (required for delegate)",',
       '  "acceptanceCriteria": ["objective, checkable statements"],',
@@ -3236,6 +3262,7 @@ export class OrchestrationService {
     unavailableModels: string[];
     signal: AbortSignal;
     budget: BudgetLedger;
+    fileReads?: readonly FileReadResult[];
     /** Set when the project has no checkout and changes go through the API. */
     github?: GitHubRunContext | null;
   }): Promise<{ record: NonNullable<IterationRecord['worker']>; answer: string }> {
@@ -3272,7 +3299,14 @@ export class OrchestrationService {
         .join('\n\n'),
       task,
       criteria: input.decision.acceptanceCriteria,
+      fileReads: input.fileReads,
     });
+    if (workerPrompt.deliveries.length) {
+      this.step(runId, iteration, 'file-context', 'worker-carried', 'Conteúdo incluído no prompt do worker.', { deliveries: workerPrompt.deliveries });
+      if (workerPrompt.deliveries.some(d => d.state === 'NOT_CARRIED')) {
+        throw new Error('file-read/not-carried: conteúdo indisponível ou excedeu o orçamento; reduza as leituras antes de delegar.');
+      }
+    }
     if (workerPrompt.danglingReference) {
       // The supervisor pointed at a list it did not define. Recorded, because
       // a run where this keeps happening is a run going in circles.

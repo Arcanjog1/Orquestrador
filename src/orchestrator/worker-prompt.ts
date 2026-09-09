@@ -1,3 +1,5 @@
+import { fileContext, type FileDelivery } from './file-context.js';
+import type { FileReadResult } from '../verification/file-check.js';
 /**
  * The instruction a worker actually receives.
  *
@@ -38,10 +40,12 @@ export interface WorkerPromptInput {
   readonly task: string;
   /** The acceptance criteria of *this* decision. */
   readonly criteria: readonly string[];
+  readonly fileReads?: readonly FileReadResult[];
 }
 
 export interface WorkerPrompt {
   readonly text: string;
+  readonly deliveries: readonly FileDelivery[];
   /** True when criteria were appended. */
   readonly criteriaSent: number;
   /**
@@ -58,6 +62,9 @@ export function buildWorkerPrompt(input: WorkerPromptInput): WorkerPrompt {
   const criteria = input.criteria.map((c) => c.trim()).filter((c) => c.length > 0);
   const parts = [input.preamble.trim(), task].filter((part) => part.length > 0);
 
+  const carried = fileContext(input.fileReads ?? [], 'WORKER');
+  if (carried.text) parts.push(carried.text);
+
   if (criteria.length > 0) {
     parts.push(
       [
@@ -68,7 +75,7 @@ export function buildWorkerPrompt(input: WorkerPromptInput): WorkerPrompt {
         'no seu relatório quais você tratou e quais não.',
       ].join('\n'),
     );
-    return { text: parts.join('\n\n'), criteriaSent: criteria.length, danglingReference: false };
+    return { deliveries: carried.deliveries, text: parts.join('\n\n'), criteriaSent: criteria.length, danglingReference: false };
   }
 
   const dangling = POINTS_AT_A_LIST.test(task);
@@ -85,5 +92,5 @@ export function buildWorkerPrompt(input: WorkerPromptInput): WorkerPrompt {
       ].join('\n'),
     );
   }
-  return { text: parts.join('\n\n'), criteriaSent: 0, danglingReference: dangling };
+  return { deliveries: carried.deliveries, text: parts.join('\n\n'), criteriaSent: 0, danglingReference: dangling };
 }

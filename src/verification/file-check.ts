@@ -232,6 +232,8 @@ export interface FileReadRequest {
   readonly path: string;
   /** Bytes to return, capped. Omitted means the default budget. */
   readonly maxBytes?: number;
+  /** Byte offset for a bounded range read. */
+  readonly offsetBytes?: number;
 }
 
 export interface FileReadResult {
@@ -287,7 +289,8 @@ export async function runFileRead(
   const limit = Math.max(0, Math.min(request.maxBytes ?? budget, budget));
   try {
     const bytes = await readFile(check.resolvedPath!);
-    const shown = bytes.subarray(0, limit);
+    const offset = Math.max(0, request.offsetBytes ?? 0);
+    const shown = bytes.subarray(offset, offset + limit);
     return {
       request,
       ok: true,

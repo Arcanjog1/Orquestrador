@@ -23,7 +23,7 @@
 import { ALLOWED_ACTIONS } from './decision-parser.js';
 import { CAPABILITY_TIERS, REASONING_TIERS } from '../routing/tiers.js';
 
-export const DECISION_SCHEMA_VERSION = 7;
+export const DECISION_SCHEMA_VERSION = 8;
 
 /** The tiers as the decision JSON spells them (lowercase). */
 export const WIRE_CAPABILITIES = CAPABILITY_TIERS.map((tier) => tier.toLowerCase());
@@ -48,8 +48,17 @@ export const DECISION_JSON_SCHEMA = {
     'workerId',
     'requiresTools',
     'satisfiedCriteria',
+    'queryProof',
   ],
   properties: {
+    queryProof: {
+      type: ['object', 'null'], additionalProperties: false, required: ['criteria', 'citations'],
+      description: 'Read-only query proof. Exact quotes from delivered files and criteria reviewed by supervisor. Summary must cite paths. Never proves code changes or tests.',
+      properties: {
+        criteria: { type: 'array', items: { type: 'string' } },
+        citations: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['path', 'quote'], properties: { path: { type: 'string' }, quote: { type: 'string' } } } },
+      },
+    },
     action: {
       type: 'string',
       enum: [...ALLOWED_ACTIONS],
@@ -179,12 +188,13 @@ export const DECISION_JSON_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['path', 'maxBytes'],
+        required: ['path', 'maxBytes', 'offsetBytes'],
         properties: {
           path: {
             type: 'string',
             description: 'Path relative to the project folder. Same limits as a file check.',
           },
+          offsetBytes: { type: ['integer', 'null'], description: 'Non-negative byte offset for the next range. Null starts at zero.' },
           maxBytes: {
             type: ['integer', 'null'],
             description: 'Bytes to return for this file. Null for the default budget.',
