@@ -1745,3 +1745,14 @@ test('a build whose help does not declare the flag is sent no allow-list at all'
   assert.equal(args.includes('--allowed-tools'), false);
   assert.equal(args.includes('Write'), false, 'and nothing is smuggled in without it');
 });
+
+
+test('bounded file content passes through the Claude adapter into the process stdin contract', async()=>{
+  const {buildWorkerPrompt}=await import('../src/orchestrator/worker-prompt.js');
+  const {manager,calls}=fakeProcessManager({'--help':CLAUDE_HELP});
+  const adapter=new ClaudeCodeAdapter({processManager:manager,resolveExecutable:async()=>'/managed/claude.exe',buildEnvironment:()=>({})});
+  const text='from nuvem.core import wall_modeling\n';
+  const prompt=buildWorkerPrompt({preamble:'policy',task:'Explique o botão',criteria:[],fileReads:[{request:{path:'Script.py'},ok:true,outcome:'ok',resolvedPath:'repo@commit:Script.py',sizeBytes:Buffer.byteLength(text),sha256:'hash',text,truncated:false,problem:null}]});
+  await adapter.run({prompt:prompt.text,workingDirectory:'/work',timeoutMs:1000,runId:'carry',iteration:1});
+  assert.equal(calls.at(-1)!.stdin,prompt.text);assert.ok(calls.at(-1)!.stdin!.includes(text));assert.ok(!calls.at(-1)!.args?.some(arg=>arg.includes(text)));
+});

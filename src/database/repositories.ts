@@ -1667,7 +1667,10 @@ export class RunRepository extends Repository {
     // A run that stopped has no step still in progress. Done here rather than
     // at each of the fifteen places that end a run, because the one that gets
     // forgotten is the one that leaves a spinner turning for ever.
-    if (stopped) this.closePendingSteps(id, status === 'CANCELLED' ? 'cancelled' : 'ended');
+    if (stopped) {
+      this.closePendingSteps(id, status === 'CANCELLED' ? 'cancelled' : 'ended');
+      this.db.run("UPDATE agent_invocations SET outcome = ?, finished_at = ? WHERE run_id = ? AND outcome = 'running'", [status === 'CANCELLED' ? 'cancelled' : 'stopped', finished, id]);
+    }
   }
 
   /** Records that a person asked for this run to stop. Idempotent. */
@@ -1788,6 +1791,7 @@ export class RunRepository extends Repository {
   }
 
   recordInvocation(input: {
+    id?: string;
     runId: string;
     iteration: number;
     agentId: string | null;
@@ -1843,12 +1847,16 @@ export class RunRepository extends Repository {
       workingDirectory?: string | null;
     } | null;
   }): string {
-    const id = newId('inv');
+    const id = input.id ?? newId('inv');
+    if (input.id) {
+      const previous = this.db.get<{outcome: string}>('SELECT outcome FROM agent_invocations WHERE id = ?', [id]);
+      if (previous && previous.outcome !== 'running') return id;
+    }
     const routing = input.routing ?? null;
     const usage = input.usage ?? null;
     const diagnostics = input.diagnostics ?? null;
     this.db.run(
-      'INSERT INTO agent_invocations (id, run_id, iteration, agent_id, account_id, role, task, outcome, exit_code, duration_ms, started_at, finished_at, requested_capability, requested_reasoning, resolved_model, resolved_reasoning, selection_mode, selection_reason, fallback_used, provider_id, connection_kind, worker_id, billing, input_tokens, output_tokens, total_tokens, cost_usd, failure_kind, failure_detail, stderr_excerpt, executable, cli_version, signal, last_activity_at, idle_timeout_ms, current_tool, working_directory) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO agent_invocations (id, run_id, iteration, agent_id, account_id, role, task, outcome, exit_code, duration_ms, started_at, finished_at, requested_capability, requested_reasoning, resolved_model, resolved_reasoning, selection_mode, selection_reason, fallback_used, provider_id, connection_kind, worker_id, billing, input_tokens, output_tokens, total_tokens, cost_usd, failure_kind, failure_detail, stderr_excerpt, executable, cli_version, signal, last_activity_at, idle_timeout_ms, current_tool, working_directory) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET outcome=excluded.outcome, exit_code=excluded.exit_code, duration_ms=excluded.duration_ms, finished_at=excluded.finished_at, requested_capability=excluded.requested_capability, requested_reasoning=excluded.requested_reasoning, resolved_model=excluded.resolved_model, resolved_reasoning=excluded.resolved_reasoning, selection_mode=excluded.selection_mode, selection_reason=excluded.selection_reason, fallback_used=excluded.fallback_used, provider_id=excluded.provider_id, connection_kind=excluded.connection_kind, billing=excluded.billing, input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, total_tokens=excluded.total_tokens, cost_usd=excluded.cost_usd, failure_kind=excluded.failure_kind, failure_detail=excluded.failure_detail, stderr_excerpt=excluded.stderr_excerpt, executable=excluded.executable, cli_version=excluded.cli_version, signal=excluded.signal, last_activity_at=excluded.last_activity_at, idle_timeout_ms=excluded.idle_timeout_ms, current_tool=excluded.current_tool, working_directory=excluded.working_directory',
       [
         id,
         input.runId,
@@ -1861,7 +1869,7 @@ export class RunRepository extends Repository {
         input.exitCode,
         input.durationMs,
         input.startedAt,
-        now(),
+        input.outcome === 'running' ? null : now(),
         routing?.requestedCapability ?? null,
         routing?.requestedReasoning ?? null,
         routing?.resolvedModel ?? null,
@@ -1891,7 +1899,7 @@ export class RunRepository extends Repository {
         diagnostics?.workingDirectory ?? null,
       ] as SqlValue[],
     );
-    this.addConsumption(input.runId, usage);
+    if (input.outcome !== 'running') this.addConsumption(input.runId, usage);
     return id;
   }
 

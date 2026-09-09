@@ -26,6 +26,7 @@ import { createDesktopFixture, ScriptedAgent } from './helpers/desktop-fixture.j
 import { FakeRepository } from './helpers/fake-repository.js';
 import type { DesktopFixture } from './helpers/desktop-fixture.js';
 import type { IpcResult } from '../apps/desktop/src/shared/ipc-contract.js';
+import type { AgentRunner } from '../src/agents/agent-runner.js';
 import type { AgentInput } from '../src/core/types.js';
 
 const OWNER = 'arcanjog1';
@@ -72,6 +73,7 @@ async function prepare(options: {
   defaultBranch?: string;
   maxIterations?: number;
   worker?: (input: AgentInput) => string;
+  workers?: AgentRunner[];
 }): Promise<Prepared> {
   const github = new FakeRepository({
     owner: OWNER,
@@ -93,7 +95,7 @@ async function prepare(options: {
     },
   ]);
   const fixture = createDesktopFixture({
-    createRunners: async () => ({ orchestrator, worker, workerAccountId: null }),
+    createRunners: async () => ({ orchestrator, worker, workerAccountId: null, ...(options.workers ? {workers: options.workers.map((runner,i)=>({id:'worker-'+(i+1),label:runner.label,runner,accountId:null,providerId:'anthropic' as const,connectionKind:'cli' as const,agentId:null}))} : {}) }),
     github: { fetchImpl: github.fetch },
     secrets: {
       available: true,
@@ -537,4 +539,43 @@ test('missing payload report stops before a repeated delegation or escalation', 
     assert.equal(prepared.workerCalls.length, 1);
     assert.ok(result.steps.some(s => s.phase === 'file-read' && s.status === 'not-carried'));
   } finally { await prepared.cleanup(); }
+});
+
+
+test('real service runs independent workers concurrently in isolated directories, then joins before Codex review', async () => {
+  let active=0, peak=0, round=0;
+  const dirs:string[]=[];
+  const work=async (input:AgentInput)=>{dirs.push(input.workingDirectory);active++;peak=Math.max(peak,active);await new Promise(r=>setTimeout(r,80));active--;return 'Análise concluída.';};
+  const a=new ScriptedAgent('mock-claude','Claude A',[work]), b=new ScriptedAgent('mock-claude','Claude B',[work]);
+  const prepared=await prepare({files:PROJECT,workers:[a,b],orchestrator:input=>{
+    round++;
+    if(round===1)return JSON.stringify({action:'delegate',delegations:[{taskId:'backend',workerId:'worker-1',task:'Analisar backend',dependsOn:[],requiresTools:false},{taskId:'ui',workerId:'worker-2',task:'Analisar UI',dependsOn:[],requiresTools:false}]});
+    assert.ok(input.prompt.includes('JOIN')); assert.equal(active,0); return JSON.stringify({action:'done',summary:'Análises revisadas.'});
+  }});
+  try {const result=await ask(prepared,'analise o projeto');assert.equal(result.run.status,'DONE',JSON.stringify(result));assert.equal(peak,2);assert.notEqual(dirs[0],dirs[1]);assert.ok(result.steps.some(s=>s.phase==='task-join'));}finally{await prepared.cleanup();}
+});
+
+test('overlapping GitHub proposals are retained and never applied automatically', async()=>{
+  let round=0;
+  const propose=(input:AgentInput)=>'\x60\x60\x60orquestrador-changes\n'+JSON.stringify({baseCommit:input.prompt.match(/[a-f0-9]{40}/)![0],message:'change',changes:[{op:'write',path:'README.md',text:input.workingDirectory}]})+'\n\x60\x60\x60';
+  const a=new ScriptedAgent('mock-claude','A',[propose]),b=new ScriptedAgent('mock-claude','B',[propose]);
+  const prepared=await prepare({files:PROJECT,workers:[a,b],orchestrator:()=>JSON.stringify(++round===1?{action:'delegate',delegations:[{taskId:'a',workerId:'worker-1',task:'Propor alteração',dependsOn:[],requiresTools:false},{taskId:'b',workerId:'worker-2',task:'Propor alteração',dependsOn:[],requiresTools:false}]}:{action:'blocked',reason:'Conflito exige reconciliação.'}),maxIterations:3});
+  try{const result=await ask(prepared,'altere o README');assert.ok(result.steps.some(s=>s.phase==='task-conflict'));assert.ok(!result.steps.some(s=>s.phase==='commit'&&s.status==='created'));assert.notEqual(result.run.status,'DONE');}finally{await prepared.cleanup();}
+});
+
+
+test('branch cancellation preserves independent work and blocks its dependent task; late answer cannot win',async()=>{
+  let aStarted!:()=>void, releaseA!:()=>void;const started=new Promise<void>(r=>aStarted=r),release=new Promise<void>(r=>releaseA=r);let bFinished=false,round=0;
+  const a=new ScriptedAgent('mock-claude','A',[async()=>{aStarted();await release;return 'Late success';}]);
+  const b=new ScriptedAgent('mock-claude','B',[async()=>{await new Promise(r=>setTimeout(r,50));bFinished=true;return 'Independent success';}]);
+  const prepared=await prepare({files:PROJECT,workers:[a,b],orchestrator:()=>JSON.stringify(++round===1?{action:'delegate',delegations:[{taskId:'a',workerId:'worker-1',task:'A',dependsOn:[],requiresTools:false},{taskId:'b',workerId:'worker-2',task:'B',dependsOn:[],requiresTools:false},{taskId:'c',workerId:'worker-1',task:'C',dependsOn:['a'],requiresTools:false}]}:{action:'done',summary:'Resultados disponíveis revisados.'})});
+  try{
+    const sent=value<{run:{id:string}}>(await prepared.fixture.router.handle('chat.sendMessage',{sessionId:prepared.sessionId,text:'analise o projeto'}));
+    await started;
+    assert.equal(value<{cancelled:boolean}>(await prepared.fixture.router.handle('run.cancelTask',{runId:sent.run.id,taskId:'1/a'})).cancelled,true);
+    releaseA();await prepared.fixture.services.orchestration.waitFor(sent.run.id);
+    assert.ok(bFinished);assert.equal(a.calls.length,1);assert.equal(b.calls.length,1);
+    const detail=value<{steps:{phase:string;status:string}[];invocations:{role:string;outcome:string}[]}>(await prepared.fixture.router.handle('run.detail',{runId:sent.run.id}));
+    assert.ok(detail.steps.some(s=>s.phase==='task-blocked'));assert.ok(detail.invocations.some(i=>i.role==='CODING_WORKER'&&i.outcome==='cancelled'));
+  }finally{releaseA();await prepared.cleanup();}
 });

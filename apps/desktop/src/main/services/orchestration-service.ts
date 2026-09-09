@@ -19,8 +19,9 @@
  *     from the worker's summary of what it did.
  */
 
+import { readyDelegations } from '../../../../../src/orchestrator/delegation-plan.js';
 import { createHash } from 'node:crypto';
-import { rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type {
   AgentResult,
@@ -348,6 +349,7 @@ export const ORCHESTRATOR_AGENT = 'orchestrator';
 export class OrchestrationService {
   private readonly active = new Map<string, AbortController>();
   /** Runners of in-flight runs, so cancelling can reach the child processes. */
+  private readonly branchTasks = new Map<string, {runId: string; iteration: number; taskId: string; slot: WorkerSlot; cancelled: boolean}>();
   private readonly runners = new Map<string, RunnerPair>();
   /** Environments of in-flight runs, so each is released exactly once. */
   private readonly environments = new Map<string, ExecutionEnvironment>();
@@ -486,7 +488,17 @@ export class OrchestrationService {
    * process tree. Aborting alone would leave a Codex or Claude process running
    * until its own timeout.
    */
+  cancelTask(runId: string, taskId: string): boolean {
+    const entry = this.branchTasks.get(runId + ':' + taskId);
+    if (!entry || entry.cancelled) return false;
+    entry.cancelled = true;
+    this.step(runId, entry.iteration, 'task-cancel', 'cancelled', 'Subtarefa cancelada.', {taskId, workerId: entry.slot.id});
+    void entry.slot.runner.cancel();
+    return true;
+  }
+
   cancel(runId: string): boolean {
+    for (const entry of this.branchTasks.values()) if(entry.runId===runId) { entry.cancelled=true; void entry.slot.runner.cancel(); }
     // Recorded before anything else, and before any await.
     //
     // Cancelling used to be only an abort signal plus a kill, so the run
@@ -1202,6 +1214,81 @@ export class OrchestrationService {
         return;
       }
 
+      if (decision.action === 'delegate' && decision.delegations?.length) {
+        const tasks = decision.delegations;
+        const chosen = new Map<string, WorkerSlot>();
+        for (const task of tasks) {
+          const result = this.chooseWorker(team, {...decision, task: task.task, workerId: task.workerId, requiresTools: task.requiresTools}, conversation);
+          if (!result.ok) throw new Error(result.reason);
+          chosen.set(task.taskId, result.slot);
+        }
+        const completed = new Set<string>(), pending = new Set(tasks.map(t=>t.taskId));
+        const outcomes: { taskId: string; status: string; summary: string; invocationId?: string; changedFiles: string[] }[] = [];
+        while (pending.size) {
+          if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
+          const wave = readyDelegations(tasks, completed, pending, t => {
+            const slot=chosen.get(t.taskId)!;
+            return slot.accountId ?? String(team.findIndex(s=>s.runner===slot.runner));
+          }, github ? 3 : 1);
+          if (!wave.length) {
+            for(const id of pending) { outcomes.push({taskId:id,status:'blocked',summary:'Dependência falhou ou foi cancelada.',changedFiles:[]}); this.step(runId,iteration,'task-blocked','blocked','Dependência não concluída.',{taskId:id}); }
+            break;
+          }
+          const baseCommit=github?.headCommit;
+          const results = await Promise.all(wave.map(async task => {
+            pending.delete(task.taskId);
+            const slot=chosen.get(task.taskId)!;
+            const taskCwd=github ? join(cwd, '.execution-tasks', runId, String(iteration), task.taskId) : cwd;
+            if(github) mkdirSync(taskCwd,{recursive:true});
+            const key=runId+':'+iteration+'/'+task.taskId;
+            const entry={runId,iteration,taskId:iteration+'/'+task.taskId,slot,cancelled:false};
+            this.branchTasks.set(key,entry);
+            this.step(runId,iteration,'task-start','started',task.task,{taskId:entry.taskId,workerId:slot.id,dependsOn:task.dependsOn.map(id=>iteration+'/'+id),baseCommit});
+            try {
+              const spend=budget.check(); if(!spend.allowed) throw new Error(spend.reason);
+              const result = await this.delegate({runId,sessionId,workspace,cwd:taskCwd,runners,slot,iteration,branchTaskId:entry.taskId,task:task.task+'\nDEPENDENCY RESULTS: '+JSON.stringify(outcomes.filter(o=>task.dependsOn.includes(o.taskId))),decision:{...decision,task:task.task,workerId:task.workerId,requiresTools:task.requiresTools},correlationId:runCorrelation,causationId:decisionMessageId,routing:slot.routing??null,capabilities:capabilitiesOf.get(slot.id)??NO_CAPABILITIES,attempts:[],unavailableModels:[],signal,budget,github,fileReads:carriedReads});
+              const cancelled=entry.cancelled || this.stopping(runId,signal);
+              const mechanical=carriedReads.length>0 && missingFilePayload(result.answer);
+              const status=cancelled?'cancelled':result.record.failure||result.record.exitCode!==0||result.record.outcome!=='completed'||mechanical?'failed':'completed';
+              if(mechanical) result.record.mechanical=true;
+              this.reportDelegation({runId,sessionId,iteration,worker:result.record,answer:result.answer,evidence:null,previousEvidence:null,readFiles:carriedReads.filter(r=>r.ok).map(r=>r.request.path),verifications:[],unproven:ledger.pending().map(c=>c.text),failedCriteria:[]});
+              this.step(runId,iteration,'task-result',status,task.task,{taskId:entry.taskId,workerId:slot.id,invocationId:result.record.invocationId,mechanical});
+              return {task,result,status};
+            } catch(error) {
+              this.step(runId,iteration,'task-result',entry.cancelled?'cancelled':'failed',String(error),{taskId:entry.taskId,workerId:slot.id});
+              return {task,result:null,status:entry.cancelled?'cancelled':'failed'};
+            } finally { this.branchTasks.delete(key); }
+          }));
+          if (this.stopping(runId,signal)) return this.finishCancelled(runId,sessionId);
+          const paths=new Set<string>();
+          const changes: import('../../../../../src/github/repository-operations.js').RepositoryChange[]=[];
+          let conflict=false;
+          for(const item of results) {
+            const parsed=github && item.result && item.status==='completed' ? readChangeProposal(item.result.answer,baseCommit!) : null;
+            if(parsed?.kind==='invalid') {item.status='failed'; this.step(runId,iteration,'proposal','rejected',parsed.problem,{taskId:item.task.taskId});}
+            if(parsed?.kind==='proposal') for(const change of parsed.proposal.changes) {if(paths.has(change.path)) conflict=true; paths.add(change.path); changes.push(change);}
+          }
+          if(conflict) this.step(runId,iteration,'task-conflict','conflict','Propostas sobrepõem arquivos. Nenhuma alteração desta rodada foi aplicada; revisão necessária.',{paths:[...paths],tasks:wave.map(t=>t.taskId)});
+          if(!conflict && github && changes.length && results.every(r=>r.status==='completed')) {
+            const merged='\x60\x60\x60orquestrador-changes\n'+JSON.stringify({baseCommit,message:'Join independent task proposals',changes})+'\n\x60\x60\x60';
+            const applied=await this.applyProposal({runId,sessionId,iteration,github,answer:merged,objective,signal});
+            if(applied.feedback) {proposalFeedback=applied.feedback; if(!applied.applied) conflict=true;}
+          }
+          for(const item of results) {
+            const status=conflict?'conflict':item.status;
+            if(status==='completed') completed.add(item.task.taskId);
+            outcomes.push({taskId:item.task.taskId,status,summary:item.result?.answer.slice(0,6000)??'Sem resultado',invocationId:item.result?.record.invocationId,changedFiles:status==='completed'?[...paths]:[]});
+          }
+        }
+        this.step(runId,iteration,'task-join',outcomes.every(o=>o.status==='completed')?'completed':'partial','Resultados reunidos para revisão do Codex.',{outcomes});
+        feedback='JOIN — review every task status, evidence and pending criteria. Failed/cancelled/conflicting proposals were not applied. Do not repeat mechanical failures.\n'+JSON.stringify(outcomes)+'\n'+(proposalFeedback??'');
+        if(outcomes.some(o=>o.status==='failed' && /file|conte[uú]do/i.test(o.summary))) {
+          this.database.runs.setStatus(runId,'NEEDS_HUMAN','Falha mecânica no pacote de contexto.');
+          this.progress(runId,sessionId,'needs-human','Entrega de contexto precisa de revisão.','NEEDS_HUMAN'); return;
+        }
+        continue;
+      }
+
       if (decision.action === 'delegate') {
         const task = decision.task ?? objective;
 
@@ -1405,7 +1492,7 @@ export class OrchestrationService {
       // one that did is "no progress", and the router must hear that.
       const tree = treeKey(evidence.statusShort, evidence.diff);
       if (record.worker) {
-        record.worker.progressed = tree !== previousTree || (carriedReads.some(r => r.ok) && !!iterationAnswer.trim());
+        record.worker.progressed = tree !== previousTree || (isReadOnlyObjective(objective) && carriedReads.some(r => r.ok) && !!iterationAnswer.trim());
         attempts.push({
           iteration,
           capability: record.worker.routing?.requestedCapability ?? 'BALANCED',
@@ -1662,7 +1749,7 @@ export class OrchestrationService {
       }
 
       if (decision.action === 'done' && decision.queryProof && isReadOnlyObjective(objective) && !evidence.changedSinceBaseline && resolvedCommands.size === 0) {
-        const delivered = iterations.slice(0, -1).flatMap(r => r.fileReads ?? []);
+        const delivered = iterations.slice(0, -1).flatMap(r => r.fileReads ?? []).flatMap(r => { const d=supervisorFiles.deliveries.find(d=>d.path===r.request.path && d.state==='SUPERVISOR_CARRIED'); return d && r.text!==null ? [{...r,text:Buffer.from(r.text).subarray(0,d.bytesSent).toString('utf8')}] : []; });
         const problems = queryProofProblems(objective, decision.summary ?? '', decision.queryProof, delivered);
         this.step(runId, iteration, 'query-proof', problems.length ? 'rejected' : 'passed', problems.join('; ') || 'Resposta revisada e citações conferidas nos bytes entregues.', { proof: decision.queryProof });
         if (!problems.length) for (const criterion of decision.queryProof.criteria) ledger.markByText(criterion, 'satisfied', iteration, 'Consulta: revisão do supervisor com citações conferidas nos bytes entregues.');
@@ -2016,6 +2103,8 @@ export class OrchestrationService {
     let lastExcerpt = '';
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const startedAt = new Date().toISOString();
+      const activeInvocationId = this.database.runs.recordInvocation({runId, iteration, agentId: workspace.orchestrator_agent_id, accountId: this.orchestratorAccountId(workspace), role: 'ORCHESTRATOR', task: null, outcome: 'running', exitCode: null, durationMs: null, startedAt});
+      this.progress(runId, this.database.runs.require(runId).session_id ?? '', 'orchestrator', 'Codex analisando...', 'RUNNING');
       const result = await runners.orchestrator.run({
         prompt: currentPrompt,
         workingDirectory: cwd,
@@ -2028,6 +2117,7 @@ export class OrchestrationService {
       input.budget.record(result.usage ?? null);
       const orchestratorCapabilities = capabilitiesOfRunner(runners.orchestrator);
       this.database.runs.recordInvocation({
+        id: activeInvocationId,
         runId,
         iteration,
         agentId: workspace.orchestrator_agent_id,
@@ -2126,6 +2216,8 @@ export class OrchestrationService {
       }
       if (parsed.ok) {
         this.step(runId, iteration, 'orchestrator', 'ok', parsed.decision.action, {
+          response: result.stdout,
+          decision: parsed.decision,
           attempt,
           exitCode: result.exitCode,
           durationMs: result.durationMs,
@@ -3262,6 +3354,7 @@ export class OrchestrationService {
     unavailableModels: string[];
     signal: AbortSignal;
     budget: BudgetLedger;
+    branchTaskId?: string;
     fileReads?: readonly FileReadResult[];
     /** Set when the project has no checkout and changes go through the API. */
     github?: GitHubRunContext | null;
@@ -3420,7 +3513,7 @@ export class OrchestrationService {
         runId,
         conversationId: sessionId,
         iteration,
-        stepId: `${slot.id}#${attempt}`,
+        stepId: `${input.branchTaskId ?? slot.id}#${attempt}`,
         messageType: 'DELEGATION',
         payload: { task, workerId: slot.id },
         senderAgentId: ORCHESTRATOR_AGENT,
@@ -3442,6 +3535,8 @@ export class OrchestrationService {
         );
       }
 
+      const activeInvocationId = this.database.runs.recordInvocation({runId, iteration, agentId: slot.agentId ?? workspace.worker_agent_id, accountId: slot.accountId, role: 'CODING_WORKER', workerId: slot.id, task, outcome: 'running', exitCode: null, durationMs: null, startedAt, routing: planned});
+      this.progress(runId, sessionId, 'worker', slot.label + ' executando...', 'RUNNING');
       const invoke = (resumeSessionId: string | null) =>
         slot.runner.run({
           prompt: workerPrompt.text,
@@ -3460,6 +3555,8 @@ export class OrchestrationService {
         });
 
       let result = await invoke(previousSession?.provider_session_id ?? null);
+      const branchCancelled = input.branchTaskId && this.branchTasks.get(runId+':'+input.branchTaskId)?.cancelled;
+      if(branchCancelled) result = {...result,outcome:'cancelled'};
 
       // A session the tool no longer has is not a failed delegation - it is a
       // stale id. Sessions expire (Claude Code prunes them after 30 days by
@@ -3549,6 +3646,7 @@ export class OrchestrationService {
         ...(toolsUsed(result.activity).length > 0 ? { tools: toolsUsed(result.activity) } : {}),
       };
       const invocationId = this.database.runs.recordInvocation({
+        id: activeInvocationId,
         runId,
         iteration,
         agentId: slot.agentId ?? workspace.worker_agent_id,
@@ -3644,7 +3742,7 @@ export class OrchestrationService {
               runId,
               conversationId: sessionId,
               iteration,
-              stepId: `${slot.id}#${attempt}`,
+              stepId: `${input.branchTaskId ?? slot.id}#${attempt}`,
               messageType: 'WORKER_RESULT',
               payload: {
                 outcome: result.outcome,
@@ -4006,6 +4104,7 @@ export class OrchestrationService {
       // Reporting zero there would put a real segment at zero milliseconds.
       durationMs: startedAt === undefined ? null : finishedAt - startedAt,
     });
+    this.events.emit('run:graph', {runId});
   }
 
   private say(

@@ -174,6 +174,7 @@ export interface Decision {
    * criterion, and they are separate fields for that reason.
    */
   fileReads: FileReadRequest[];
+  delegations?: import('../orchestrator/delegation-plan.js').DelegationTask[];
   queryProof?: import('../orchestrator/query-proof.js').QueryProof;
   /** Optional human-readable rationale. Never model reasoning; a one-liner. */
   summary?: string;

@@ -49,8 +49,13 @@ export const DECISION_JSON_SCHEMA = {
     'requiresTools',
     'satisfiedCriteria',
     'queryProof',
+    'delegations',
   ],
   properties: {
+    delegations: { type: ['array', 'null'], description: 'Optional explicit DAG, maximum 8 tasks. Independent tasks run concurrently only with isolated workers. Dependencies name task ids within this batch. Never omit a real dependency.', items: {
+      type: 'object', additionalProperties: false, required: ['taskId','workerId','task','dependsOn','requiresTools'],
+      properties: { taskId: {type:'string'}, workerId:{type:'string'}, task:{type:'string'}, dependsOn:{type:'array',items:{type:'string'}}, requiresTools:{type:'boolean'} },
+    } },
     queryProof: {
       type: ['object', 'null'], additionalProperties: false, required: ['criteria', 'citations'],
       description: 'Read-only query proof. Exact quotes from delivered files and criteria reviewed by supervisor. Summary must cite paths. Never proves code changes or tests.',

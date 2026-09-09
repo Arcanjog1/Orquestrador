@@ -93,7 +93,7 @@ test('the whole schema still satisfies strict mode, and the version moved', () =
   );
   // 7: `listFiles` joined the contract, so a supervisor with no folder can
   // ask the application for the repository's paths instead of guessing one.
-  assert.equal(DECISION_SCHEMA_VERSION, 7, 'the contract changed shape, so the version says so');
+  assert.equal(DECISION_SCHEMA_VERSION, 8, 'the contract changed shape, so the version says so');
 });
 
 /* ---- the parser -------------------------------------------------------- */

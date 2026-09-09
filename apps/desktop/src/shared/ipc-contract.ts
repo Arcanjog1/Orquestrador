@@ -136,6 +136,7 @@ export const REQUEST_CHANNELS = [
   'run.list',
   'run.detail',
   'run.cancel',
+  'run.cancelTask',
 ] as const;
 
 export type RequestChannel = (typeof REQUEST_CHANNELS)[number];
@@ -148,6 +149,7 @@ export const EVENT_CHANNELS = [
   'runtime:progress',
   'account:progress',
   'run:progress',
+  'run:graph',
   'run:activity',
   'run:message',
   'connections:changed',
@@ -1691,10 +1693,12 @@ export interface IpcMap {
   /** Every run of a project, newest first - the execution history. */
   'run.list': { request: { workspaceId: string }; response: readonly RunView[] };
   'run.detail': { request: { runId: string }; response: RunDetailView };
+  'run.cancelTask': { request: {runId: string; taskId: string}; response: {cancelled: boolean} };
   'run.cancel': { request: { runId: string }; response: { cancelled: boolean } };
 }
 
 export interface EventMap {
+  'run:graph': {runId: string};
   'runtime:progress': RuntimeProgressEvent;
   'account:progress': AccountProgressEvent;
   'run:progress': RunProgressEvent;

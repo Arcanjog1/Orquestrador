@@ -1,3 +1,4 @@
+import { validateDelegations } from './delegation-plan.js';
 /**
  * Decision parsing and validation (spec 10).
  *
@@ -60,6 +61,8 @@ export function parseDecision(raw: string): ParseResult {
     fileReads: [],
   };
 
+  try { const tasks=validateDelegations(obj.delegations); if(tasks.length) decision.delegations=tasks; } catch(error) { return fail(String(error), raw); }
+
   const criteria = readStringArray(obj.acceptanceCriteria, 'acceptanceCriteria');
   if (criteria.error) return fail(criteria.error, raw);
   decision.acceptanceCriteria = criteria.value;
@@ -108,10 +111,10 @@ export function parseDecision(raw: string): ParseResult {
   }
 
   if (action === 'delegate') {
-    if (typeof obj.task !== 'string' || obj.task.trim() === '') {
+    if (!decision.delegations?.length && (typeof obj.task !== 'string' || obj.task.trim() === '')) {
       return fail('"delegate" requires a non-empty "task" string describing the work.', raw);
     }
-    decision.task = obj.task.trim();
+    decision.task = typeof obj.task === 'string' ? obj.task.trim() : 'Execute the explicit task graph.';
   }
 
   if (action === 'blocked') {

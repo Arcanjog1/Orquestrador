@@ -587,6 +587,7 @@ export class IpcRouter {
         s.permissions.forRun((p as { runId: string }).runId),
       );
     });
+    this.handlers.set('run.cancelTask', async (p) => { const {runId,taskId}=p as {runId:string;taskId:string}; return {cancelled:s.orchestration.cancelTask(runId,taskId)}; });
     this.handlers.set('run.cancel', async (p) => {
       const runId = (p as { runId: string }).runId;
       // A cloud run is not executing here, so cancelling it locally would stop

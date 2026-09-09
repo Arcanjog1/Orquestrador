@@ -663,5 +663,6 @@ export const REQUEST_VALIDATORS: {
   'run.get': obj({ runId: id }),
   'run.list': obj({ workspaceId: id }),
   'run.detail': obj({ runId: id }),
+  'run.cancelTask': obj({runId: id, taskId: str({max:100})}),
   'run.cancel': obj({ runId: id }),
 };
