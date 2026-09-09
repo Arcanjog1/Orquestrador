@@ -649,7 +649,7 @@ test('Claude Code takes the model and effort of each invocation, and only values
   assert.deepEqual(capabilities, {
     modelFlag: true,
     effortFlag: true,
-    declaredModels: ['fable', 'opus', 'sonnet'],
+    declaredModels: null, // Help aliases are examples; full canonical IDs are accepted too.
     declaredEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   });
   // The help was read in the account's environment.

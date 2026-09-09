@@ -1,3 +1,5 @@
+import {modelMatchesRule} from '../../shared/model-policy-match.js';
+import {OFFICIAL_MODELS} from '../../shared/official-models.js';
 import type {ModelCatalogEntry,PolicyConfiguration} from '../../shared/agent-policy.js';
 import {EFFORT_ORDER} from '../../shared/agent-policy.js';
 import {modelDisplayName} from '../../shared/model-display.js';
@@ -8,11 +10,11 @@ export interface CatalogAccount {provider_id:string;max_capability:string|null;m
 export function decorateAgentModels(rows:ModelCatalogEntry[],account:CatalogAccount,config:PolicyConfiguration,role?:string):ModelCatalogEntry[] {
  const tiers=['FAST','BALANCED','STRONG','MAX'];
  return rows.filter(row=>row.provider===account.provider_id).map(row=>{
-  const rules=config.models.filter(r=>r.provider===row.provider&&r.modelId.toLowerCase()===row.id.toLowerCase());
+  const rules=config.models.filter(r=>r.provider===row.provider&&modelMatchesRule(row.provider,r.modelId,row.id));
   const premium=rules.some(r=>r.premium)||isPremiumModel(row.id);
   const has=(values:string[]|undefined)=>values?.some(v=>v.toLowerCase()===row.id.toLowerCase());
   let blockedReason:string|null=null;
-  if(rules.some(r=>!r.allowed)||has(config.defaults.blockedModels)||(config.defaults.allowedModels&&!has(config.defaults.allowedModels)))blockedReason='Bloqueado pela política global.';
+  if(rules.some(r=>!r.allowed)||config.defaults.blockedModels?.some(id=>modelMatchesRule(row.provider,id,row.id))||(config.defaults.allowedModels&&!has(config.defaults.allowedModels)))blockedReason='Bloqueado pela política global.';
   else if(role&&rules.some(r=>r.allowedRoles.length&&!r.allowedRoles.includes(role)))blockedReason='Não permitido para esta função pela política global.';
   else if(premium&&account.allow_premium_models!==1)blockedReason='Modelos premium não estão habilitados nesta conta.';
   else if(row.accountAllowed===false)blockedReason='Não disponível nesta conta.';
@@ -25,6 +27,5 @@ export function decorateAgentModels(rows:ModelCatalogEntry[],account:CatalogAcco
 }
 /** A labelled fallback, only when the runtime cannot enumerate. Never advertised as confirmed access. */
 export function knownAgentModels(provider:'openai'|'anthropic'):ModelCatalogEntry[] {
- const ids=provider==='anthropic'?['opus','sonnet','haiku']:['gpt-5.3-codex-spark'];
- return ids.map(id=>({id,provider,source:'catalog',displayName:modelDisplayName(provider,id),reasoning:[],accountAllowed:null}));
+ return OFFICIAL_MODELS[provider].map(model=>({id:model.id,provider,source:'catalog',displayName:model.name,reasoning:[],accountAllowed:null}));
 }

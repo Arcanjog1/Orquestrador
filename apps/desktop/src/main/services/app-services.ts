@@ -571,7 +571,13 @@ export class AppServices {
 
   async agentModels(accountId:string,role?:string):Promise<import('../../shared/agent-policy.js').ModelCatalogEntry[]> {
     const account=this.database.accounts.require(accountId);
-    const decorate=(rows:import('../../shared/agent-policy.js').ModelCatalogEntry[])=>decorateAgentModels(rows,account,this.agents.policies(),role);
+    const decorate=(rows:import('../../shared/agent-policy.js').ModelCatalogEntry[])=>{
+      if(account.provider_id==='anthropic'&&account.connection_kind!=='api') {
+        const saved=this.agents.manage().filter(a=>a.accountId===accountId).flatMap(a=>a.policy?.allowedModels??(a.model?[a.model]:[]));
+        for(const id of new Set(saved))if(/^(opus|sonnet|haiku|fable)$/.test(id)&&!rows.some(m=>m.id===id))rows.push({id,provider:'anthropic',source:'catalog',reasoning:[],accountAllowed:null});
+      }
+      return decorateAgentModels(rows,account,this.agents.policies(),role);
+    };
     if(account.connection_kind==='api') {
       const api=this.apiProviderFor(accountId,'');
       if(!api) return decorate(knownAgentModels(account.provider_id as 'openai'|'anthropic'));

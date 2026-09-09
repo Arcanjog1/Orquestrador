@@ -1,3 +1,4 @@
+import {modelMatchesRule} from '../../shared/model-policy-match.js';
 import { EFFORT_ORDER, roleDefinition, type AgentPolicy, type PolicyLayer, type ModelPolicy, type AgentTool } from '../../shared/agent-policy.js';
 import { modelCapability, type WorkerRuntimeCapabilities } from '../../../../../src/routing/provider-policy.js';
 import { isPremiumModel, type AccountRoutingPolicy } from '../../../../../src/routing/account-policy.js';
@@ -40,8 +41,8 @@ export function resolveAgentPolicy(input:PolicyResolutionInput) {
   validateAgentPolicy(policy,role);
   if(roleDefinition(role)?.requiresImage) deny('UNAVAILABLE','Nenhum runtime de imagem conectado.');
   const allowed=(model:string):string|null=>{
-    if(!contains(policy.allowedModels,model)||contains(policy.blockedModels,model)||layers.some(l=>(l.blockedModels&&contains(l.blockedModels,model))||(l.allowedModels&&!contains(l.allowedModels,model)))) return 'modelo bloqueado';
-    const rules=models.filter(m=>m.provider===provider&&key(m.modelId)===key(model));
+    if(!contains(policy.allowedModels,model)||policy.blockedModels.some(id=>modelMatchesRule(provider,id,model))||layers.some(l=>(l.blockedModels&&l.blockedModels.some(id=>modelMatchesRule(provider,id,model)))||(l.allowedModels&&!contains(l.allowedModels,model)))) return 'modelo bloqueado';
+    const rules=models.filter(m=>m.provider===provider&&modelMatchesRule(provider,m.modelId,model));
     if(rules.some(m=>!m.allowed||(m.allowedRoles.length&&!m.allowedRoles.includes(role)))) return 'política global';
     if((rules.some(m=>m.premium)||isPremiumModel(model))&&!account.allowPremiumModels) return 'premium desativado na conta';
     const tier=rules.find(m=>m.capability)?.capability??modelCapability(provider,model);
@@ -54,7 +55,7 @@ export function resolveAgentPolicy(input:PolicyResolutionInput) {
   const candidates=policy.modelMode==='FIXED'?[policy.primaryModel]:[policy.primaryModel,...policy.fallbackModels];
   const model=candidates.find(m=>!allowed(m));
   if(!model) deny('MODEL_BLOCKED',`${policy.modelMode}: ${allowed(policy.primaryModel)} (${policy.primaryModel}).`);
-  if(models.some(m=>m.provider===provider&&key(m.modelId)===key(model!)&&m.confirmationRequired)&&!input.confirmation?.(model!)) throw new AgentPolicyError('CONFIRMATION_REQUIRED',`Confirme o uso de ${model} nesta execução.`,model!);
+  if(models.some(m=>m.provider===provider&&modelMatchesRule(provider,m.modelId,model!)&&m.confirmationRequired)&&!input.confirmation?.(model!)) throw new AgentPolicyError('CONFIRMATION_REQUIRED',`Confirme o uso de ${model} nesta execução.`,model!);
   const requestedReasoning=policy.reasoning??input.requested.reasoning;
   const ceilings=[policy.reasoningCeiling,...layers.map(l=>l.reasoningCeiling),account.maxReasoning?({LOW:'low',MEDIUM:'medium',HIGH:'high',MAX:'ultra'} as const)[account.maxReasoning]:null].filter((v):v is string=>!!v);
   let reasoning=requestedReasoning;

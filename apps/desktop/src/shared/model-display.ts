@@ -1,12 +1,16 @@
+import {OFFICIAL_MODELS} from './official-models.js';
 import {EFFORT_ORDER,type AgentPolicy,type ModelCatalogEntry} from './agent-policy.js';
 /** Human labels live here; canonical IDs remain unchanged in persistence and adapters. */
 export function modelDisplayName(provider:string,id:string,official?:string):string {
  if(official&&official!==id)return official;
+ const known=OFFICIAL_MODELS[provider as keyof typeof OFFICIAL_MODELS]?.find(m=>m.id===id);
+ if(known)return known.name;
  if(provider==='anthropic') {
   const alias=id.match(/^(?:claude-)?(opus|sonnet|haiku|fable)(?:-(\d[\d.-]*))?$/i);
-  if(alias)return alias[1]![0]!.toUpperCase()+alias[1]!.slice(1)+(alias[2]?' '+alias[2].replace(/-\d{8}$/,'').replaceAll('-','.'):'');
+  if(alias)return 'Claude '+alias[1]![0]!.toUpperCase()+alias[1]!.slice(1)+(alias[2]?' '+alias[2].replace(/-\d{8}$/,'').replaceAll('-','.'):' (versão da conexão)');
  }
- return id.replace(/^gpt-/i,'GPT-').replace(/codex/ig,'Codex').replace(/spark/ig,'Spark');
+ if(/^gpt-\d/i.test(id))return id.replace(/^gpt-/i,'GPT-').replace(/-(codex|spark|astra|sol|terra|luna)/ig,(_,name:string)=>' '+name[0]!.toUpperCase()+name.slice(1));
+ return 'Modelo não reconhecido';
 }
 export const REASONING_NAMES:Record<string,string>={none:'Sem raciocínio adicional',minimal:'Mínimo',low:'Baixo',medium:'Médio',high:'Alto',xhigh:'Muito alto',max:'Máximo',ultra:'Ultra'};
 export const reasoningName=(value:string|null|undefined)=>value?REASONING_NAMES[value]??value:'Automático';

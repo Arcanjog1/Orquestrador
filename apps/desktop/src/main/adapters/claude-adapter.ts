@@ -30,7 +30,6 @@ import type { InvocationUsage, ProviderFailureKind, WorkerRuntimeCapabilities } 
 import {
   declaredFlag,
   describeProbe,
-  modelAliases,
   optionValues,
   readCapabilities,
   type CliCapabilities,
@@ -276,7 +275,7 @@ export class ClaudeCodeAdapter implements AgentRunner {
     return {
       modelFlag: capabilities.flags.has('--model'),
       effortFlag: capabilities.flags.has('--effort'),
-      declaredModels: modelAliases(capabilities.help),
+      declaredModels: null, // --help gives examples/aliases, not an exhaustive account catalog.
       declaredEfforts: optionValues(capabilities.help, '--effort'),
     };
   }

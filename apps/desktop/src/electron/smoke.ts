@@ -278,6 +278,8 @@ export function reportSmoke(checks: readonly SmokeCheck[]): boolean {
   for (const check of checks) {
     console.log(`${check.ok ? 'ok' : 'not ok'} - ${check.name}: ${check.detail}`);
   }
+  const report = process.env.AI_ORCHESTRATOR_SMOKE_REPORT;
+  if (report) { mkdirSync(dirname(report), {recursive:true}); writeFileSync(report, JSON.stringify(checks)); }
   const failed = checks.filter((c) => !c.ok).length;
   console.log(`# pass ${checks.length - failed}`);
   console.log(`# fail ${failed}`);
