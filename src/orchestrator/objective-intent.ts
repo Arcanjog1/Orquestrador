@@ -20,10 +20,16 @@ const executeVerbs = set('rode rodar roda execute executar executa run execute l
 const readVerbs = set('leia ler read explique explicar explain analise analisar analyze analyse revise revisar review audite auditar audit liste listar list consulte consultar inspect inspecione inspecionar localize localizar encontre encontrar find mostre mostrar show veja ver see acessar acesse acesso acessivel abrir abra open confira conferir confirme confirmar confirm check');
 const questions = set('onde quais qual como what where which how quem who');
 
+/** A labeled exact literal is data even without Markdown fences. In particular
+ * "Team Test" inside a requested TXT is not a request to execute tests. */
+export function objectiveInstructions(objective: string): string {
+  return objective.replace(/((?:conte[uú]do\s+exato|exact\s+content|contendo\s+exatamente|containing\s+exactly)\s*:[ \t]*(?:\r?\n[ \t]*)*)[^\r\n`][\s\S]*?(?=\r?\n[ \t]*\r?\n|\r?\n(?:sem|without|no)\s+(?:newline|quebra)|$)/gi, '$1');
+}
+
 /** Quoted examples and file names are data, not commands. Explicit imperative
  * changes anywhere (including conditional clauses) outrank an interrogative. */
 export function classifyObjective(objective: string): ObjectiveIntent {
-  const text=normalizeObjective(objective);
+  const text=normalizeObjective(objectiveInstructions(objective));
   const commandText=text.replace(/```[\s\S]*?```|`[^`]*`|"[^"\n]*"|'[^'\n]*'/g,' ');
   const tokens=words(commandText);
   const reasons:string[]=[], operations=new Set<'read'|'change'|'execute'>();

@@ -1,6 +1,7 @@
 import type { SqlDriver } from './driver.js';
 import { redact } from '../security/secret-redactor.js';
 import { traceSummary, type EventInput, type ExecutionEvent } from '../execution/events.js';
+import { progressFingerprint } from '../orchestrator/progress-guard.js';
 
 /** Redact values before encoding. Redacting serialized JSON can remove quotes. */
 export function encodeEventData(value: unknown): string {
@@ -18,6 +19,11 @@ export class ExecutionEventRepository {
   constructor(private readonly db: SqlDriver) {}
 
   append(input: EventInput): string {
+    if (input.type === 'EVIDENCE_CREATED') {
+      const data = input.data ?? {};
+      const fact = data.checks ?? data.evidence ?? data.deliveries ?? data;
+      input = {...input, key:'fact:'+progressFingerprint({type:input.type,phase:data.phase,status:input.status,fact})};
+    }
     const id = `${input.runId}:${input.key}`;
     this.db.run(`INSERT INTO execution_events
       (id,run_id,type,timestamp,parent_id,iteration,agent_id,invocation_id,role,status,summary,data)

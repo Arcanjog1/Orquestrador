@@ -11,7 +11,7 @@ export function progressFingerprint(value: unknown): string {
       return v.every(x=>x && typeof x==='object') ? rows.sort() : rows;
     }
     if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v)
-      .filter(([k])=>!['id','timestamp','startedAt','finishedAt','durationMs','iteration','taskId'].includes(k))
+      .filter(([k])=>!['id','timestamp','checkedAt','collectedAt','lastUpdatedIteration','startedAt','finishedAt','durationMs','iteration','taskId'].includes(k))
       .sort(([a],[b])=>a.localeCompare(b)).map(([k,x])=>[k,stable(x)]));
     return v;
   }

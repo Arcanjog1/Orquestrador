@@ -1,4 +1,4 @@
-import type { FileReadResult } from "../verification/file-check.js";
+import type { FileReadResult, FileCheckResult } from "../verification/file-check.js";
 import { classifyObjective, type ObjectiveIntent, type ReadProofKind } from './objective-intent.js';
 
 /** Only application-collected facts enter this registry; never parsed from an
@@ -38,18 +38,22 @@ export function queryProofProblems(
 }
 
 /** Mixed objectives retain all their read obligations as well as changes/tests. */
-export function readProofProblems(intent: ObjectiveIntent, answer: string, proof: QueryProof | undefined, reads: readonly FileReadResult[], evidence: readonly QueryEvidence[]): string[] {
+export function readProofProblems(intent: ObjectiveIntent, answer: string, proof: QueryProof | undefined, reads: readonly FileReadResult[], evidence: readonly QueryEvidence[], checks: readonly FileCheckResult[] = []): string[] {
   const problems: string[] = [];
+  // Exact comparisons certify an output, not a semantic explanation of code.
+  // Query answers still require citations actually delivered to the supervisor.
+  const exact = (path: string) => intent.requiresChanges && checks.some(c => c.request.path === path && c.passed && c.measurement?.comparedExactBytes && c.measurement.sha256 === c.sha256);
+  const exactOutput = intent.targets.length > 0 && intent.targets.every(exact);
   if (!answer.trim()) problems.push('A final answer is required.');
   for(const kind of intent.readProofs) {
     if(kind==='FILE_CONTENT') {
-      if(!proof?.citations.length)problems.push('FILE_CONTENT requires byte-grounded citations from delivered fileReads.');
+      if(!exactOutput && !proof?.citations.length)problems.push('FILE_CONTENT requires byte-grounded citations from delivered fileReads.');
       continue;
     }
     const facts=evidence.filter(e=>e.kind===kind&&e.repository&&e.branch&&e.commit);
     if(kind==='FILE_EXISTENCE') {
       if(!intent.targets.length)problems.push('FILE_EXISTENCE requires the file path being queried.');
-      for(const target of intent.targets)if(!facts.some(e=>e.paths?.some(p=>p.toLowerCase()===target.toLowerCase()||p.toLowerCase()===target.toLowerCase()+'.md')||e.complete))problems.push('File existence was not measured: '+target);
+      for(const target of intent.targets)if(!checks.some(c=>c.request.path===target&&(c.measurement?.exists||c.outcome==='missing'))&&!facts.some(e=>e.paths?.some(p=>p.toLowerCase()===target.toLowerCase()||p.toLowerCase()===target.toLowerCase()+'.md')||e.complete))problems.push('File existence was not measured: '+target);
     } else if(!facts.length || (kind==='REPOSITORY_TREE'&&!facts.some(e=>e.complete)) || (kind==='COMMIT'&&!facts.some(e=>e.commits?.length)))problems.push('Missing independent proof: '+kind);
   }
   for (const citation of proof?.citations ?? []) {
@@ -70,7 +74,7 @@ export function readProofProblems(intent: ObjectiveIntent, answer: string, proof
       problems.push(`Answer does not cite ${citation.path}.`);
   }
   if(intent.readProofs.includes('FILE_CONTENT'))for(const target of intent.targets) {
-    if(!proof?.citations.some(c=>c.path.toLowerCase()===target.toLowerCase()||c.path.toLowerCase()===target.toLowerCase()+'.md'))problems.push('Requested file has no grounded citation: '+target);
+    if(!exact(target)&&!proof?.citations.some(c=>c.path.toLowerCase()===target.toLowerCase()||c.path.toLowerCase()===target.toLowerCase()+'.md'))problems.push('Requested file has no grounded citation: '+target);
   }
   return problems;
 }

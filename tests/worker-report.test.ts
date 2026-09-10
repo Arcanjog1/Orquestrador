@@ -105,12 +105,12 @@ test('a clean delegation with everything proven is "completed", and says what wa
   assert.match(text, /sessão do Claude: sess-abc/);
 });
 
-test('a delegation that left a criterion unproven is "partial", not "completed"', () => {
+test('worker completion is independent of a globally unproven criterion', () => {
   const report = buildWorkerReport(input({ unproven: ['hello.txt tem exatamente 6 bytes'] }));
-  assert.equal(report.status, 'partial');
+  assert.equal(report.status, 'completed');
   assert.deepEqual([...report.pending], ['hello.txt tem exatamente 6 bytes']);
-  assert.match(report.recommendation, /Falta comprovar/);
-  assert.match(report.recommendation, /não redelegue o que já está feito/);
+  assert.match(report.recommendation, /Verificação global pendente/);
+  assert.match(report.recommendation, /coletar a prova faltante/);
 });
 
 test('a refused tool is "blocked", which is not the same as a failure', () => {
@@ -184,8 +184,9 @@ test('a report that claims a change the evidence does not show is named as a dis
   assert.match(text, /A evidência decide/);
   // And the claim is still shown - kept as what was said, not deleted.
   assert.match(text, /Criei hello\.txt com o conteúdo correto/);
-  // The status comes from the evidence, never from the confident sentence.
-  assert.equal(report.status, 'partial');
+  // The invocation completed; its global verification remains explicitly pending.
+  assert.equal(report.status, 'completed');
+  assert.deepEqual(report.pending, ['hello.txt existe']);
 });
 
 test('no disagreement is claimed when the evidence could not be observed', () => {

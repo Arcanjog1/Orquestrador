@@ -19,13 +19,12 @@ export class RejectedProgressGuard {
   observe(round:RejectedRound):boolean {
     const e=round.evidence;
     const fingerprint=createHash('sha256').update(JSON.stringify({
-      answer:equivalentAnswer(round.answer),
       tree:[e.commit,e.statusShort,e.diff,e.changedSinceBaseline],
       reads:unique(round.reads.map(r=>[r.request.path,r.request.offsetBytes??0,r.sha256,r.ok,r.text])),
       criteria:unique(round.criteria.map(c=>[c.text,c.status])),
       rejection:unique(round.gate.failures),
       commands:unique(round.gate.verification.map(v=>[v.command,v.exitCode,v.stdout,v.stderr,v.refused??null,v.timedOut])),
-      files:unique((round.gate.fileChecks??[]).map(c=>[c.request,c.passed,c.outcome,c.problem])),
+      files:unique((round.gate.fileChecks??[]).map(c=>[c.request,c.passed,c.outcome,c.sha256,c.sizeBytes])),
     })).digest('hex');
     const repeated=fingerprint===this.previous;
     this.previous=fingerprint;

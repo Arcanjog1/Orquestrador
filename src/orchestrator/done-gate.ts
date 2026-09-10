@@ -11,6 +11,7 @@ import type { Baseline, DoneGateResult, GitEvidence, IterationRecord } from '../
 import { AcceptanceCriteriaLedger } from './acceptance-criteria.js';
 import { commandPassed, Verifier } from './verifier.js';
 import type { ObjectiveIntent } from './objective-intent.js';
+import type { GateRejection } from './completion-state.js';
 import {
   describeFileCheck,
   runFileChecks,
@@ -19,6 +20,8 @@ import {
 } from '../verification/file-check.js';
 
 export interface DoneGateInput {
+  /** Evaluated AFTER the gate's fresh measurements, never against stale PASS. */
+  measureObjectiveProof?: (checks: readonly FileCheckResult[]) => Promise<readonly string[]>;
   /** The desktop derives this once from the user's objective, never from a model. */
   objectiveIntent?: ObjectiveIntent;
   /** Independent read-proof evaluation. An omitted evaluation is not a PASS. */
@@ -61,22 +64,23 @@ export interface DoneGateInput {
 
 export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult> {
   const failures: string[] = [];
-  if(input.objectiveIntent?.readProofs.length) {
-    failures.push(...(input.objectiveProofProblems ?? ['Read obligations were not independently checked.']));
-  }
+  const rejections: GateRejection[] = [];
+  const reject = (kind: GateRejection['kind'], message: string, detail: Partial<GateRejection> = {}) => {
+    failures.push(message); rejections.push({kind, message, ...detail});
+  };
 
   // 1. Re-run every verification command from scratch. Nothing is taken on
   //    trust from an earlier iteration.
   const verification = await input.verifier.runAll(input.verificationCommands);
-  if(input.objectiveIntent?.requiresExecution && verification.length===0)failures.push('Execution was requested, but no command was independently executed.');
+  if(input.objectiveIntent?.requiresExecution && verification.length===0)reject('MISSING_PROOF', 'Execution was requested, but no command was independently executed.');
   for (const result of verification) {
     if (commandPassed(result)) continue;
     if (result.refused) {
-      failures.push(`Verification command was refused and never ran: "${result.command}" - ${result.refused}`);
+      reject('MECHANICAL_FAILURE', `Verification command was refused and never ran: "${result.command}" - ${result.refused}`);
     } else if (result.timedOut) {
-      failures.push(`Verification command timed out: "${result.command}"`);
+      reject('MECHANICAL_FAILURE', `Verification command timed out: "${result.command}"`);
     } else {
-      failures.push(
+      reject('FAILED_CRITERION',
         `Verification command failed with exit code ${result.exitCode}: "${result.command}"` +
           firstErrorLine(result.stderr || result.stdout),
       );
@@ -95,15 +99,22 @@ export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult
           : []
       : [];
   for (const check of fileChecks) {
+    for (const criterion of check.request.criteria ?? []) input.ledger.markByText(criterion, check.passed ? 'satisfied' : 'failed', input.iterations.at(-1)?.iteration ?? 0, describeFileCheck(check));
     if (check.passed) continue;
-    failures.push(`File check failed: ${describeFileCheck(check)}`);
+    const mechanical = ['outside-workspace','read-error','invalid-request','too-large'].includes(check.outcome);
+    reject(mechanical ? 'MECHANICAL_FAILURE' : 'IMPLEMENTATION_MISMATCH', `File check failed: ${describeFileCheck(check)}`, {path:check.request.path});
+  }
+  if (input.fileChecks?.length && fileChecks.length !== input.fileChecks.length) reject('MISSING_PROOF', 'Requested file measurements were not executed.');
+  if(input.objectiveIntent?.readProofs.length) {
+    const problems = input.measureObjectiveProof ? await input.measureObjectiveProof(fileChecks) : input.objectiveProofProblems ?? ['Read obligations were not independently checked.'];
+    for (const problem of problems) reject('MISSING_PROOF', problem);
   }
 
   // 2. Criteria still lacking evidence block completion. A criterion that was
   //    only ever asserted by the worker never reaches `satisfied` here.
   for (const criterion of input.ledger.pending()) {
     const state = criterion.status === 'failed' ? 'is recorded as failed' : 'has no supporting evidence';
-    failures.push(`Acceptance criterion ${state}: "${criterion.text}"`);
+    reject(criterion.status === 'failed' ? 'FAILED_CRITERION' : 'MISSING_PROOF', `Acceptance criterion ${state}: "${criterion.text}"`, {criterion:criterion.text});
   }
 
   // 3. Something must actually have changed, unless the objective is read-only
@@ -121,7 +132,7 @@ export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult
     (input.evidence.isGitRepository || input.objectiveIntent?.requiresChanges) &&
     !input.evidence.changedSinceBaseline
   ) {
-    failures.push(
+    reject('UNVERIFIED_OUTPUT',
       'No file changed relative to the baseline. A change objective needs a measured change or a matching independent file check.',
     );
   }
@@ -129,11 +140,12 @@ export async function evaluateDone(input: DoneGateInput): Promise<DoneGateResult
   // 4. An iteration that ended in a timeout or a crash, and was never followed
   //    by a successful one, is unfinished business.
   const unresolved = findUnresolvedWorkerFailure(input.iterations);
-  if (unresolved) failures.push(unresolved);
+  if (unresolved) reject('MECHANICAL_FAILURE', unresolved);
 
   return {
     passed: failures.length === 0,
     failures,
+    rejections,
     checkedAt: new Date().toISOString(),
     verification,
     ...(fileChecks.length > 0 ? { fileChecks } : {}),

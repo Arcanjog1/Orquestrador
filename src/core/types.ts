@@ -588,6 +588,7 @@ export interface WorkerRecord {
 
 /** Outcome of the independent DONE validation (spec 15). */
 export interface DoneGateResult {
+  rejections?: import('../orchestrator/completion-state.js').GateRejection[];
   passed: boolean;
   /** Exact list of what failed, sent back to the orchestrator verbatim. */
   failures: string[];

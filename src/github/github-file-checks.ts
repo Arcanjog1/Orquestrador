@@ -26,6 +26,7 @@ import {
   MAX_READ_BYTES,
   MAX_READ_TOTAL_BYTES,
   compareFileBytes,
+  measureBytes,
   describeInvalidCheck,
   type FileCheckRequest,
   type FileCheckResult,
@@ -120,6 +121,7 @@ export async function runGitHubFileCheck(
   }
 
   const found = {
+    measurement: measureBytes(request, bytes, 'github', source.at),
     sizeBytes: bytes.byteLength,
     sha256: createHash('sha256').update(bytes).digest('hex'),
     // There is no path on this computer: the file was never here. Saying so

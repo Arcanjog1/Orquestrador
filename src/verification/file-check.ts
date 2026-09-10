@@ -87,6 +87,7 @@ export type FileCheckOutcome =
   | 'invalid-request';
 
 export interface FileCheckResult {
+  readonly measurement?: ByteMeasurement;
   readonly request: FileCheckRequest;
   readonly passed: boolean;
   readonly outcome: FileCheckOutcome;
@@ -98,6 +99,29 @@ export interface FileCheckResult {
   /** SHA-256 of the bytes read, so a claim about content can be checked later. */
   readonly sha256: string | null;
   readonly checkedAt: string;
+}
+
+export interface ByteMeasurement {
+  readonly path: string;
+  readonly exists: boolean;
+  readonly byteLength: number;
+  readonly sha256: string;
+  readonly encoding: 'utf8' | 'hex';
+  readonly content: string;
+  readonly range: { readonly start: number; readonly end: number };
+  readonly measurementSource: 'filesystem' | 'github';
+  readonly snapshot?: string;
+  readonly comparedExactBytes: boolean;
+}
+
+export function measureBytes(request: FileCheckRequest, bytes: Buffer, measurementSource: ByteMeasurement['measurementSource'], snapshot?: string): ByteMeasurement {
+  const text = bytes.toString('utf8');
+  const utf8 = Buffer.from(text, 'utf8').equals(bytes);
+  return {path: request.path, exists: true, byteLength: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'), encoding: utf8 ? 'utf8' : 'hex',
+    content: utf8 ? text : bytes.toString('hex'), range: {start: 0, end: bytes.length},
+    measurementSource, ...(snapshot ? {snapshot} : {}),
+    comparedExactBytes: expectedBytes(request)?.equals(bytes) ?? false};
 }
 
 /**
@@ -214,6 +238,7 @@ export async function runFileCheck(
   }
 
   const found = {
+    measurement: measureBytes(request, bytes, 'filesystem'),
     resolvedPath: realTarget,
     sizeBytes: bytes.byteLength,
     sha256: createHash('sha256').update(bytes).digest('hex'),
@@ -297,7 +322,7 @@ export async function runFileRead(
       outcome: 'ok',
       resolvedPath: check.resolvedPath,
       sizeBytes: bytes.byteLength,
-      sha256: check.sha256,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
       text: shown.toString('utf8'),
       truncated: bytes.byteLength > shown.byteLength,
       problem: null,

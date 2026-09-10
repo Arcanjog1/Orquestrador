@@ -221,7 +221,6 @@ function decideStatus(input: {
   if (!input.cleanExit) return 'failed';
   if (input.failedCriteria.length > 0) return 'partial';
   if (input.verifications.some((v) => !v.passed)) return 'partial';
-  if (input.unproven.length > 0) return 'partial';
   return 'completed';
 }
 
@@ -237,7 +236,7 @@ function headlineOf(
     case 'completed':
       return `Concluído em ${seconds}s — ${where}.`;
     case 'partial':
-      return `Parcial em ${seconds}s — ${where}, ainda falta prova.`;
+      return `Parcial em ${seconds}s — ${where}, há critério não atendido.`;
     case 'blocked':
       return `Bloqueado em ${seconds}s — faltou autorização.`;
     case 'failed':
@@ -278,6 +277,7 @@ function recommend(input: {
         : 'Falta prova de que o objetivo foi atingido. Peça uma verificação antes de concluir.';
     }
     case 'completed':
+      if (input.unproven.length) return 'Implementação concluída. Verificação global pendente: o aplicativo deve coletar a prova faltante.';
       return (
         'Nada pendente nesta delegação. Se todos os critérios estão comprovados, conclua ' +
         'em vez de delegar de novo.'

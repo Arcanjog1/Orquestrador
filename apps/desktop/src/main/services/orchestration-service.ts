@@ -1,4 +1,7 @@
 import { encodeEventData } from '../../../../../src/database/execution-events.js';
+import { createMissionContract, contractChecks, preserveDecision, type MissionContract } from '../../../../../src/orchestrator/mission-contract.js';
+import { recoveryAction, type CompletionState } from '../../../../../src/orchestrator/completion-state.js';
+import { fileFactIdentity, localTreeProof, measurementProofs } from '../../../../../src/orchestrator/evidence-bridge.js';
 import { DelegationProgressGuard, progressFingerprint } from '../../../../../src/orchestrator/progress-guard.js';
 import { roleDefinition, type TaskKind } from '../../shared/agent-policy.js';
 import { agentConfig, AgentService } from './agent-service.js';
@@ -1028,6 +1031,15 @@ export class OrchestrationService {
     }
 
     const ledger = new AcceptanceCriteriaLedger();
+    const savedContract = this.database.runs.steps(runId).find(s => s.phase === 'mission-contract');
+    const contract: MissionContract = savedContract?.detail ? JSON.parse(savedContract.detail) : createMissionContract(objective);
+    if (!savedContract) this.step(runId, 0, 'mission-contract', 'frozen', 'Especificação original preservada.', {...contract});
+    ledger.add(contract.acceptanceCriteria, 0);
+    const completion: CompletionState = {implementation:'PENDING', verification:'PENDING'};
+    const pinnedChecks = new Map<string, FileCheckRequest>(contractChecks(contract).map(c => [c.path, c]));
+    const savedChecks = this.database.runs.steps(runId).filter(s => s.phase === 'pinned-checks').at(-1);
+    if (savedChecks?.detail) for (const check of JSON.parse(savedChecks.detail).checks as FileCheckRequest[]) if (!pinnedChecks.has(check.path)) pinnedChecks.set(check.path, check);
+    const seenFileFacts = new Set<string>();
     const iterations: IterationRecord[] = [];
     /** Every command actually resolved from an id, deduplicated. */
     const resolvedCommands = new Set<string>();
@@ -1039,7 +1051,7 @@ export class OrchestrationService {
      * iteration 3, and certifying the earlier read would be certifying a
      * memory rather than the workspace.
      */
-    const requestedFileChecks = new Map<string, FileCheckRequest>();
+    const requestedFileChecks = new Map<string, FileCheckRequest>(pinnedChecks);
     // A resumed run does not start from nothing: the orchestrator's first
     // round reads what changed while the run was stopped - which operation the
     // person authorised, and which they refused - so it continues the task
@@ -1063,6 +1075,23 @@ export class OrchestrationService {
      */
     let listingOffered = false;
     const queryEvidence: QueryEvidence[] = [];
+    const refreshTreeProof = async () => {
+      if (!objectiveIntent.readProofs.some(p => p === 'REPOSITORY_TREE' || p === 'FILE_EXISTENCE')) return;
+      let tree: QueryEvidence | undefined;
+      if (github) {
+        try {
+          github.tree = await github.service.tree(github.workspaceId, github.headCommit, signal);
+          tree = {kind:'REPOSITORY_TREE',repository:github.fullName,branch:github.baseBranch,commit:github.headCommit,
+            paths:github.tree.entries.map(e => e.path),complete:!github.tree.truncated};
+        } catch { return; }
+      } else if (environment?.kind === 'local') {
+        tree = await localTreeProof(cwd, {repository:cwd,branch:baseline.branch ?? 'workspace',commit:baseline.commit ?? 'filesystem'});
+      }
+      if (tree) {
+        for (let i = queryEvidence.length - 1; i >= 0; i--) if (['REPOSITORY_TREE','FILE_EXISTENCE'].includes(queryEvidence[i]!.kind)) queryEvidence.splice(i, 1);
+        queryEvidence.push(tree, {...tree, kind:'FILE_EXISTENCE'});
+      }
+    };
     if(github) {
       const snapshot={repository:github.fullName,branch:github.baseBranch,commit:github.headCommit};
       queryEvidence.push({kind:'REPOSITORY_ACCESS',...snapshot},{kind:'REPOSITORY_METADATA',...snapshot});
@@ -1118,7 +1147,11 @@ export class OrchestrationService {
         const last=attempts.at(-1);if(last)last.mechanical=true;
       }
       if(!rejectedProgress.observe({answer:record.decision?.summary??'',evidence:fresh,reads:iterations.flatMap(r=>r.fileReads??[]),criteria:ledger.pending(),gate}))return false;
-      const reason='GATE_MISMATCH: duas propostas de conclusão têm a mesma resposta, evidência, critérios e rejeição. A execução foi interrompida sem escalar modelos; falta uma prova compatível com o objetivo.';
+      const reason='VERIFICATION_STALLED: duas coletas têm os mesmos fatos e a mesma rejeição. Falha interna no contrato de evidência; nenhuma nova implementação foi autorizada.';
+      completion.verification = 'STALLED';
+      this.step(runId,record.iteration,'done-gate','rejected',gate.failures.join('; '),{rejections:gate.rejections});
+      this.database.runs.event({runId,key:'stalled-gate',type:'REVIEW_RESULT',iteration:record.iteration,status:'rejected',summary:gate.failures.join('; '),data:{criteria:ledger.all(),fileChecks:gate.fileChecks ?? [],verification:gate.verification,rejections:gate.rejections}});
+      this.step(runId, record.iteration, 'completion-state', 'stalled', reason, {...completion});
       this.database.runs.setStatus(runId,'FAILED',reason);
       this.step(runId,record.iteration,'no-progress','stopped',reason,{failures:gate.failures});
       this.say(sessionId,runId,'system',reason);
@@ -1128,6 +1161,7 @@ export class OrchestrationService {
     // What was said in this conversation before this run, so a follow-up
     // ("continue", "now also do X") is read against what came before it.
     const history = this.conversationBefore(sessionId, runId);
+    await refreshTreeProof();
 
     for (let iteration = Math.max(1, startIteration); iteration <= maxIterations; iteration += 1) {
       if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
@@ -1202,9 +1236,23 @@ export class OrchestrationService {
         this.progress(runId, sessionId, asked.policyBlocked ? 'needs-human' : 'failed', reason, asked.policyBlocked ? 'NEEDS_HUMAN' : 'FAILED');
         return;
       }
-      const decision = { ...asked.decision,
+      const decision = preserveDecision({ ...asked.decision,
         ...(asked.decision.reason ? {reason:publicGateAnswer(asked.decision.reason)} : {}),
-      };
+      }, contract, pinnedChecks);
+      if (decision.action === 'delegate' && completion.implementation === 'COMPLETE' && objectiveIntent.requiresChanges && !decision.delegations?.length) {
+        const measurements = github ? await this.githubChecks(github, [...pinnedChecks.values()], signal)
+          : environment?.kind === 'local' ? await runFileChecks(cwd, [...pinnedChecks.values()]) : [];
+        const tests = await (verifier ?? verifierWithoutExecutor(NO_EXECUTOR)).runAll([...resolvedCommands]);
+        const mismatch = measurements.some(c => !c.passed && ['missing','content-mismatch','size-mismatch','trailing-newline','bom-present','unexpectedly-present'].includes(c.outcome)) || tests.some(t => !t.refused && !t.timedOut && t.exitCode !== null && t.exitCode !== 0);
+        if (mismatch) completion.implementation = 'INCOMPLETE';
+        else {
+          decision.action = 'done';
+          decision.fileChecks = [...pinnedChecks.values()];
+          decision.summary = 'Implementação concluída. Validar a prova pendente.';
+          this.step(runId,iteration,'proof-recovery','redirected','Prova incompleta não autoriza outra implementação.');
+        }
+      }
+      this.step(runId, iteration, 'pinned-checks', 'frozen', 'Expectativas preservadas para as próximas tentativas.', {checks:[...pinnedChecks.values()]});
       record.decision = decision;
       if (decision.action === 'done' && unresolvedDelegations) {
         this.step(runId, iteration, 'done-gate', 'rejected', 'Subtarefas falhas, canceladas ou conflitantes ainda não foram resolvidas.');
@@ -1365,7 +1413,7 @@ export class OrchestrationService {
             } finally { this.branchTasks.delete(key); }
           }));
           if (this.stopping(runId,signal)) return this.finishCancelled(runId,sessionId);
-          if (this.database.runs.require(runId).status === 'NEEDS_HUMAN') return;
+          if (['NEEDS_HUMAN','FAILED'].includes(this.database.runs.require(runId).status)) return;
           const paths=new Set<string>();
           const taskPaths=new Map<string,string[]>();
           const changes: import('../../../../../src/github/repository-operations.js').RepositoryChange[]=[];
@@ -1453,7 +1501,7 @@ export class OrchestrationService {
           fileReads: carriedReads,
         });
         // A policy/budget pause must not invoke the supervisor again or apply proposals.
-        if (this.database.runs.require(runId).status === 'NEEDS_HUMAN') return;
+        if (['NEEDS_HUMAN','FAILED'].includes(this.database.runs.require(runId).status)) return;
         record.worker = delegated.record;
         iterationAnswer = delegated.answer;
         if (delegated.answer.trim()) lastWorkerAnswer = delegated.answer;
@@ -1782,7 +1830,7 @@ export class OrchestrationService {
               ? await runFileChecks(cwd, decision.fileChecks)
               : [];
       for (const request of decision.fileChecks) {
-        requestedFileChecks.set(JSON.stringify(request), request);
+        requestedFileChecks.set(request.path, request);
       }
       if (fileChecks.length > 0) {
         record.fileChecks = fileChecks;
@@ -1793,8 +1841,12 @@ export class OrchestrationService {
           'file-check',
           passedChecks === fileChecks.length ? 'passed' : 'failed',
           fileChecks.map(describeFileCheck).join('; ').slice(0, 500),
+          {checks:fileChecks,proofs:fileChecks.map(c => ({identity:fileFactIdentity(c),kinds:measurementProofs(c)}))},
         );
         for (const check of fileChecks) {
+          const identity = fileFactIdentity(check);
+          if (seenFileFacts.has(identity)) continue;
+          seenFileFacts.add(identity);
           this.database.runs.recordVerification({
             runId,
             iteration,
@@ -1873,7 +1925,7 @@ export class OrchestrationService {
         // proposed write. Content still must have reached the supervisor.
         const currentFacts=queryEvidence.filter(f=>!github||f.commit===github.headCommit);
         const readIntent=objectiveIntent.targets.length?objectiveIntent:{...objectiveIntent,targets:decision.fileChecks.map(c=>c.path)};
-        objectiveProofProblems = readProofProblems(readIntent, decision.summary ?? '', decision.queryProof, delivered, currentFacts);
+        objectiveProofProblems = readProofProblems(readIntent, decision.summary ?? '', decision.queryProof, delivered, currentFacts, fileChecks);
         if(objectiveIntent.kind==='READ_ONLY_QUERY'&&evidence.changedSinceBaseline)objectiveProofProblems.push('A read-only objective unexpectedly changed files.');
         this.step(runId, iteration, 'query-proof', objectiveProofProblems.length ? 'rejected' : 'passed', objectiveProofProblems.join('; ') || 'Consulta comprovada: '+objectiveIntent.readProofs.join(', '), { proof: decision.queryProof, evidence:currentFacts });
         if (!objectiveProofProblems.length) {
@@ -1935,6 +1987,41 @@ export class OrchestrationService {
         fileChecks.every((check) => check.passed) &&
         unknownIds.length === 0;
 
+      if (fileChecks.some(c => !c.passed && ['missing','content-mismatch','size-mismatch','trailing-newline','bom-present','unexpectedly-present'].includes(c.outcome)) || verification.some(v => !v.refused && v.exitCode !== 0)) completion.implementation = 'INCOMPLETE';
+      else if ((allPassed || evidence.changedSinceBaseline) && record.worker?.outcome === 'completed' && record.worker.exitCode === 0 && !record.worker.failure) completion.implementation = 'COMPLETE';
+      completion.verification = allPassed && !ledger.pending().length ? 'PASSED' : 'INCOMPLETE';
+      this.step(runId, iteration, 'completion-state', 'measured', 'Estado da implementação e da verificação.', {...completion});
+
+      const evaluateGate = async (fresh: GitEvidence) => {
+        const measureObjectiveProof = async (checks: readonly FileCheckResult[]) => {
+          await refreshTreeProof();
+          const currentFacts = queryEvidence.filter(f => !github || f.commit === github.headCommit);
+          const delivered = iterations.flatMap(r => r.fileReads ?? []).filter(r => supervisorFiles.deliveries.some(d => d.path === r.request.path && d.sha256 === r.sha256 && d.state === 'SUPERVISOR_CARRIED'));
+          const readIntent = objectiveIntent.targets.length ? objectiveIntent : {...objectiveIntent, targets:checks.map(c => c.request.path)};
+          return readProofProblems(readIntent, decision.summary ?? 'Resultado medido e validado.', decision.queryProof, delivered, currentFacts, checks);
+        };
+        const check = () => evaluateDone({objectiveIntent, measureObjectiveProof, ledger,
+          verificationCommands:[...resolvedCommands], iterations, baseline, evidence:fresh,
+          verifier:verifier ?? verifierWithoutExecutor(NO_EXECUTOR), allowNoChanges:!objectiveIntent.requiresChanges,
+          fileChecks:[...requestedFileChecks.values()], workspaceRoot:cwd,
+          ...(github ? {readFileChecks:(requests: readonly FileCheckRequest[]) => this.githubChecks(github!, requests, signal)} : {})});
+        let gate = await check();
+        // Repair evidence within the engine. No planner/worker call is allowed
+        // between a proof-only rejection and these deterministic measurements.
+        if (recoveryAction(gate) === 'collect-proof' && completion.implementation === 'COMPLETE') {
+          stopRepeatedRejection(gate, record, fresh);
+          this.step(runId, iteration, 'proof-recovery', 'collecting', 'Coletar prova faltante sem reabrir a implementação.', {rejections:gate.rejections});
+          gate = await check();
+          if (!gate.passed && recoveryAction(gate) === 'collect-proof') {
+            stopRepeatedRejection(gate, record, fresh);
+            if (completion.verification === 'STALLED') gate.rejections?.push({kind:'VERIFICATION_STALLED',message:'Coleta repetida sem prova nova.'});
+          }
+        }
+        completion.verification = gate.passed ? 'PASSED' : completion.verification === 'STALLED' ? 'STALLED' : 'INCOMPLETE';
+        this.step(runId, iteration, 'completion-state', gate.passed ? 'passed' : 'incomplete', 'Contrato de conclusão avaliado.', {...completion});
+        return gate;
+      };
+
       // 4b. The short path for a small, finished task.
       //
       // Measured, not guessed: creating a six-byte file cost **three** CLI
@@ -1977,24 +2064,9 @@ export class OrchestrationService {
         const fresh = collector
           ? await collector.collectEvidence(baseline)
           : await this.collectGitHubEvidence(github!, signal);
-        const gate = await evaluateDone({
-          objectiveIntent,
-          objectiveProofProblems: objectiveIntent.readProofs.length ? ['Read obligations require supervisor review.'] : [],
-          ledger,
-          verificationCommands: [...resolvedCommands],
-          iterations,
-          baseline,
-          evidence: fresh,
-          // With no executor a verification command is refused and never runs,
-          // which the gate reads as no proof at all. That is the honest answer
-          // and the one the person asked for: never an invented PASS.
-          verifier: verifier ?? verifierWithoutExecutor(NO_EXECUTOR),
-          // Only the requested operations determine whether a diff is required.
-          allowNoChanges: !objectiveIntent.requiresChanges,
-          fileChecks: [...requestedFileChecks.values()],
-          workspaceRoot: cwd,
-          ...(github ? { readFileChecks: (requests) => this.githubChecks(github!, requests, signal) } : {}),
-        });
+        const gate = await evaluateGate(fresh);
+        if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
+        if (this.database.runs.require(runId).status === 'FAILED') return;
         this.step(
           runId,
           iteration,
@@ -2039,24 +2111,9 @@ export class OrchestrationService {
         const fresh = collector
           ? await collector.collectEvidence(baseline)
           : await this.collectGitHubEvidence(github!, signal);
-        const gate = await evaluateDone({
-          objectiveIntent,
-          objectiveProofProblems,
-          ledger,
-          verificationCommands: [...resolvedCommands],
-          iterations,
-          baseline,
-          evidence: fresh,
-          // With no executor a verification command is refused and never runs,
-          // which the gate reads as no proof at all. That is the honest answer
-          // and the one the person asked for: never an invented PASS.
-          verifier: verifier ?? verifierWithoutExecutor(NO_EXECUTOR),
-          // Only the requested operations determine whether a diff is required.
-          allowNoChanges: !objectiveIntent.requiresChanges,
-          fileChecks: [...requestedFileChecks.values()],
-          workspaceRoot: cwd,
-          ...(github ? { readFileChecks: (requests) => this.githubChecks(github!, requests, signal) } : {}),
-        });
+        const gate = await evaluateGate(fresh);
+        if (this.stopping(runId, signal)) return this.finishCancelled(runId, sessionId);
+        if (this.database.runs.require(runId).status === 'FAILED') return;
         record.doneRejection = gate.passed ? undefined : gate;
         this.step(runId, iteration, 'done-gate', gate.passed ? 'passed' : 'rejected', gate.failures.join('; ').slice(0, 500));
 
@@ -2068,7 +2125,6 @@ export class OrchestrationService {
           // does not open an empty PR to look productive.
           if (github) await this.publishGitHubWork(runId, sessionId, github, objective, signal);
           this.database.runs.setStatus(runId, 'DONE', 'Validação independente aprovada.');
-          if(objectiveIntent.kind!=='READ_ONLY_QUERY')this.say(sessionId, runId, 'orchestrator', 'Tarefa concluída e verificada.');
           this.sayCost(sessionId, runId, budget);
           this.progress(runId, sessionId, 'done', 'Tarefa concluída.', 'DONE');
           return;
@@ -2129,7 +2185,7 @@ export class OrchestrationService {
       // instructions that leave the workspace, the verifications and the
       // ledger exactly as they were are the same round twice.
       const fingerprint = evidenceFingerprint({
-        tree: tree + progressFingerprint(carriedReads.map(r => [r.request.path, r.sha256, r.request.offsetBytes ?? 0])) + progressFingerprint([lastDelegatedWorkerId, equivalentAnswer(iterationAnswer)]),
+        tree: tree + progressFingerprint(carriedReads.map(r => [r.request.path, r.sha256, r.request.offsetBytes ?? 0])),
         verification,
         fileChecks,
         pending: ledger.pending().map((criterion) => `${criterion.status}:${criterion.text}`),
@@ -2147,10 +2203,10 @@ export class OrchestrationService {
             : '') +
           'Cadastre uma verificação, aponte uma verificação direta de arquivo, ou diga o que ' +
           'aceitar como prova.';
-        this.database.runs.setStatus(runId, 'NEEDS_HUMAN', reason);
+        this.database.runs.setStatus(runId, 'FAILED', 'VERIFICATION_STALLED: ' + reason);
         this.say(sessionId, runId, 'system', reason);
         this.step(runId, iteration, 'progress', 'stagnant', reason, { pending });
-        this.progress(runId, sessionId, 'needs-human', 'Sem evidência nova', 'NEEDS_HUMAN');
+        this.progress(runId, sessionId, 'failed', 'VERIFICATION_STALLED', 'FAILED');
         return;
       }
 
@@ -2318,7 +2374,7 @@ export class OrchestrationService {
       });
       if (result.applied) input.onApplied?.(result.applied);
       if (signal.aborted) return { decision: null };
-      if(result.invocationSkipped) return {decision:null,failure:result.failureDetail??result.stderr,policyBlocked:true};
+      if(result.invocationSkipped) return {decision:null,failure:result.failureDetail??result.stderr,policyBlocked:this.database.runs.require(runId).status==='NEEDS_HUMAN'};
 
       const diagnostics = {
         attempt,

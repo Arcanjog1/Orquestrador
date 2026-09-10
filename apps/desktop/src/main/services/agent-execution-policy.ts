@@ -90,7 +90,8 @@ export class AgentExecutionPolicy {
       const message=error instanceof Error?error.message:String(error);
       if(code==='CONFIRMATION_REQUIRED') snapshot={...snapshot,model:(error as AgentPolicyError).modelId??options.policy?.primaryModel??args.routing?.model};
       this.database.driver.run('INSERT INTO agent_policy_calls(id,run_id,agent_id,snapshot,started_at,finished_at,observation,status) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished_at=excluded.finished_at,observation=excluded.observation,status=excluded.status',[id,args.runId,agentId??'unbound',JSON.stringify(snapshot),startedAt,new Date().toISOString(),JSON.stringify({error:message,code}),invoked?'FAILED':code]);
-      if(code!=='CANCELLED') this.database.runs.setStatus(args.runId,'NEEDS_HUMAN',message);
+      const internalStop = ['ATTEMPTS','PARALLEL','RUNTIME_POLICY'].includes(code);
+      if(code!=='CANCELLED') this.database.runs.setStatus(args.runId,internalStop ? 'FAILED' : 'NEEDS_HUMAN',message);
       return {invocationSkipped:!invoked,outcome:code==='CANCELLED'?'cancelled':'completed',exitCode:1,signal:null,truncated:false,stdout:'',stderr:message,durationMs:0,startedAt,finishedAt:new Date().toISOString(),failure:code==='CONFIRMATION_REQUIRED'?'approval-required':'permission',failureDetail:message};
     }
   }

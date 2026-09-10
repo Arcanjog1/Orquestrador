@@ -1894,7 +1894,8 @@ export class RunRepository extends Repository {
     const phases:Record<string,ExecutionEvent['type']>={evidence:'EVIDENCE_CREATED',verification:'EVIDENCE_CREATED','file-check':'EVIDENCE_CREATED','file-read':'EVIDENCE_CREATED','query-evidence':'EVIDENCE_CREATED','task-join':'REVIEW_RESULT','task-blocked':'BLOCKED','task-conflict':'BLOCKED','no-progress':'BLOCKED',progress:'BLOCKED',criteria:'EVIDENCE_CREATED',permission:'NEEDS_HUMAN'};
     const type=phases[input.phase];
     let measured:Record<string,unknown>={};
-    if(input.phase==='evidence'&&input.detail) {try{measured=JSON.parse(input.detail);}catch{measured={fullOutput:input.detail};}}
+    if(input.detail) {try{measured=JSON.parse(input.detail);}catch{measured={fullOutput:input.detail};}}
+    if(input.phase==='permission' && input.status==='carried') return Number(result.lastInsertRowid);
     if(type) {
       const previous=this.events(input.runId).filter(e=>e.type!=='FINAL_RESPONSE').at(-1);
       this.event({runId:input.runId,key:'step:'+result.lastInsertRowid,type,iteration:input.iteration,status:input.status,summary:input.summary ?? input.phase,parentId:previous?.id ?? null,data:{phase:input.phase,fullOutput:input.summary ?? '',...measured}});
@@ -2047,7 +2048,7 @@ export class RunRepository extends Repository {
       this.event({runId:input.runId,key:'delegation:'+id,type:'DELEGATION_STARTED',iteration:input.iteration,agentId:input.agentId,invocationId:id,role,status:'completed',summary:input.task ?? 'Missão delegada',parentId,data:{taskId:taskContext.taskId,dependsOn:taskContext.dependsOn,workerId:input.workerId,fullOutput:input.task,agentName:snapshotAgent?.display_name ?? input.workerId}});
     }
     this.event({runId:input.runId,key:startKey,type:'AGENT_STARTED',iteration:input.iteration,agentId:input.agentId,invocationId:id,role,status:'running',summary:input.role==='ORCHESTRATOR'?'Orquestrador coordenando…':(snapshotAgent?.display_name ?? input.workerId ?? 'Agente')+' executando…',timestamp:input.startedAt,parentId:input.role==='CODING_WORKER'?input.runId+':delegation:'+id:parentId,data:{taskId:taskContext.taskId,dependsOn:taskContext.dependsOn,workerId:input.workerId,agentName:snapshotAgent?.display_name}});
-    if(input.outcome!=='running') this.event({runId:input.runId,key:'result:'+id,type:'AGENT_RESULT',iteration:input.iteration,agentId:input.agentId,invocationId:id,role,status:input.outcome,summary:input.role==='ORCHESTRATOR'?'Decisão recebida.':input.outcome==='completed'?'Execução retornou ao Orquestrador.':input.failureKind ?? input.outcome,parentId:input.runId+':'+startKey,data:{workerId:input.workerId,agentName:snapshotAgent?.display_name,exitCode:input.exitCode,failureKind:input.failureKind}});
+    if(input.outcome!=='running') this.event({runId:input.runId,key:'result:'+id,type:'AGENT_RESULT',iteration:input.iteration,agentId:input.agentId,invocationId:id,role,status:input.outcome,summary:input.role==='ORCHESTRATOR'?'Plano preparado.':input.outcome==='completed'?'Execução retornou ao Orquestrador.':input.failureKind ?? input.outcome,parentId:input.runId+':'+startKey,data:{workerId:input.workerId,agentName:snapshotAgent?.display_name,exitCode:input.exitCode,failureKind:input.failureKind}});
     return id;
   }
 
