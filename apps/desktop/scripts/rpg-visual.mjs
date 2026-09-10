@@ -3,7 +3,7 @@
  * Screenshots and UI assertions use persisted fixture data, never real provider calls.
  */
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -18,13 +18,28 @@ const home = mkdtempSync(join(tmpdir(), 'orchestrator-rpg-'));
 const load = p => import(pathToFileURL(join(root, 'dist', p)).href);
 const { AppServices } = await load('apps/desktop/src/main/services/app-services.js');
 const { appPaths } = await load('src/runtime/paths.js');
-const services = new AppServices({paths:appPaths({...process.env, AI_ORCHESTRATOR_HOME:home})});
-const workspace = services.workspaces.createConversation({name:'Guilda de demonstração'});
+const controlled=process.argv.includes('--mission');
+const {makeAgentResult}=await load('src/agents/agent-runner.js');
+const {ProcessManager}=await load('src/process/process-manager.js');
+const childRunner=new ProcessManager();
+let workerCalls=0;
+const criterion='hello.txt contém pronto';
+const orchestrator={kind:'mock-codex',label:'Orquestrador de teste',cancel:async()=>{},healthCheck:async()=>({available:true}),run:async()=>makeAgentResult({startedAt:new Date().toISOString(),stdout:JSON.stringify({action:'delegate',task:'Crie hello.txt com o conteúdo exato pronto.',acceptanceCriteria:[criterion],fileChecks:[{path:'hello.txt',expectText:'pronto',criteria:[criterion]}],mission:{expectedResult:'Arquivo hello.txt criado e validado.',acceptanceCriteria:[criterion],evidence:['Leitura independente dos bytes do arquivo'],relevantFiles:['hello.txt'],constraints:['Somente a pasta isolada de teste'],outOfScope:['Outros arquivos e serviços externos']},summary:'Criar o arquivo e validar seu conteúdo.'})})};
+const worker={kind:'mock-claude',label:'Programador de teste',cancel:()=>childRunner.cancelAll(),healthCheck:async()=>({available:true}),run:async input=>{
+  workerCalls++;
+  const startedAt=new Date().toISOString();
+  const result=await childRunner.run({command:process.execPath,args:['-e',"require('fs').writeFileSync('hello.txt','pronto');console.log('Arquivo criado. Conteúdo: pronto.');"],cwd:input.workingDirectory,timeoutMs:10000});
+  return makeAgentResult({startedAt,...result});
+}};
+const services = new AppServices({paths:appPaths({...process.env, AI_ORCHESTRATOR_HOME:home}),...(controlled?{createRunners:async()=>({orchestrator,worker,workerAccountId:null}),orchestration:{maxIterations:3}}:{})});
+const scratch=join(home,'scratch');if(controlled)mkdirSync(scratch,{recursive:true});
+const workspace = controlled ? services.workspaces.create({name:'Missão controlada · arquivo e validação',localPath:scratch}) : services.workspaces.createConversation({name:'Guilda de demonstração'});
 const projects = [];
 for (let i = 0; i < 4; i++) projects.push(services.projects.create({name:['Portal da guilda','Biblioteca de agentes','Mapa de execução','Oficina de interfaces'][i],workspaceId:workspace.id}));
 const project = projects[0];
 const session = services.database.chat.createSession({id:'overflow-session',workspaceId:workspace.id,projectId:project.id,title:'Uma nova jornada'});
-const runId = 'overflow-run';
+let runId = 'overflow-run';
+if(!controlled) {
 services.database.runs.create({id:runId,sessionId:session.id,workspaceId:workspace.id,objective:'Revisar o mapa de execução · demonstração',orchestratorAgentId:null,maxIterations:3});
 services.database.runs.setStatus(runId,'RUNNING');
 services.database.chat.addMessage({sessionId:session.id,runId,author:'user',body:'Revisar o mapa de execução · demonstração'});
@@ -32,6 +47,7 @@ for(let i=0;i<3;i++) services.database.runs.recordInvocation({runId,iteration:1,
 services.database.runs.addStep({runId,iteration:1,phase:'evidence',status:'read',summary:'Evidência de demonstração — sem chamada a provedores'});
 services.database.chat.addMessage({sessionId:session.id,runId,author:'orchestrator',body:'Análise de demonstração concluída.\n'+ 'Os agentes verificaram a organização visual e as conexões entre as etapas. '.repeat(5)+'\nEVIDENCIA_COMPLETA_PRESERVADA'});
 services.database.runs.setStatus(runId,'DONE','Jornada de demonstração concluída. Nenhum provedor foi chamado.');
+}
 const account = services.accounts.create('Overflow CLI','anthropic');
 services.agents.create({name:'Overflow agent',role:'CODING_WORKER',provider:'anthropic',accountId:account.id,model:'sonnet',reasoning:'medium',maxCapability:'BALANCED',maxReasoning:'MEDIUM',enabled:true});
 services.database.accounts.create({id:'overflow-api',providerId:'anthropic',displayName:'Overflow API',profileDirectory:join(home,'api-profile'),connectionKind:'api'});
@@ -42,6 +58,17 @@ const names=['Mago da estratégia','Ferreiro do código','Sábio da revisão','A
 const guildAgents=[];
 for(let i=0;i<roles.length;i++) guildAgents.push(services.agents.create({name:names[i],role:roles[i],provider:'openai',accountId:guildAccount.id,model:null,reasoning:null,maxCapability:'BALANCED',maxReasoning:'MEDIUM',enabled:true}));
 services.database.workspaces.setTeam(workspace.id, {agentId:guildAgents[0].id}, guildAgents.slice(1,4).map(a=>({agentId:a.id})));
+if(controlled) {
+  services.agents.sync();
+  const defaults=services.database.agents.list().filter(a=>!JSON.parse(a.runtime_options ?? '{}').managed);
+  services.database.workspaces.setTeam(workspace.id,{agentId:defaults.find(a=>a.role==='ORCHESTRATOR'&&a.account_id===null).id},[{agentId:defaults.find(a=>a.role==='CODING_WORKER').id}]);
+  const run=services.orchestration.start({sessionId:session.id,objective:'Crie hello.txt com pronto e valide seu conteúdo.'});runId=run.id;
+  const ended=await services.orchestration.waitFor(run.id);
+  assert.equal(ended.status,'DONE',ended.summary);assert.equal(workerCalls,1);assert.equal(readFileSync(join(scratch,'hello.txt'),'utf8'),'pronto');
+  const detail=services.orchestration.detail(run.id);
+  assert.equal(detail.executionEvents.filter(e=>e.type==='FINAL_RESPONSE').length,1);
+  writeFileSync(join(output,'controlled-run.json'),JSON.stringify({provider:'deterministic test adapters; real worker subprocess and file verification',workerCalls,detail},null,2));
+}
 await services.shutdown();
 
 const port = await new Promise(resolvePort => { const server=createServer(); server.listen(0,'127.0.0.1',()=>{const p=server.address().port;server.close(()=>resolvePort(p));}); });
@@ -89,7 +116,8 @@ try {
   await send('Emulation.setDeviceMetricsOverride',{width:1440,height:960,deviceScaleFactor:1,mobile:false});
   await delay(400);await click('button[aria-label="Ajustar à tela"]');
   await delay(400);await saveScreenshot('worktree');
-  if(!process.argv.includes('--baseline')) {
+  const treeSources=await evaluate('[...document.querySelectorAll(".execution-node[data-source-ids]")].flatMap(e=>e.dataset.sourceIds.split(","))');
+  if(!controlled&&!process.argv.includes('--baseline')) {
     const positions = await evaluate('[...document.querySelectorAll(".execution-node")].map(e=>({id:e.dataset.nodeId,x:parseFloat(e.style.left),y:parseFloat(e.style.top)}))');
     const start = positions.find(n=>n.id==='run:'+"overflow-run");
     const end = positions.find(n=>n.id==='end:'+"overflow-run");
@@ -119,10 +147,21 @@ try {
   await click('.run-view-tabs button:nth-child(2)');
   await waitFor('document.body.innerText.includes("Activity") || document.body.innerText.includes("Registro da missão")');
   await saveScreenshot('activity');
+  if(controlled) {
+    await evaluate("[...document.querySelectorAll('.execution-journal [data-trace-id]')].find(e=>e.dataset.traceId.endsWith(':plan')).scrollIntoView({block:'start'});true");await delay(200);await saveScreenshot('linear-plan');
+    const visibleSources=await evaluate('[...document.querySelectorAll(".execution-journal [data-source-ids]")].flatMap(e=>e.dataset.sourceIds.split(","))');
+    const saved=JSON.parse(readFileSync(join(output,'controlled-run.json'),'utf8')).detail.executionEvents;
+    assert.ok(visibleSources.every(id=>saved.some(e=>e.id===id)),'journal uses only persisted event IDs');
+    assert.deepEqual([...visibleSources].sort(),[...treeSources].sort(),'tree and journal render the exact same persisted sources after restart');
+    assert.equal(await evaluate('document.querySelectorAll(".execution-journal .trace-final").length'),1);
+    checks.push('real subprocess creates file once; independent bytes match; journal reads persisted execution events');
+    await evaluate('document.querySelector(".execution-journal .trace-final").scrollIntoView({block:"end"});true');await delay(200);await saveScreenshot('linear-final');
+  }
   assert.equal(await evaluate('document.body.innerText.includes("EVIDENCIA_COMPLETA_PRESERVADA")'),false,'full response starts collapsed');
-  await evaluate('[...document.querySelectorAll("button")].find(b=>b.textContent==="Ver resposta completa").setAttribute("data-rpg-expander","true");true');
+  await evaluate('document.querySelector(".execution-journal .trace-final button").setAttribute("data-rpg-expander","true");true');
+  await reveal('[data-rpg-expander]');
   await click('[data-rpg-expander]');
-  assert.equal(await evaluate('document.body.innerText.includes("EVIDENCIA_COMPLETA_PRESERVADA")'),true,'expanding preserves full response');
+  assert.equal(await evaluate('document.body.innerText.includes('+JSON.stringify(controlled?'Resultados completos:':'EVIDENCIA_COMPLETA_PRESERVADA')+')'),true,'expanding preserves full response');
   await saveScreenshot('response-expanded');await click('[data-rpg-expander]');
   assert.equal(await evaluate('document.body.innerText.includes("EVIDENCIA_COMPLETA_PRESERVADA")'),false,'response collapses again');
   checks.push('brief response expands to the complete original text and collapses again');

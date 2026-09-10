@@ -1,3 +1,5 @@
+import { ExecutionEventRepository, encodeEventData } from './execution-events.js';
+import { traceSummary, type EventInput, type ExecutionEvent } from '../execution/events.js';
 /**
  * Repositories for the entities the desktop application works with.
  *
@@ -1551,10 +1553,11 @@ export class ChatRepository extends Repository {
 
 /** The statuses a run never leaves. */
 export function isTerminalStatus(status: string): boolean {
-  return status === 'DONE' || status === 'FAILED' || status === 'CANCELLED';
+  return status === 'PARTIAL' || status === 'DONE' || status === 'FAILED' || status === 'CANCELLED';
 }
 
 export type RunStatus =
+  | 'PARTIAL'
   | 'PENDING'
   | 'RUNNING'
   | 'DONE'
@@ -1617,6 +1620,62 @@ export interface RunStepRecord extends SqlRow {
 }
 
 export class RunRepository extends Repository {
+  event(input: EventInput): string { return new ExecutionEventRepository(this.db).append(input); }
+  events(runId: string): ExecutionEvent[] { return new ExecutionEventRepository(this.db).list(runId); }
+
+  /** Upgrade old history once from recorded facts, never from renderer memory. */
+  ensureExecutionEvents(runId: string): void {
+    if(this.events(runId).length) return;
+    this.db.transaction(()=>{
+      const run=this.require(runId);
+      this.event({runId,key:'objective',type:'USER_OBJECTIVE',iteration:0,role:'USER',status:'completed',timestamp:run.started_at,summary:run.objective,data:{fullOutput:run.objective,legacy:true}});
+      const pending:EventInput[]=[];
+      const parseLegacy=(value:unknown):Record<string,unknown>=>{try{return JSON.parse(String(value ?? '{}'));}catch{return {};}};
+      for(const row of this.invocations(runId)) {
+        const snapshot=parseLegacy(row.agent_snapshot);
+        const report=parseLegacy(row.report_json);
+        const invocationId=String(row.id),iteration=Number(row.iteration),role=String(snapshot.role ?? row.role);
+        const identity={runId,iteration,invocationId,role,agentId:row.agent_id as string|null};
+        if(row.role==='CODING_WORKER') pending.push({...identity,key:'delegation:'+invocationId,type:'DELEGATION_STARTED',status:'completed',timestamp:String(row.started_at),parentId:runId+':objective',summary:String(row.task ?? 'Delegação registrada'),data:{fullOutput:row.task,agentName:snapshot.name,legacy:true}});
+        pending.push({...identity,key:'inv:'+invocationId,type:'AGENT_STARTED',status:'running',timestamp:String(row.started_at),parentId:row.role==='CODING_WORKER'?runId+':delegation:'+invocationId:runId+':objective',summary:row.role==='ORCHESTRATOR'?'Coordenação registrada':'Execução registrada',data:{agentName:snapshot.name,workerId:row.worker_id,legacy:true}});
+        if(row.outcome!=='running') pending.push({...identity,key:'result:'+invocationId,type:'AGENT_RESULT',status:String(row.outcome),timestamp:String(row.finished_at ?? row.started_at),parentId:runId+':inv:'+invocationId,summary:String(report.headline ?? row.outcome),data:{fullOutput:report.declared ?? row.task,report,legacy:true}});
+      }
+      for(const step of this.steps(runId).filter(s=>['evidence','verification','file-check','done-gate','task-join'].includes(s.phase)))pending.push({runId,key:'step:'+step.id,type:step.phase==='done-gate'||step.phase==='task-join'?'REVIEW_RESULT':'EVIDENCE_CREATED',iteration:step.iteration,status:step.status,timestamp:step.started_at,summary:step.summary ?? step.phase,parentId:runId+':objective',data:{fullOutput:step.summary,phase:step.phase,legacy:true}});
+      pending.sort((a,b)=>(a.timestamp ?? '').localeCompare(b.timestamp ?? '')).forEach(e=>this.event(e));
+      if(!['RUNNING','PENDING'].includes(run.status))this.finalResponse(runId,run.status,run.termination_reason ?? 'Execução histórica encerrada.');
+    });
+  }
+
+  /** Exactly one final per terminal run, in the same transaction as its status. */
+  private finalResponse(runId: string, status: string, reason: string): void {
+    const run=this.require(runId), events=this.events(runId);
+    const candidate=events.filter(e=>e.type==='REVIEW_REQUESTED' && e.iteration===run.iteration && e.data.proposedAnswer).at(-1);
+    const reports=events.filter(e=>e.type==='AGENT_RESULT');
+    const evidence=events.filter(e=>e.type==='EVIDENCE_CREATED');
+    const reviews=events.filter(e=>e.type==='REVIEW_RESULT');
+    const titles:Record<string,string>={DONE:'✓ Missão concluída',PARTIAL:'⚠ Parcialmente concluído',NEEDS_HUMAN:'Preciso de você para continuar.',BLOCKED:'Execução bloqueada.',FAILED:'A execução falhou.',CANCELLED:'Execução cancelada.'};
+    const historicalAnswer=this.db.get<{body:string}>("SELECT body FROM messages WHERE run_id=? AND author='orchestrator' AND COALESCE(json_extract(payload,'$.kind'),'') NOT IN ('final','pause') ORDER BY created_at DESC LIMIT 1",[runId])?.body;
+    const answer=status==='DONE' ? candidate ? String(candidate.data.proposedAnswer) : historicalAnswer ?? reason : reason;
+    const gate=reviews.filter(e=>Array.isArray(e.data.criteria)).at(-1);
+    const criteria=(gate?.data.criteria ?? ((events.find(e=>e.type==='PLAN_CREATED')?.data.criteria ?? []) as string[]).map(text=>({text,status:'unknown'}))) as {text:string;status:string}[];
+    const checks=(gate?.data.verification ?? []) as {exitCode:number|null;refused?:string}[];
+    const files=(gate?.data.fileChecks ?? []) as {passed:boolean}[];
+    const passed=checks.filter(c=>c.exitCode===0&&!c.refused).length+files.filter(c=>c.passed).length;
+    const pending=criteria.filter(c=>c.status!=='satisfied').map(c=>c.text);
+    const summary=status==='CANCELLED' ? titles.CANCELLED! : titles[status]+'\n'+traceSummary(answer,300)+(passed?'\nValidação: '+passed+' verificações aprovadas.':'')+(pending.length?'\nPendente: '+traceSummary(pending.join('; '),100):'');
+    const fullOutput=[titles[status],answer,'','Objetivo: '+run.objective,'',...reports.map(e=>e.summary),...evidence.map(e=>e.summary),...reviews.map(e=>e.summary),'','Critérios:',...criteria.map(c=>c.status+': '+c.text),'','Resultados completos:',...reports.filter(e=>e.role!=='ORCHESTRATOR').map(e=>String(e.data.fullOutput ?? e.summary))].join('\n');
+    // Cancellation may win a race against a just-published terminal result.
+    this.db.run("DELETE FROM execution_events WHERE run_id=? AND type='FINAL_RESPONSE'",[runId]);
+    this.event({runId,key:'final',type:'FINAL_RESPONSE',iteration:run.iteration,status,summary,
+      parentId:events.filter(e=>e.type!=='FINAL_RESPONSE').at(-1)?.id ?? null,
+      data:{objective:run.objective,fullOutput,criteria,pending,verification:checks,fileChecks:files,results:reports.map(e=>e.id),evidence:evidence.map(e=>e.id),reviews:reviews.map(e=>e.id)}});
+    if(run.session_id) {
+      this.db.run("DELETE FROM messages WHERE run_id=? AND json_extract(payload,'$.kind')='final'",[runId]);
+      this.db.run("INSERT INTO messages (id,session_id,run_id,author,body,payload,created_at,kind) VALUES (?,?,?,?,?,?,?,'text')",
+        [newId('msg'),run.session_id,runId,'orchestrator',redact(summary),JSON.stringify({kind:'final',status}),now()]);
+    }
+  }
+
   create(input: {
     id: string;
     sessionId: string | null;
@@ -1643,6 +1702,7 @@ export class RunRepository extends Repository {
         input.kind ?? 'coding',
       ],
     );
+    this.event({runId:input.id,key:'objective',type:'USER_OBJECTIVE',iteration:0,role:'USER',status:'completed',summary:input.objective,data:{fullOutput:input.objective}});
     return this.require(input.id);
   }
 
@@ -1688,8 +1748,16 @@ export class RunRepository extends Repository {
    * a person's decision outranks a result that arrived after it.
    */
   setStatus(id: string, status: RunStatus, terminationReason?: string | null): void {
+    this.db.transaction(() => {
+    this.ensureExecutionEvents(id);
     const current = this.db.get<{ status: string }>('SELECT status FROM runs WHERE id = ?', [id]);
-    if (current && isTerminalStatus(current.status) && status !== 'CANCELLED') return;
+    if (current && isTerminalStatus(current.status) && (status !== 'CANCELLED' || current.status==='CANCELLED')) return;
+    if(status==='RUNNING' && current?.status==='NEEDS_HUMAN') {
+      // A human-authorised continuation retains the pause in the trace, while
+      // reserving FINAL_RESPONSE for the current terminal outcome.
+      this.db.run("UPDATE execution_events SET type='NEEDS_HUMAN',id=id||':pause:'||sequence WHERE run_id=? AND type='FINAL_RESPONSE'",[id]);
+      this.db.run("UPDATE messages SET payload=json_set(payload,'$.kind','pause') WHERE run_id=? AND json_extract(payload,'$.kind')='final'",[id]);
+    }
     const stopped = status !== 'RUNNING' && status !== 'PENDING';
     const finished = stopped ? now() : null;
     this.db.run(
@@ -1704,7 +1772,10 @@ export class RunRepository extends Repository {
       const pending = this.db.all("SELECT id FROM agent_invocations WHERE run_id = ? AND outcome = 'running'", [id]);
       for (const _ of pending) this.addConsumption(id, null);
       this.db.run("UPDATE agent_invocations SET outcome = ?, finished_at = ? WHERE run_id = ? AND outcome = 'running'", [status === 'CANCELLED' ? 'cancelled' : 'stopped', finished, id]);
+      this.db.run("UPDATE execution_events SET status=? WHERE run_id=? AND type='AGENT_PROGRESS' AND status='running'",[status==='CANCELLED'?'cancelled':'stopped',id]);
+      this.finalResponse(id,status,terminationReason ?? this.require(id).termination_reason ?? 'Sem resumo registrado.');
     }
+    });
   }
 
   /** Records that a person asked for this run to stop. Idempotent. */
@@ -1802,6 +1873,7 @@ export class RunRepository extends Repository {
     /** How long this phase took, measured from the end of the previous step. */
     durationMs?: number | null;
   }): number {
+    this.ensureExecutionEvents(input.runId);
     const result = this.db.run(
       `INSERT INTO run_steps (run_id, iteration, phase, status, summary, detail, started_at, finished_at, duration_ms)
        VALUES (?,?,?,?,?,?,?,?,?)`,
@@ -1817,6 +1889,20 @@ export class RunRepository extends Repository {
         input.durationMs ?? null,
       ],
     );
+    // DoneGate is published once by the service with its complete criteria and
+    // verification data; its diagnostic step must not create a second review.
+    const phases:Record<string,ExecutionEvent['type']>={evidence:'EVIDENCE_CREATED',verification:'EVIDENCE_CREATED','file-check':'EVIDENCE_CREATED','file-read':'EVIDENCE_CREATED','query-evidence':'EVIDENCE_CREATED','task-join':'REVIEW_RESULT','task-blocked':'BLOCKED','task-conflict':'BLOCKED','no-progress':'BLOCKED',progress:'BLOCKED',criteria:'EVIDENCE_CREATED',permission:'NEEDS_HUMAN'};
+    const type=phases[input.phase];
+    let measured:Record<string,unknown>={};
+    if(input.phase==='evidence'&&input.detail) {try{measured=JSON.parse(input.detail);}catch{measured={fullOutput:input.detail};}}
+    if(type) {
+      const previous=this.events(input.runId).filter(e=>e.type!=='FINAL_RESPONSE').at(-1);
+      this.event({runId:input.runId,key:'step:'+result.lastInsertRowid,type,iteration:input.iteration,status:input.status,summary:input.summary ?? input.phase,parentId:previous?.id ?? null,data:{phase:input.phase,fullOutput:input.summary ?? '',...measured}});
+    }
+    if(type) {
+      const run=this.require(input.runId);
+      if(!['PENDING','RUNNING'].includes(run.status))this.finalResponse(run.id,run.status,run.termination_reason ?? 'Execução encerrada.');
+    }
     return Number(result.lastInsertRowid);
   }
 
@@ -1891,6 +1977,7 @@ export class RunRepository extends Repository {
     } | null;
   }): string {
     const id = input.id ?? newId('inv');
+    if(input.outcome==='running' && this.cancelRequested(input.runId))throw new Error('Execução cancelada; novas invocações recusadas.');
     const previousSnapshot=this.db.get<{agent_snapshot:string|null}>('SELECT agent_snapshot FROM agent_invocations WHERE id=?',[id])?.agent_snapshot;
     const snapshotAgent=input.agentId?this.db.get<{display_name:string;role:string;provider_id:string;adapter_id:string}>('SELECT display_name,role,provider_id,adapter_id FROM agents WHERE id=?',[input.agentId]):undefined;
     const snapshotAccount=input.accountId?this.db.get<{display_name:string}>('SELECT display_name FROM accounts WHERE id=?',[input.accountId]):undefined;
@@ -1949,6 +2036,18 @@ export class RunRepository extends Repository {
     if (routing?.observation) this.db.run('UPDATE agent_invocations SET routing_observation=? WHERE id=?',[JSON.stringify(routing.observation),id]);
     this.db.run('UPDATE agent_invocations SET agent_snapshot=? WHERE id=?',[agentSnapshot,id]);
     if (input.outcome !== 'running') this.addConsumption(input.runId, usage);
+    const role=snapshotAgent?.role ?? input.role;
+    const startKey='inv:'+id;
+    const taskStep=this.db.get<{detail:string}>("SELECT detail FROM run_steps WHERE run_id=? AND iteration=? AND phase='task-start' AND json_extract(detail,'$.workerId')=? ORDER BY id DESC LIMIT 1",[input.runId,input.iteration,input.workerId ?? '']);
+    const taskContext=taskStep?JSON.parse(taskStep.detail):{};
+    const latest=this.events(input.runId).filter(e=>['PLAN_CREATED','REVIEW_REQUESTED','REVIEW_RESULT'].includes(e.type)).at(-1);
+    const parentId=latest?.id ?? input.runId+':objective';
+    if(input.role==='CODING_WORKER') {
+      this.event({runId:input.runId,key:'selected:'+id,type:'AGENT_SELECTED',iteration:input.iteration,agentId:input.agentId,invocationId:id,role,status:'selected',summary:snapshotAgent?.display_name ?? input.workerId ?? role,parentId});
+      this.event({runId:input.runId,key:'delegation:'+id,type:'DELEGATION_STARTED',iteration:input.iteration,agentId:input.agentId,invocationId:id,role,status:'completed',summary:input.task ?? 'Missão delegada',parentId,data:{taskId:taskContext.taskId,dependsOn:taskContext.dependsOn,workerId:input.workerId,fullOutput:input.task,agentName:snapshotAgent?.display_name ?? input.workerId}});
+    }
+    this.event({runId:input.runId,key:startKey,type:'AGENT_STARTED',iteration:input.iteration,agentId:input.agentId,invocationId:id,role,status:'running',summary:input.role==='ORCHESTRATOR'?'Orquestrador coordenando…':(snapshotAgent?.display_name ?? input.workerId ?? 'Agente')+' executando…',timestamp:input.startedAt,parentId:input.role==='CODING_WORKER'?input.runId+':delegation:'+id:parentId,data:{taskId:taskContext.taskId,dependsOn:taskContext.dependsOn,workerId:input.workerId,agentName:snapshotAgent?.display_name}});
+    if(input.outcome!=='running') this.event({runId:input.runId,key:'result:'+id,type:'AGENT_RESULT',iteration:input.iteration,agentId:input.agentId,invocationId:id,role,status:input.outcome,summary:input.role==='ORCHESTRATOR'?'Decisão recebida.':input.outcome==='completed'?'Execução retornou ao Orquestrador.':input.failureKind ?? input.outcome,parentId:input.runId+':'+startKey,data:{workerId:input.workerId,agentName:snapshotAgent?.display_name,exitCode:input.exitCode,failureKind:input.failureKind}});
     return id;
   }
 
@@ -1990,8 +2089,12 @@ export class RunRepository extends Repository {
    * verifications it ran. Redacted like every other stored diagnostic.
    */
   setInvocationReport(invocationId: string, report: unknown): void {
+    const r=report as Record<string,unknown>;
+    const event=this.db.get<{data:string}>("SELECT data FROM execution_events WHERE invocation_id=? AND type='AGENT_RESULT'",[invocationId]);
+    if(event) this.db.run("UPDATE execution_events SET summary=?,data=?,status=? WHERE invocation_id=? AND type='AGENT_RESULT'",[
+      redact(traceSummary(String(r.headline ?? 'Resultado recebido'))),encodeEventData({...JSON.parse(event.data),summary:r.headline,status:r.status,evidence:r.evidenceFiles,changes:r.evidenceFiles,risks:r.errors,recommendation:r.recommendation,fullOutput:r.declared,report:r}),String(r.status ?? 'completed'),invocationId]);
     this.db.run('UPDATE agent_invocations SET report_json = ? WHERE id = ?', [
-      redact(JSON.stringify(report)),
+      encodeEventData(report),
       invocationId,
     ]);
   }

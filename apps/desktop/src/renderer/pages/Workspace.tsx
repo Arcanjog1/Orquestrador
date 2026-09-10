@@ -1,3 +1,4 @@
+import { ExecutionJournal } from '@/components/orch/ExecutionJournal';
 import { GuildTeam } from '@/components/orch/GuildTeam';
 import { GuildBanner, HeroPortrait } from '@/components/orch/HeroPortrait';
 import {AgentCallDetails} from '@/components/orch/AgentCallDetails';
@@ -1045,7 +1046,7 @@ export function WorkspacePage({
 
         <nav className="run-view-tabs" aria-label="Visualização da execução">
           <button aria-pressed={view === 'worktree'} onClick={()=>setView('worktree')}>Worktree</button>
-          <button aria-pressed={view === 'timeline'} onClick={()=>setView('timeline')}>Execução linear</button>
+          <button aria-pressed={view === 'timeline'} onClick={()=>setView('timeline')}>Raciocínio em linha</button>
           <button onClick={()=>setEvidenceOpen(true)}>Arquivos</button>
           <button onClick={()=>setDiffOpen(true)}>Diff</button>
           <select aria-label="Execução no histórico" value={historyDetail?.run.id ?? ''} onChange={e=>void openHistoricalRun(e.target.value)}><option value="">Execução atual</option>{historyRuns.map(r=><option key={r.id} value={r.id}>{r.status} · {r.objective.slice(0,55)}</option>)}</select><span>{historyDetail?.run.objective ?? run?.objective}</span>
@@ -1054,7 +1055,7 @@ export function WorkspacePage({
         <div className="mission-workspace relative flex min-h-0 flex-1">
         {view === 'worktree' && (historyDetail || (runDetail && runDetail.run.id === run?.id)) ? (
           <ExecutionWorktree detail={(historyDetail ?? runDetail)!} messages={historyDetail ? historyMessages : messages} onEvidence={()=>historyDetail ? setDetailRunId(historyDetail.run.id) : setEvidenceOpen(true)} onDiff={historyDetail ? undefined : ()=>setDiffOpen(true)} onReview={historyDetail ? undefined : ()=>void resolveHumanReview('Continuar')} onCancel={historyDetail ? undefined : ()=>setCancelOpen(true)} onCancelTask={historyDetail ? undefined : (taskId)=>{if(run) void api.run.cancelTask({runId:run.id,taskId}).catch(fail);}}/>
-        ) : <div className="min-w-0 flex-1 overflow-y-auto">
+        ) : (historyDetail ?? runDetail)?.executionEvents?.length ? <ExecutionJournal detail={(historyDetail ?? runDetail)!} onOpenRunDetail={setDetailRunId}/> : <div className="min-w-0 flex-1 overflow-y-auto">
             {entries.length === 0 ? (
               <EmptyState onSubmit={(text) => void send(text)} />
             ) : (
@@ -1125,6 +1126,7 @@ export function WorkspacePage({
           {!historyDetail && (activityOpen ? (
             <div className="guild-activity-dock">
               <ActivityPanel
+                detail={runDetail?.run.id===run?.id?runDetail ?? undefined:undefined}
                 records={runDetail?.run.id === run?.id ? runDetail?.invocations : []}
                 state={runState}
                 iteration={iteration}

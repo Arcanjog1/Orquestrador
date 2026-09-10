@@ -724,7 +724,12 @@ test('a database from before the project became the entity upgrades with every r
       assert.equal(reopened.schemaVersion, SCHEMA_VERSION);
       assert.equal(reopened.projects.require('proj-1').name, 'Projeto Antigo');
       assert.equal(reopened.projectContext.list('proj-1').length, 1);
-      assert.equal(reopened.chat.countMessages('chat-1'), 1);
+      // Recording new evidence on the terminal legacy run consolidates one final
+      // response; the original message remains intact across the reopen.
+      assert.equal(reopened.chat.countMessages('chat-1'), 2);
+      assert.equal(reopened.driver.get('SELECT body FROM messages WHERE id=?', ['msg-1'])!.body, 'olá');
+      assert.equal(reopened.runs.events('run-1').filter(e=>e.type==='FINAL_RESPONSE').length, 1);
+      assert.equal(reopened.runs.events('run-1').filter(e=>e.type==='AGENT_STARTED').length, 1);
     } finally {
       reopened.close();
     }

@@ -1,3 +1,4 @@
+import { executionTrace } from './execution-trace.js';
 import type {
   ChatMessageView,
   RunDetailView,
@@ -65,6 +66,7 @@ export function executionGraph(
   detail: RunDetailView,
   messages: readonly ChatMessageView[] = [],
 ): ExecutionGraph {
+  if(detail.executionEvents?.length) return executionTrace(detail);
   const { run } = detail;
   const terminal = isRunOver(run.status);
   const nodes: ExecutionNode[] = [];

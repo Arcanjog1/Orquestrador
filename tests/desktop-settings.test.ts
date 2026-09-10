@@ -74,8 +74,8 @@ test('execution.maxIterations from the settings table bounds the next run, and o
       await fixture.router.handle('chat.sendMessage', { sessionId: session.id, text: 'nunca termina' }),
     );
     let run = await fixture.services.orchestration.waitFor(sent.run.id, 60_000);
-    assert.equal(run.status, 'FAILED');
-    assert.equal(run.failureKind, 'limit');
+    assert.equal(run.status, 'PARTIAL', 'measured changes survive an exhausted iteration budget');
+    assert.equal(run.failureKind, null);
     assert.equal(run.iterations, 2);
     assert.match(run.summary ?? '', /Limite de 2 iterações/);
 

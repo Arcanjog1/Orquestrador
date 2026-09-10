@@ -1,3 +1,4 @@
+import { MISSION_SCHEMA } from './mission-brief.js';
 /**
  * The JSON Schema for an orchestrator decision.
  *
@@ -23,7 +24,7 @@
 import { ALLOWED_ACTIONS } from './decision-parser.js';
 import { CAPABILITY_TIERS, REASONING_TIERS } from '../routing/tiers.js';
 
-export const DECISION_SCHEMA_VERSION = 9;
+export const DECISION_SCHEMA_VERSION = 10;
 
 /** The tiers as the decision JSON spells them (lowercase). */
 export const WIRE_CAPABILITIES = CAPABILITY_TIERS.map((tier) => tier.toLowerCase());
@@ -34,6 +35,7 @@ export const DECISION_JSON_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: [
+    'mission',
     'action',
     'task',
     'acceptanceCriteria',
@@ -53,9 +55,10 @@ export const DECISION_JSON_SCHEMA = {
     'delegations',
   ],
   properties: {
+    mission: MISSION_SCHEMA,
     delegations: { type: ['array', 'null'], description: 'Optional explicit DAG, maximum 8 tasks. Independent tasks run concurrently only with isolated workers. Dependencies name task ids within this batch. Never omit a real dependency.', items: {
-      type: 'object', additionalProperties: false, required: ['taskKind','taskId','workerId','task','dependsOn','requiresTools'],
-      properties: { taskKind:{type:['string','null']}, taskId: {type:'string'}, workerId:{type:'string'}, task:{type:'string'}, dependsOn:{type:'array',items:{type:'string'}}, requiresTools:{type:'boolean'} },
+      type: 'object', additionalProperties: false, required: ['mission','taskKind','taskId','workerId','task','dependsOn','requiresTools'],
+      properties: { mission:MISSION_SCHEMA, taskKind:{type:['string','null']}, taskId: {type:'string'}, workerId:{type:'string'}, task:{type:'string'}, dependsOn:{type:'array',items:{type:'string'}}, requiresTools:{type:'boolean'} },
     } },
     queryProof: {
       type: ['object', 'null'], additionalProperties: false, required: ['criteria', 'citations'],

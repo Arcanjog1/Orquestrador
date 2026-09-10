@@ -124,6 +124,7 @@ import type { CapabilityTier, ReasoningTier, WorkerRequirements } from '../routi
 
 /** A decision returned by the orchestrator agent, after validation. */
 export interface Decision {
+  mission?: import('../orchestrator/mission-brief.js').MissionBrief;
   action: DecisionAction;
   /** Present (and required) when `action === 'delegate'`. */
   task?: string;

@@ -1,4 +1,6 @@
+import { parseMission, type MissionBrief } from './mission-brief.js';
 export interface DelegationTask {
+  mission?: MissionBrief;
   taskKind?: string;
   taskId: string;
   workerId: string;
@@ -20,6 +22,7 @@ export function validateDelegations(value: unknown): DelegationTask[] {
       Object.keys(row).some(
         (k) =>
           ![
+            "mission",
             "taskKind",
             "taskId",
             "workerId",
@@ -48,8 +51,10 @@ export function validateDelegations(value: unknown): DelegationTask[] {
       throw new Error(
         "Each task needs workerId, task, dependsOn and requiresTools.",
       );
+    const mission=parseMission(row.mission);
     ids.add(row.taskId);
     return {
+      ...(mission ? {mission} : {}),
       ...(typeof row.taskKind==='string'?{taskKind:row.taskKind}:{}),
       taskId: row.taskId,
       workerId: row.workerId,

@@ -1137,7 +1137,7 @@ test('projects: the sidebar files conversations under real projects, and a move 
   }
 });
 
-test('a run that cannot start says which account is missing, and "Detalhes" shows the record', async () => {
+test('a run that cannot start names the missing account and exposes its record from the journal', async () => {
   const window = await openWindow();
   const dir = mkdtempSync(join(tmpdir(), 'lao-electron-run-'));
   try {
@@ -1179,12 +1179,13 @@ test('a run that cannot start says which account is missing, and "Detalhes" show
 
     await waitForText(window, /Conecte a conta|não está configurado/, 20000);
     assert.ok(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=execution-worktree]')"));
-    await window.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent==='Execução linear').click()");
-    const card = await waitForText(window, /A execução não pôde começar/, 20_000);
+    await window.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent==='Raciocínio em linha').click()");
+    const card = await waitForText(window, /A execução falhou/, 20_000);
     assert.doesNotMatch(card, /Sem progresso detectado/, 'a readiness refusal is not "no progress"');
     assert.match(card, /não está configurado|Conecte a conta/);
 
-    await click(window, 'run-failed-details');
+    assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('.execution-journal .trace-final').length"), 1);
+    await click(window, 'trace-run-details');
     // The dialog opens before the record arrives ("Lendo o registro..."):
     // wait for the record itself, not for the dialog's title.
     const detail = await waitForText(window, /Detalhes da execução[\s\S]*\bFAILED\b/, 10_000);

@@ -1,3 +1,5 @@
+import { encodeEventData } from '../../../../../src/database/execution-events.js';
+import { DelegationProgressGuard, progressFingerprint } from '../../../../../src/orchestrator/progress-guard.js';
 import { roleDefinition, type TaskKind } from '../../shared/agent-policy.js';
 import { agentConfig, AgentService } from './agent-service.js';
 import { AgentExecutionPolicy } from './agent-execution-policy.js';
@@ -795,6 +797,7 @@ export class OrchestrationService {
    * invocations, verification results. What "Detalhes" shows.
    */
   detail(runId: string): RunDetailView {
+    this.database.runs.ensureExecutionEvents(runId);
     const run = this.database.runs.require(runId);
     // The provider sessions this conversation is continuing, with the name of
     // the connection each belongs to. A session created by `claude -p` is
@@ -806,13 +809,13 @@ export class OrchestrationService {
           connectionName: this.database.accounts.find(session.connection_id)?.display_name ?? null,
         }))
       : [];
-    return toRunDetailView(
+    return {...toRunDetailView(
       run,
       this.database.runs.steps(runId),
       this.database.runs.invocations(runId),
       this.database.runs.verifications(runId),
       sessions,
-    );
+    ), executionEvents: this.database.runs.events(runId)};
   }
 
   // -- the loop ------------------------------------------------------------
@@ -1109,7 +1112,7 @@ export class OrchestrationService {
     const batchSignatures = new Set<string>();
     let unresolvedDelegations = false;
     const rejectedProgress = new RejectedProgressGuard();
-    const displayedDoneAnswers = new Set<string>();
+    const delegationGuard = new DelegationProgressGuard();
     const stopRepeatedRejection=(gate:import('../core.js').DoneGateResult, record:IterationRecord, fresh:GitEvidence):boolean=>{
       if(mechanicalGateFailure(gate))for(const attempts of attemptsByWorker.values()) {
         const last=attempts.at(-1);if(last)last.mechanical=true;
@@ -1222,13 +1225,20 @@ export class OrchestrationService {
         correlationId: runCorrelation,
       });
       ledger.add(decision.acceptanceCriteria, iteration);
+      if(decision.mission) {ledger.add(decision.mission.acceptanceCriteria,iteration);decision.acceptanceCriteria=[...new Set([...decision.acceptanceCriteria,...decision.mission.acceptanceCriteria])];}
+      for(const t of decision.delegations ?? [])ledger.add(t.mission?.acceptanceCriteria ?? [],iteration);
 
-      if (decision.summary) {
-        const answer=publicGateAnswer(decision.summary);
-        const key=equivalentAnswer(answer);
-        if(decision.action!=='done'||!displayedDoneAnswers.has(key))this.say(sessionId, runId, 'orchestrator', answer);
-        if(decision.action==='done')displayedDoneAnswers.add(key);
+      const knownPlan=this.database.runs.events(runId).find(e=>e.type==='PLAN_CREATED');
+      const missionTasks=decision.delegations?.length ? decision.delegations : decision.action==='delegate' ? [{taskId:'work',workerId:decision.workerId ?? team[0]?.id,task:decision.task,dependsOn:[]}] : [];
+      if(!knownPlan) {
+        const steps=missionTasks.length ? [...missionTasks.map(t=>t.task), 'Validar evidências e critérios de conclusão.'] : [decision.action==='done'?'Validar a resposta com as evidências disponíveis.':'Investigar o objetivo e verificar as evidências.'];
+        this.database.runs.event({runId,key:'plan',type:'PLAN_CREATED',iteration,status:'completed',parentId:this.database.runs.events(runId).filter(e=>e.type==='AGENT_RESULT').at(-1)?.id ?? runId+':objective',summary:'Plano da missão\n'+steps.map((t,i)=>(i+1)+'. '+t).join('\n'),data:{objective,steps,tasks:missionTasks,criteria:decision.acceptanceCriteria,team:missionTasks.map(t=>t.workerId)}});
       }
+      // A public decision explains the next action; the proposed answer is only
+      // promoted to FINAL_RESPONSE after DoneGate accepts it.
+      const decisionType=decision.action==='blocked' ? 'BLOCKED' : 'REVIEW_REQUESTED';
+      this.database.runs.event({runId,key:'decision:'+iteration+':'+this.database.runs.events(runId).length,type:decisionType,iteration,status:'completed',parentId:!knownPlan ? runId+':plan' : this.database.runs.events(runId).filter(e=>e.type==='AGENT_RESULT').at(-1)?.id ?? runId+':plan',summary:decision.action==='delegate'?'Próximo passo: delegar a missão.':decision.action==='done'?'Validar os critérios no DoneGate.':decision.action==='blocked'?'Avaliar o bloqueio.':'Verificar evidências.',data:{action:decision.action,criteria:decision.acceptanceCriteria,tasks:missionTasks,...(decision.action==='done'?{proposedAnswer:decision.summary}: {})}});
+      this.events.emit('run:graph',{runId});
 
       // Files the supervisor asked to *see*. The application opens them, so
       // nobody has to ask a worker to copy a file into an answer - which is
@@ -1254,6 +1264,21 @@ export class OrchestrationService {
         );
       }
       const carriedReads = iterations.flatMap(r => r.fileReads ?? []);
+      if(decision.action==='delegate') {
+        const measured=collector ? await collector.collectEvidence(baseline) : github ? await this.collectGitHubEvidence(github,signal) : null;
+        const context={tree:measured ? [measured.commit,measured.statusShort,createHash('sha256').update(measured.diff).digest('hex')] : null,
+          reads:carriedReads.map(r=>[r.request.path,r.sha256,r.ok]),
+          criteria:ledger.pending().map(c=>[c.text,c.status]),
+          results:this.database.runs.events(runId).filter(e=>e.type==='AGENT_RESULT'&&e.role!=='ORCHESTRATOR').map(e=>[e.role,e.data.workerId,e.status,equivalentAnswer(String(e.data.fullOutput ?? e.summary))]),
+          verifications:this.database.runs.verifications(runId).map(v=>[v.command,v.exit_code,v.passed,v.refused])};
+        const mission=decision.delegations?.map(t=>[t.workerId,t.task,t.requiresTools,t.dependsOn.length,t.mission]) ?? [decision.workerId ?? team[0]?.id,decision.task,decision.requiresTools,decision.mission];
+        if(!delegationGuard.admit(mission,context)) {
+          const reason='STAGNATION DETECTED: missão, contexto e resultados equivalentes. A delegação redundante foi impedida. É necessário mudar a estratégia ou fornecer uma evidência nova.';
+          this.step(runId,iteration,'no-progress','stopped',reason);
+          this.database.runs.setStatus(runId,'NEEDS_HUMAN',reason);
+          this.progress(runId,sessionId,'needs-human',reason,'NEEDS_HUMAN');return;
+        }
+      }
       // 2. Act on it.
       if (decision.action === 'blocked') {
         const reason = decision.reason ?? 'Sem motivo informado.';
@@ -1286,7 +1311,8 @@ export class OrchestrationService {
 
       if (decision.action === 'delegate' && decision.delegations?.length) {
         const tasks = decision.delegations;
-        const signature=JSON.stringify({tasks,head:github?.headCommit,reads:carriedReads.map(r=>[r.request.path,r.sha256,r.request.offsetBytes])});
+        const batchEvidence=collector ? await collector.collectEvidence(baseline) : null;
+        const signature=progressFingerprint({tasks:tasks.map(t=>[t.workerId,t.task,t.requiresTools,t.mission]),head:github?.headCommit,tree:batchEvidence ? [batchEvidence.commit,batchEvidence.diff,batchEvidence.statusShort] : null,reads:carriedReads.map(r=>[r.request.path,r.sha256,r.request.offsetBytes])});
         if(batchSignatures.has(signature)) {
           const reason='Sem progresso: o mesmo DAG foi solicitado novamente com os mesmos arquivos e commit. Revise a estratégia antes de repetir.';
           this.step(runId,iteration,'progress','stagnant',reason);
@@ -1325,7 +1351,7 @@ export class OrchestrationService {
             this.step(runId,iteration,'task-start','started',task.task,{taskId:entry.taskId,workerId:slot.id,dependsOn:task.dependsOn.map(id=>iteration+'/'+id),baseCommit});
             try {
               const spend=budget.check(); if(!spend.allowed) throw new Error(spend.reason);
-              const result = await this.delegate({runId,sessionId,workspace,cwd:taskCwd,runners,slot,iteration,branchTaskId:entry.taskId,task:task.task+'\nDEPENDENCY RESULTS: '+JSON.stringify(outcomes.filter(o=>task.dependsOn.includes(o.taskId))),decision:{...decision,task:task.task,workerId:task.workerId,requiresTools:task.requiresTools,taskKind:task.taskKind},correlationId:runCorrelation,causationId:decisionMessageId,routing:slot.routing??null,capabilities:capabilitiesOf.get(slot.id)??NO_CAPABILITIES,attempts:[],unavailableModels:[],signal,budget,github,fileReads:carriedReads});
+              const result = await this.delegate({runId,sessionId,workspace,cwd:taskCwd,runners,slot,iteration,branchTaskId:entry.taskId,task:task.task+'\nDEPENDENCY RESULTS: '+JSON.stringify(outcomes.filter(o=>task.dependsOn.includes(o.taskId))),decision:{...decision,task:task.task,workerId:task.workerId,requiresTools:task.requiresTools,taskKind:task.taskKind,mission:task.mission,acceptanceCriteria:task.mission?.acceptanceCriteria ?? decision.acceptanceCriteria},correlationId:runCorrelation,causationId:decisionMessageId,routing:slot.routing??null,capabilities:capabilitiesOf.get(slot.id)??NO_CAPABILITIES,attempts:[],unavailableModels:[],signal,budget,github,fileReads:carriedReads});
               const cancelled=entry.cancelled || this.stopping(runId,signal);
               const mechanical=carriedReads.length>0 && missingFilePayload(result.answer);
               const status=cancelled?'cancelled':result.record.failure||result.record.exitCode!==0||result.record.outcome!=='completed'||mechanical?'failed':'completed';
@@ -1550,7 +1576,8 @@ export class OrchestrationService {
             gate.passed ? 'passed' : 'rejected',
             gate.failures.join('; ').slice(0, 500) || 'resposta final aceita',
           );
-          if (gate.passed) {
+          this.database.runs.event({runId,key:'gate:'+iteration+':'+this.database.runs.events(runId).length,type:'REVIEW_RESULT',iteration,status:gate.passed?'passed':'rejected',summary:gate.passed?'Critérios validados com evidências.':gate.failures.join('; '),parentId:this.database.runs.events(runId).filter(e=>e.type!=='FINAL_RESPONSE').at(-1)?.id ?? null,data:{criteria:ledger.all(),verification:gate.verification,fileChecks:gate.fileChecks ?? [],failures:gate.failures}});
+        if (gate.passed) {
             const answer = (decision.summary ?? lastWorkerAnswer).trim();
             this.database.runs.setStatus(runId, 'DONE', 'Resposta final validada pelo orquestrador.');
             // The summary of a `done` decision *is* the answer, and it was
@@ -1602,6 +1629,7 @@ export class OrchestrationService {
         'evidence',
         evidence.changedSinceBaseline ? 'changed' : 'unchanged',
         `${evidence.changedFiles.length} arquivo(s)`,
+        {evidence:toEvidenceView(evidence)},
       );
       // What the application saw for itself, sent by the application - not by
       // an agent. The sender is null on purpose: this is the one message in
@@ -1976,6 +2004,7 @@ export class OrchestrationService {
             ? 'caminho rápido: evidência e verificações já provavam a tarefa'
             : gate.failures.join('; ').slice(0, 500),
         );
+        this.database.runs.event({runId,key:'gate:'+iteration+':'+this.database.runs.events(runId).length,type:'REVIEW_RESULT',iteration,status:gate.passed?'passed':'rejected',summary:gate.passed?'Critérios validados com evidências.':gate.failures.join('; '),parentId:this.database.runs.events(runId).filter(e=>e.type!=='FINAL_RESPONSE').at(-1)?.id ?? null,data:{criteria:ledger.all(),verification:gate.verification,fileChecks:gate.fileChecks ?? [],failures:gate.failures}});
         if (gate.passed) {
           record.doneRejection = undefined;
           // The work is on a branch and the person needs somewhere to review
@@ -2031,6 +2060,7 @@ export class OrchestrationService {
         record.doneRejection = gate.passed ? undefined : gate;
         this.step(runId, iteration, 'done-gate', gate.passed ? 'passed' : 'rejected', gate.failures.join('; ').slice(0, 500));
 
+        this.database.runs.event({runId,key:'gate:'+iteration+':'+this.database.runs.events(runId).length,type:'REVIEW_RESULT',iteration,status:gate.passed?'passed':'rejected',summary:gate.passed?'Critérios validados com evidências.':gate.failures.join('; '),parentId:this.database.runs.events(runId).filter(e=>e.type!=='FINAL_RESPONSE').at(-1)?.id ?? null,data:{criteria:ledger.all(),verification:gate.verification,fileChecks:gate.fileChecks ?? [],failures:gate.failures}});
         if (gate.passed) {
           // The work is on a branch and the person needs somewhere to review
           // it. A pull request is offered, never a merge - and only when this
@@ -2099,14 +2129,14 @@ export class OrchestrationService {
       // instructions that leave the workspace, the verifications and the
       // ledger exactly as they were are the same round twice.
       const fingerprint = evidenceFingerprint({
-        tree: tree + JSON.stringify(carriedReads.map(r => [r.request.path, r.sha256, r.request.offsetBytes ?? 0])),
+        tree: tree + progressFingerprint(carriedReads.map(r => [r.request.path, r.sha256, r.request.offsetBytes ?? 0])) + progressFingerprint([lastDelegatedWorkerId, equivalentAnswer(iterationAnswer)]),
         verification,
         fileChecks,
         pending: ledger.pending().map((criterion) => `${criterion.status}:${criterion.text}`),
       });
       stagnantRounds = fingerprint === previousFingerprint ? stagnantRounds + 1 : 0;
       previousFingerprint = fingerprint;
-      if (stagnantRounds >= 2) {
+      if (stagnantRounds >= 1) {
         const pending = ledger.pending().map((criterion) => criterion.text);
         const reason =
           'Duas iterações seguidas não produziram nenhuma evidência nova: o workspace, as ' +
@@ -2140,10 +2170,13 @@ export class OrchestrationService {
       }
     }
 
-    this.database.runs.setStatus(runId, 'FAILED', `Limite de ${maxIterations} iterações atingido.`);
+    const lastEvidence=collector ? await collector.collectEvidence(baseline) : github ? await this.collectGitHubEvidence(github,signal) : null;
+    const terminalStatus=lastEvidence?.changedSinceBaseline ? 'PARTIAL' : 'FAILED';
+    this.database.runs.event({runId,key:'pending-at-limit',type:'REVIEW_RESULT',iteration:maxIterations,status:'partial',summary:'Limite de iterações atingido; critérios ainda pendentes.',data:{criteria:ledger.all()}});
     this.step(runId, maxIterations, 'limit', 'reached', `Limite de ${maxIterations} iterações atingido.`);
+    this.database.runs.setStatus(runId, terminalStatus, `Limite de ${maxIterations} iterações atingido.`);
     this.say(sessionId, runId, 'system', `Parei após ${maxIterations} iterações sem concluir.`);
-    this.progress(runId, sessionId, 'failed', 'Limite de iterações atingido.', 'FAILED');
+    this.progress(runId, sessionId, 'failed', 'Limite de iterações atingido.', terminalStatus);
   }
 
   /**
@@ -2395,6 +2428,12 @@ export class OrchestrationService {
     const lines: string[] = [
       'You are the orchestrator of an agent team.',
       'You supervise; the workers below do the work. You never do it yourself.',
+      'Act as team lead: define objective, scope, constraints and acceptance criteria before implementation.',
+      'Select only necessary roles. A trivial change needs one worker and application verification.',
+      'Use delegations for a dependency-aware mission plan. Fill mission with expectedResult, acceptanceCriteria, evidence, relevantFiles, constraints, outOfScope for each task. Do not send unrelated history.',
+      'After each result decide: DONE, another agent, correction, review, tests, user input or blocked. Do not echo the worker.',
+      'Equivalent results without new evidence require a changed strategy or a block, never the same delegation again.',
+      'Public summary: only the new decision or final answer in 1-4 lines. Never expose private reasoning.',
       '',
       `OBJECTIVE: ${input.objective}`,
       `ITERATION: ${input.iteration}`,
@@ -3529,6 +3568,7 @@ export class OrchestrationService {
         .join('\n\n'),
       task,
       criteria: input.decision.acceptanceCriteria,
+      mission: input.decision.mission,
       fileReads: input.fileReads,
     });
     if (workerPrompt.deliveries.length) {
@@ -4261,7 +4301,7 @@ export class OrchestrationService {
       status,
       summary: redact(summary).slice(0, 1000),
       // Diagnostics are stored redacted: a CLI's stderr can echo a header.
-      detail: detail ? redact(JSON.stringify(detail)) : null,
+      detail: detail ? encodeEventData(detail) : null,
       // The first step of a run has no predecessor, so it has no duration.
       // Reporting zero there would put a real segment at zero milliseconds.
       durationMs: startedAt === undefined ? null : finishedAt - startedAt,
@@ -4276,6 +4316,11 @@ export class OrchestrationService {
     body: string,
     payload?: Record<string, unknown>,
   ): ChatMessageView {
+    const prior=this.database.chat.listMessages(sessionId).filter(m=>m.run_id===runId);
+    const final=prior.find(m=>{try{return JSON.parse(m.payload ?? '{}').kind==='final';}catch{return false;}});
+    if(final && author==='orchestrator') return toMessageView(final);
+    const duplicate=prior.filter(m=>m.author===author).at(-1);
+    if(duplicate && equivalentAnswer(duplicate.body)===equivalentAnswer(body))return toMessageView(duplicate);
     const record = this.database.chat.addMessage({
       sessionId,
       runId,
@@ -4321,6 +4366,16 @@ export class OrchestrationService {
     slot: WorkerSlot,
     snapshot: ActivitySnapshot,
   ): void {
+    const invocation=this.database.runs.invocations(runId).filter(i=>i.worker_id===slot.id&&i.outcome==='running').at(-1);
+    if(invocation && snapshot.currentTool) {
+      const key='progress:'+String(invocation.id), summary=slot.label+' · '+snapshot.currentTool;
+      const existing=this.database.runs.events(runId).find(e=>e.id===runId+':'+key);
+      if(existing?.summary!==summary) {
+        if(existing)this.database.driver.run('UPDATE execution_events SET summary=? WHERE id=?',[redact(summary),existing.id]);
+        else this.database.runs.event({runId,key,type:'AGENT_PROGRESS',iteration:Number(invocation.iteration),invocationId:String(invocation.id),agentId:slot.agentId,role:String(invocation.role),status:'running',parentId:runId+':inv:'+invocation.id,summary});
+        this.events.emit('run:graph',{runId});
+      }
+    }
     this.events.emit('run:activity', {
       runId,
       sessionId,
@@ -4606,7 +4661,7 @@ export function describeWorkspaceProblem(cwd: string): string | null {
 
 /** A cheap fingerprint of the working tree, to tell one attempt's outcome from the next. */
 function treeKey(statusShort: string, diff: string): string {
-  return `${statusShort.trim()}\n${diff.length}:${diff.slice(0, 4000)}`;
+  return createHash('sha256').update(statusShort.trim()+'\n'+diff).digest('hex');
 }
 
 function verificationNote(results: readonly CommandResult[]): string {

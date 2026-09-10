@@ -34,7 +34,10 @@ for(const mismatch of [false,true])test(mismatch?'gate mismatch stops after two 
     assert.equal(run.iterations,mismatch?2:1);
     assert.equal(orchestrator.calls.length,mismatch?2:1);
     assert.equal(worker.calls.length,0);
-    assert.equal(messages.filter(m=>m.body===answer).length,1,'equivalent final answers are not repeated in the UI');
+    const finals=fixture.services.database.runs.events(run.id).filter(e=>e.type==='FINAL_RESPONSE');
+    assert.equal(finals.length,1,'one final after the gate, never a premature answer');
+    if(!mismatch)assert.ok(finals[0]!.summary.includes(answer));
+    else assert.ok(!finals[0]!.summary.includes(answer),'rejected success is not published as completion');
     assert.ok(messages.every(m=>!m.body.includes('--allow-no-changes')));
     assert.equal(github.calls.filter(c=>c.method!=='GET'&&!c.path.includes('/login/')).length,0);
     assert.ok(fixture.services.database.runs.steps(run.id).some(s=>s.phase==='query-proof'&&s.status==='passed'));

@@ -120,6 +120,7 @@ export function runStateOf(run: RunView | null, liveStage: string | null): RunSt
       return 'CANCELLED';
     // The human gate. Without this it fell through to IDLE and the run looked
     // like it was simply waiting, rather than waiting for a person.
+    case 'PARTIAL':
     case 'BLOCKED':
     // `NEEDS_HUMAN` was missing from this switch, so a run stopped for a
     // person - a refused tool, a budget reached, a credential to fix - read as

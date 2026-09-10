@@ -28,7 +28,7 @@
  */
 
 /** Run statuses after which nothing more happens on its own. */
-export const TERMINAL_RUN_STATUSES = ['DONE', 'FAILED', 'CANCELLED', 'BLOCKED', 'NEEDS_HUMAN'] as const;
+export const TERMINAL_RUN_STATUSES = ['DONE', 'PARTIAL', 'FAILED', 'CANCELLED', 'BLOCKED', 'NEEDS_HUMAN'] as const;
 
 /** True when the run has stopped, whatever the reason. */
 export function isRunOver(status: string | null | undefined): boolean {

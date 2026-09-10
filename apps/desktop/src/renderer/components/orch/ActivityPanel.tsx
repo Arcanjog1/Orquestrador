@@ -1,3 +1,6 @@
+import { activityTrace } from '@shared/execution-trace';
+import type { RunDetailView } from '@shared/ipc-contract';
+import { TraceCard } from './ExecutionJournal';
 import type { RunInvocationView } from '@shared/ipc-contract';
 import { HeroPortrait } from './HeroPortrait';
 import { HEROES, heroKey, heroState, questStatus } from '@shared/hero-identity';
@@ -85,6 +88,7 @@ function duration(ms: number): string {
 /** Recorded responses lead the panel; expandable diagnostics retain measured
  * progress, live tool activity, participant status and cancellation controls. */
 export function ActivityPanel({
+  detail,
   records = [],
   state,
   iteration,
@@ -102,6 +106,7 @@ export function ActivityPanel({
   agents,
   onCancel,
 }: {
+  detail?: RunDetailView;
   records?: readonly RunInvocationView[];
   state: RunState;
   iteration: number;
@@ -123,6 +128,9 @@ export function ActivityPanel({
   /** Stops the run. Always offered while one is going. */
   onCancel: () => void;
 }) {
+  const trace=detail?.executionEvents?.length ? activityTrace(detail) : null;
+  const visibleRecords=trace ? trace.flatMap(n=>n.invocation?[{...n.invocation,task:n.summary,outcome:n.status}]:[]) : records;
+  const final=trace?.find(n=>n.kind==='done');
   const meta = runStateMeta[state];
   const running = !["IDLE", "DONE", "CANCELLED", "FAILED", "PAUSED", "NEEDS_HUMAN"].includes(
     state,
@@ -142,9 +150,9 @@ export function ActivityPanel({
       </div>
 
       <div className="mission-log-content flex-1 overflow-y-auto p-4">
-        {records.length > 0 && <section className="mission-records border-t border-border pt-4">
+        {visibleRecords.length > 0 && <section className="mission-records border-t border-border pt-4">
           <SectionLabel>Participações registradas</SectionLabel>
-          {records.map((record, index) => {
+          {visibleRecords.map((record, index) => {
             const role = HEROES[heroKey(record.role) ?? 'programmer'];
             const status = !running && ['running','started'].includes(record.outcome) ? 'stopped' : record.outcome;
             return <button className="mission-record" key={record.id} onClick={() => onOpenStep(index)}
@@ -158,7 +166,8 @@ export function ActivityPanel({
             </button>;
           })}
         </section>}
-        {records.length === 0 && <p className="text-xs text-muted-foreground">As respostas aparecem aqui.</p>}
+        {visibleRecords.length === 0 && <p className="text-xs text-muted-foreground">As respostas aparecem aqui.</p>}
+        {final && <TraceCard node={final} compact/>}
         <details className="guild-run-diagnostics" open={running || undefined}><summary>Registro da missão · detalhes</summary><div className="space-y-5">
         <div>
           <SectionLabel>Missão · Activity</SectionLabel>

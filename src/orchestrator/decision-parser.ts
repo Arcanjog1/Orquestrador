@@ -1,3 +1,4 @@
+import { parseMission } from './mission-brief.js';
 import { validateDelegations } from './delegation-plan.js';
 /**
  * Decision parsing and validation (spec 10).
@@ -63,6 +64,7 @@ export function parseDecision(raw: string): ParseResult {
 
   try { const tasks=validateDelegations(obj.delegations); if(tasks.length) decision.delegations=tasks; } catch(error) { return fail(String(error), raw); }
 
+  try { const mission=parseMission(obj.mission);if(mission)decision.mission=mission; } catch(error) {return fail(String(error),raw);}
   const criteria = readStringArray(obj.acceptanceCriteria, 'acceptanceCriteria');
   if (criteria.error) return fail(criteria.error, raw);
   decision.acceptanceCriteria = criteria.value;

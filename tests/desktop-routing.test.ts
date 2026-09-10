@@ -386,39 +386,17 @@ test('a model the CLI refuses is retried on the next candidate, both attempts on
   }
 });
 
-test('repeated no-progress escalates - more reasoning, then a stronger model - and the next simple task goes back down', async () => {
-  const worker = new RoutedWorker((input, call) => {
-    if (call === 3) writeHello(input.workingDirectory);
-    if (call === 4) writeFileSync(join(input.workingDirectory, 'README.md'), '# scratch\n\nnovo\n', 'utf8');
-    return { stdout: call < 3 ? 'não consegui' : 'feito' };
-  });
-  const prepared = await prepare({
-    orchestratorScript: [
-      delegate('Corrija o conteúdo de hello.txt', { capability: 'balanced', reasoning: 'medium' }),
-      delegate('Corrija o conteúdo de hello.txt', { capability: 'balanced', reasoning: 'medium' }),
-      delegate('Corrija o conteúdo de hello.txt', { capability: 'balanced', reasoning: 'medium' }),
-      delegate('Atualize o README com a nova instrução', { capability: 'fast', reasoning: 'low' }),
-      done(),
-    ],
-    worker,
-  });
+test('repeated no-progress stops before a third call or escalation to a stronger model', async () => {
+  const worker=new RoutedWorker(()=>({stdout:'não consegui'}));
+  const prepared=await prepare({orchestratorScript:Array(4).fill(delegate('Corrija o conteúdo de hello.txt',{capability:'balanced',reasoning:'medium'})),worker});
   try {
-    const run = await prepared.run('faça');
-    assert.equal(run.status, 'DONE', run.summary ?? '');
-    const routed = worker.calls.map((c) => c.routing);
-    assert.deepEqual(routed[0], { model: 'sonnet', reasoning: 'medium' }, 'first attempt: as asked');
-    assert.deepEqual(routed[1], { model: 'sonnet', reasoning: 'high' }, 'one attempt without progress: think harder');
-    assert.deepEqual(routed[2], { model: 'opus', reasoning: 'max' }, 'two without progress: a stronger model');
-    assert.deepEqual(routed[3], { model: 'haiku', reasoning: 'low' }, 'progress made, simple task: back down');
-
-    const rows = await workerRows(prepared, run.id);
-    assert.match(rows[2]!.selectionReason ?? '', /escalado .* após 2 tentativa/);
-    assert.doesNotMatch(rows[3]!.selectionReason ?? '', /escalado/);
-    // The orchestrator was told there was no progress.
-    assert.match(prepared.orchestrator.calls[1]!.prompt, /progressed: no/);
-  } finally {
-    await prepared.cleanup();
-  }
+    const run=await prepared.run('faça');
+    assert.equal(run.status,'NEEDS_HUMAN');
+    assert.equal(worker.calls.length,2);
+    assert.ok(worker.calls.every(c=>c.routing?.model==='sonnet'));
+    assert.match(prepared.orchestrator.calls[1]!.prompt,/progressed: no/);
+    assert.equal(prepared.fixture.services.database.runs.events(run.id).filter(e=>e.type==='FINAL_RESPONSE').length,1);
+  } finally {await prepared.cleanup();}
 });
 
 test('a changed worker account re-reads the capabilities, and the routing follows them', async () => {

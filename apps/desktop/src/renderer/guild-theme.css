@@ -200,3 +200,18 @@ button:not(:disabled):active { filter: brightness(.95); }
 .guild-team-identity { flex-wrap:nowrap;min-height:98px; }.guild-team-identity>.hero-portrait { width:76px!important;height:76px!important; }.guild-team-identity>div { min-width:0; }.guild-team-card dl { padding:7px; }
 .worktree-attention { display:flex;align-items:center;gap:10px;flex-shrink:0;border:1px solid #a65c36;background:#f5d4a3;padding:8px 10px;font-size:12px;color:#733a1f; }.worktree-attention>span { flex:1;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden; }.worktree-attention>button { flex-shrink:0;text-decoration:underline; }
 .guild-banner-brand strong { font-family:'JetBrains Mono',monospace;font-size:17px;letter-spacing:-.04em; }.guild-workspace-shell>.guild-banner h1,[data-testid=agents-manager] .guild-banner h1 { font-family:'JetBrains Mono',monospace; }
+
+/* Both mission views project the durable execution trace. */
+.execution-journal { flex:1; min-width:0; overflow:auto; padding:20px clamp(14px,4vw,54px); }
+.execution-journal h2 { font-size:20px; font-weight:700; color:var(--foreground); }
+.trace-description { font-size:12px; opacity:.7; margin-bottom:18px; }
+.trace-card { border:1px solid color-mix(in srgb,var(--foreground) 16%,transparent); border-radius:12px; background:color-mix(in srgb,var(--background) 92%,white); padding:14px 18px; margin:0 0 12px; min-width:0; }
+.trace-card header { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.trace-card header strong { display:block; font-size:13px; }
+.trace-card header small { display:block; opacity:.65; font-size:11px; }
+.trace-card p { white-space:pre-line; overflow-wrap:anywhere; font-size:13px; line-height:1.6; }
+.trace-card button { font-size:11px; margin:10px 12px 0 0; text-decoration:underline; text-underline-offset:3px; cursor:pointer; }
+.trace-card pre { white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.6 inherit; max-height:420px; overflow:auto; margin-top:12px; }
+.trace-final { border-width:2px; border-color:#ad873e; background:color-mix(in srgb,#d9bd71 13%,var(--background)); }
+.trace-compact { padding:10px; width:100%; margin:0; }
+.trace-compact p { font-size:11px; }

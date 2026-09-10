@@ -373,6 +373,7 @@ export function ExecutionWorktree({
                   height: HEIGHT,
                 }}
                 data-node-id={node.id}
+                data-source-ids={node.sourceIds.join(',')}
                 data-status={node.status}
               >
                 <button
@@ -393,7 +394,7 @@ export function ExecutionWorktree({
                     {node.kind === 'user' && <Flag className="node-emblem"/>}
                     {node.kind === 'evidence' && <ScrollText className="node-emblem"/>}
                     {node.kind === 'done' && <PackageCheck className="node-emblem"/>}
-                    <strong title={node.label}>{node.kind === 'done' ? 'Resultado' : node.kind === 'evidence' ? 'Evidências' : node.kind === 'orchestrator' ? 'Análise' : node.label}</strong>
+                    <strong title={node.label}>{node.kind === 'done' ? 'Resultado' : node.kind === 'evidence' ? 'Evidências' : node.label}</strong>
                     <span className="node-state">{questStatus(node.status)}</span>
                   </span>
                   <span className="node-summary">

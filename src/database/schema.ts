@@ -1016,4 +1016,15 @@ CREATE TABLE model_confirmations(
  PRIMARY KEY(run_id,agent_id,model_id,policy_hash)
 );
 `});
+MIGRATIONS.push({id:22,name:'execution-events',sql:`
+CREATE TABLE execution_events (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+ id TEXT NOT NULL UNIQUE, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+ type TEXT NOT NULL, timestamp TEXT NOT NULL, parent_id TEXT, iteration INTEGER NOT NULL,
+ agent_id TEXT, invocation_id TEXT, role TEXT NOT NULL, status TEXT NOT NULL,
+ summary TEXT NOT NULL, data TEXT NOT NULL
+);
+CREATE INDEX idx_execution_events_run ON execution_events(run_id,sequence);
+CREATE UNIQUE INDEX idx_execution_one_final ON execution_events(run_id) WHERE type='FINAL_RESPONSE';
+`});
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.id;

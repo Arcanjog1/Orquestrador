@@ -34,6 +34,7 @@ const POINTS_AT_A_LIST =
   /\b(crit[ée]rios?|requisitos?|itens?|lista|criteria|requirements?)\b[^.\n]{0,60}\b(abaixo|a seguir|seguintes?|listad[oa]s?|below|following|listed)\b|\b(abaixo|a seguir|below|following)\b[^.\n]{0,40}\b(crit[ée]rios?|requisitos?|criteria|requirements?)\b/i;
 
 export interface WorkerPromptInput {
+  readonly mission?: import('./mission-brief.js').MissionBrief;
   /** The tool policy, which always leads. */
   readonly preamble: string;
   /** What the supervisor asked for, in its own words. */
@@ -61,8 +62,20 @@ export function buildWorkerPrompt(input: WorkerPromptInput): WorkerPrompt {
   const task = input.task.trim();
   const criteria = input.criteria.map((c) => c.trim()).filter((c) => c.length > 0);
   const parts = [input.preamble.trim(), task].filter((part) => part.length > 0);
+  parts.splice(1, 0, 'MISSÃO: execute somente a tarefa acima. Contexto: arquivos e critérios enviados neste pacote. ' +
+    'Não repita investigação já entregue, não assuma tarefas de outros agentes, não altere arquivos fora do escopo. ' +
+    'RETORNO ESPERADO: resumo em 1–4 linhas, status (concluído/parcial/bloqueado), alterações, evidências reais, riscos e recomendação ao Orquestrador. ' +
+    'Inclua detalhes após o resumo. Diga quais critérios foram comprovados e quais continuam pendentes. Não exponha raciocínio privado.');
 
-  const carried = fileContext(input.fileReads ?? [], 'WORKER');
+  if(input.mission)parts.splice(1,0,[
+    'RESULTADO ESPERADO: '+input.mission.expectedResult,
+    'EVIDÊNCIAS ESPERADAS: '+input.mission.evidence.join('; '),
+    'ARQUIVOS RELEVANTES: '+input.mission.relevantFiles.join(', '),
+    'RESTRIÇÕES: '+input.mission.constraints.join('; '),
+    'FORA DO ESCOPO: '+input.mission.outOfScope.join('; '),
+  ].join('\n'));
+  const paths=input.mission?.relevantFiles;
+  const carried = fileContext(paths?.length ? (input.fileReads ?? []).filter(r=>paths.includes(r.request.path)) : input.fileReads ?? [], 'WORKER');
   if (carried.text) parts.push(carried.text);
 
   if (criteria.length > 0) {
