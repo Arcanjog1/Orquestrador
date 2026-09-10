@@ -53,6 +53,7 @@ export interface PolicyConfiguration {
   routing: Partial<Record<TaskKind, string[]>>;
 }
 export interface ModelCatalogEntry {
+  verification?:import('./model-availability.js').ModelVerificationEvidence;
   availability?:import('./model-availability.js').ModelAvailability;
   id:string; provider:'openai'|'anthropic'; source:'runtime'|'provider'|'catalog';
   reasoning:string[]; accountAllowed:boolean | null;

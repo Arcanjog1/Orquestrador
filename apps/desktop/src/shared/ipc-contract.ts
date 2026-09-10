@@ -58,6 +58,7 @@ export const REQUEST_CHANNELS = [
   'agents.roles',
   'agents.models',
   'agents.verifyModels',
+  'agents.testModel',
   'agents.policies',
   'agents.savePolicies',
   'agents.projectPolicy',
@@ -1337,6 +1338,7 @@ export interface IpcMap {
   'agents.roles': {request:void;response:readonly import('./agent-policy.js').RoleDefinition[]};
   'agents.models': {request:{accountId:string;role?:string};response:import('./agent-policy.js').ModelCatalogEntry[]};
   'agents.verifyModels': {request:{agentId:string};response:import('./model-availability.js').AccountModelVerification};
+  'agents.testModel': {request:import('./model-availability.js').ModelProbeRequest;response:import('./model-availability.js').AccountModelVerification};
   'agents.policies': {request:void;response:import('./agent-policy.js').PolicyConfiguration};
   'agents.savePolicies': {request:import('./agent-policy.js').PolicyConfiguration;response:import('./agent-policy.js').PolicyConfiguration};
   'agents.projectPolicy': {request:{workspaceId:string};response:import('./agent-policy.js').PolicyLayer};

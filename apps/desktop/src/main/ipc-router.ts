@@ -188,6 +188,7 @@ export class IpcRouter {
     this.handlers.set('agents.roles', () => s.agents.roles());
     this.handlers.set('agents.models', p => {const input=p as IpcMap['agents.models']['request'];return s.agentModels(input.accountId,input.role);});
     this.handlers.set('agents.verifyModels', p => s.verifyAgentModels((p as IpcMap['agents.verifyModels']['request']).agentId));
+    this.handlers.set('agents.testModel', p => s.testAgentModel(p as IpcMap['agents.testModel']['request']));
     this.handlers.set('agents.policies', () => s.agents.policies());
     this.handlers.set('agents.savePolicies', p => s.agents.savePolicies(p as IpcMap['agents.savePolicies']['request']));
     this.handlers.set('agents.projectPolicy', p => s.agents.projectPolicy((p as IpcMap['agents.projectPolicy']['request']).workspaceId));
