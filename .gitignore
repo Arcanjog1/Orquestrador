@@ -30,6 +30,11 @@ spike/spike-report.txt
 relative/
 profiles/**/.claude.json
 
+# Environment files are the other place a token reaches a working tree.
+.env
+.env.*
+!.env.example
+
 # Electron / desktop build output
 apps/desktop/dist/
 apps/desktop/dist-renderer/
@@ -38,3 +43,7 @@ apps/desktop/overflow-results/
 # electron-builder writes here when it is run from the repository root
 release/
 out/
+
+# Local noise that is never part of the product
+*.log
+coverage/
