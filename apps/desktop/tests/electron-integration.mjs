@@ -2646,6 +2646,31 @@ test('cards: account verification is neutral, isolated and preserves fixed selec
  }finally{services.agentModels=original;services.verifyAgentModels=originalVerify;}
 });
 
+test('cards: minimal model test requires a second explicit confirmation',async()=>{
+ const window=await openWindow();
+ const {AccountModelAvailability}=await load('apps/desktop/src/main/services/account-model-availability.js');
+ const {decorateAgentModels,knownAgentModels}=await load('apps/desktop/src/main/services/agent-model-catalog.js');
+ const {defaultAgentPolicy}=await load('apps/desktop/src/shared/agent-policy.js');
+ const original=services.agentModels.bind(services),free=services.verifyAgentModels.bind(services),probe=services.testAgentModel.bind(services);
+ const store=new AccountModelAvailability(services.database.settings),a=services.accounts.create('Probe UI account','anthropic');
+ services.database.accounts.updateAuth(a.id,'connected','fixture');
+ const model='claude-opus-5',agent=services.agents.create({name:'Probe UI',role:'CODING_WORKER',provider:'anthropic',accountId:a.id,model,reasoning:null,maxCapability:null,maxReasoning:null,enabled:true,policy:defaultAgentPolicy('CODING_WORKER',model)});
+ let calls=0;
+ services.agentModels=async(id,role)=>decorateAgentModels(store.apply(id,'anthropic',knownAgentModels('anthropic')),services.database.accounts.require(id),services.agents.policies(),role);
+ services.verifyAgentModels=async()=>({accountId:a.id,provider:'anthropic',checkedAt:new Date().toISOString(),confirmed:[],denied:[],detail:'Não foi possível confirmar sem executar o modelo.'});
+ services.testAgentModel=async input=>{assert.equal(input.authorised,true);assert.equal(input.accountId,a.id);assert.equal(input.modelId,model);calls++;const now=new Date().toISOString();return store.record({providerId:'anthropic',accountId:a.id,agentId:agent.id,modelId:model,requestedModel:model,timestamp:now,verifiedAt:now,verificationMethod:'minimal-probe',source:'fixture',state:'CONFIRMED_FOR_ACCOUNT',reason:'Disponível nesta conta.'});};
+ try {
+  await window.webContents.executeJavaScript("location.hash='#/configuracoes?tab=agents'");await reloadWindow(window);
+  await click(window,'agent-verify-'+agent.id);await waitForText(window,/Não foi possível confirmar sem executar/,10000);assert.equal(calls,0);
+  await click(window,'agent-test-'+agent.id);await waitForText(window,/Testar Claude Opus 5 nesta conta/,10000);assert.equal(calls,0);
+  await click(window,'model-probe-cancel');assert.equal(calls,0);
+  await click(window,'agent-test-'+agent.id);await click(window,'model-probe-confirm');
+  await waitUntil(()=>calls===1,10000,'single authorised probe');
+  await waitUntil(()=>window.webContents.executeJavaScript('document.querySelector('+JSON.stringify('[data-testid="agent-availability-'+agent.id+'"]')+').textContent === "Disponível nesta conta"'),10000,'probe confirmation');
+  await reloadWindow(window);assert.equal(calls,1,'reopening never consumes usage');
+ }finally{services.agentModels=original;services.verifyAgentModels=free;services.testAgentModel=probe;}
+});
+
 /* --------------------------------------------------------------- the run */
 
 console.log('# electron main started, waiting for app ready');

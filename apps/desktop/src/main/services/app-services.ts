@@ -12,7 +12,9 @@
 import {selectionProblem} from '../../shared/model-display.js';
 import {AccountModelAvailability,parseAccountModelListing,UNVERIFIED_DETAIL} from './account-model-availability.js';
 import {decorateAgentModels,knownAgentModels} from './agent-model-catalog.js';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import {PROBE_PROMPT,probeArguments,classifyProbe,diagnostic,modelVerificationEnvironment} from './model-probe.js';
 import { join } from 'node:path';
 import {
   ClaudeAccountManager,
@@ -611,7 +613,7 @@ export class AppServices {
       } else {
         const runtime=provider==='openai'?'codex':'claude-code';
         const command=await this.runtimeManager.getExecutablePath(runtime);
-        const env={...this.runtimeManager.childEnvironmentOverlay(runtime),...(provider==='openai'?this.codexAccountManager:this.accountManager).buildEnvironment(account.id)};
+        const env=modelVerificationEnvironment({...this.runtimeManager.childEnvironmentOverlay(runtime),...(provider==='openai'?this.codexAccountManager:this.accountManager).buildEnvironment(account.id)});
         const run=(args:string[])=>this.processManager.run({command,args,env,cwd:this.paths.root,timeoutMs:10_000});
         // Auth status is a known non-inference command; model-list commands are only used when advertised.
         const help=await run(['--help']);
@@ -635,8 +637,68 @@ export class AppServices {
     } catch {result.detail='Não foi possível concluir a verificação desta conta. Tente novamente. Nenhum modelo foi marcado como indisponível e nenhuma chamada ao modelo foi feita.';}
     // A relink while the check was running must not update the newly linked account.
     if(this.database.agents.require(agentId).account_id!==account.id)throw new Error('A conta do agente mudou. Verifique novamente.');
-    new AccountModelAvailability(this.database.settings).write(account.id,result);
-    return result;
+    const availability=new AccountModelAvailability(this.database.settings);
+    const selected=this.agents.manage().find(a=>a.id===agentId);
+    const model=selected?.policy?.primaryModel??selected?.model;
+    let saved=result;
+    for(const modelId of new Set([...result.confirmed,...result.denied,...(model?[model]:[])])) {
+      saved=availability.record({providerId:provider,accountId:account.id,agentId,modelId,requestedModel:modelId,timestamp:result.checkedAt,verifiedAt:result.checkedAt,verificationMethod:'free-introspection',source:account.connection_kind==='api'?'provider models':'CLI metadata',state:result.denied.includes(modelId)?'UNAVAILABLE':result.confirmed.includes(modelId)?'CONFIRMED_FOR_ACCOUNT':'KNOWN_BUT_UNVERIFIED',reason:result.detail});
+    }
+    return saved;
+  }
+
+  /** Explicit probes never pass through routing, fallback or normal run history. */
+  private readonly activeModelProbes=new Set<string>();
+  async testAgentModel(input:import('../../shared/model-availability.js').ModelProbeRequest):Promise<import('../../shared/model-availability.js').AccountModelVerification> {
+    if(input.authorised!==true)throw new Error('Confirme o teste antes de consumir uso.');
+    const assertSelection=()=>{
+      const agent=this.agents.manage().find(a=>a.id===input.agentId);
+      if(!agent||agent.accountId!==input.accountId||(agent.policy?.primaryModel??agent.model)!==input.modelId)throw new Error('A conta ou o modelo do agente mudou. Verifique novamente.');
+      return agent;
+    };
+    const agent=assertSelection();
+    const account=this.database.accounts.require(input.accountId);
+    if(account.provider_id!==agent.provider)throw new Error('O provider da conta não corresponde ao agente.');
+    if(this.activeModelProbes.has(account.id))throw new Error('Já existe um teste em andamento nesta conta.');
+    this.activeModelProbes.add(account.id);
+    const provider=agent.provider;
+    let state:import('../../shared/model-availability.js').ModelAvailability='KNOWN_BUT_UNVERIFIED';
+    let reason='Não foi possível iniciar o teste. Verifique a conexão e a instalação do runtime.';
+    let args:string[]=[];
+    let cwd:string|undefined;
+    try {
+      if(account.connection_kind==='api') {
+        ({state,reason}=await this.connections.probeModel(account.id,input.modelId));
+      } else {
+        const runtime=provider==='openai'?'codex':'claude-code';
+        const manager=provider==='openai'?this.codexAccountManager:this.accountManager;
+        if(!manager.hasOwnCredentials(account.id)){reason='Conecte esta conta antes de testar. Nenhuma chamada ao modelo foi feita.';throw new Error('Missing account credentials');}
+        const command=await this.runtimeManager.getExecutablePath(runtime);
+        const env=modelVerificationEnvironment({...this.runtimeManager.childEnvironmentOverlay(runtime),...manager.buildEnvironment(account.id)});
+        cwd=mkdtempSync(join(tmpdir(),'orchestrator-model-probe-'));
+        // This check is metadata only. Old CLIs must not silently drop isolation/model flags.
+        const help=await this.processManager.run({command,args:provider==='openai'?['exec','--help']:['--help'],env,cwd,timeoutMs:10_000});
+        const required=provider==='openai'?['--model','--json','--ephemeral','--ignore-user-config','--ignore-rules','--sandbox']:['--model','--output-format','--safe-mode','--tools','--strict-mcp-config','--no-session-persistence','--max-turns'];
+        if(help.exitCode!==0||help.outcome!=='completed'||required.some(flag=>!help.stdout.includes(flag))) {
+          reason='Atualize o CLI para testar com isolamento e sem ferramentas. Nenhuma chamada ao modelo foi feita.';
+        } else {
+          assertSelection();
+          args=probeArguments(provider,input.modelId);
+          const result=await this.processManager.run({command,args,env,cwd,stdin:PROBE_PROMPT,timeoutMs:30_000,maxOutputBytes:128*1024});
+          ({state,reason}=classifyProbe(provider,input.modelId,result));
+        }
+      }
+    } catch (error) {
+      // Never persist stderr, credentials, environment or arbitrary provider text.
+      if(error instanceof Error&&error.message!=='Missing account credentials')reason=diagnostic(error.message);
+    } finally {
+      this.activeModelProbes.delete(account.id);
+      // A temporary Windows file lock must not lose the verification result.
+      if(cwd)try {rmSync(cwd,{recursive:true,force:true});} catch { /* OS temp cleanup can reclaim it. */ }
+    }
+    assertSelection();
+    const timestamp=new Date().toISOString();
+    return new AccountModelAvailability(this.database.settings).record({providerId:provider,accountId:account.id,agentId:agent.id,modelId:input.modelId,requestedModel:input.modelId,timestamp,verifiedAt:timestamp,verificationMethod:'minimal-probe',source:account.connection_kind==='api'?'provider API':provider==='openai'?'codex exec':'claude print',state,reason,arguments:args});
   }
 
   /** All renderer saves re-read the selected account's catalog; no trust in submitted labels/capabilities. */

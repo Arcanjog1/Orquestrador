@@ -294,6 +294,31 @@ export class ConnectionService {
   }
 
   /** The decrypted key, for the one code path about to make a call with it. */
+  async probeModel(connectionId:string,model:string):Promise<{state:import('../../shared/model-availability.js').ModelAvailability;reason:string}> {
+    const account=this.requireApi(connectionId);
+    if(account.api_enabled!==1)throw new ConnectionError('Habilite esta conexão API antes de testar.','API_DISABLED');
+    const key=this.readKey(connectionId);
+    if(!key)throw new ConnectionError('Reconecte esta conta.','NO_CREDENTIAL');
+    const openai=account.provider_id==='openai';
+    const base=(account.base_url??(openai?'https://api.openai.com/v1':'https://api.anthropic.com/v1')).replace(/\/+$/,'');
+    const body=openai?{model,input:'Responda apenas OK.',max_output_tokens:32,tools:[],store:false}:{model,messages:[{role:'user',content:'Responda apenas OK.'}],max_tokens:8,tools:[]};
+    const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),30_000);
+    const unknown=(reason:string)=>({state:'KNOWN_BUT_UNVERIFIED' as const,reason});
+    try {
+      const headers:Record<string,string>={'content-type':'application/json',...(openai?{authorization:'Bearer '+key}:{'x-api-key':key,'anthropic-version':'2023-06-01'})};
+      const response=await this.transport(base+(openai?'/responses':'/messages'),{method:'POST',headers,body:JSON.stringify(body),signal:controller.signal});
+      const data=JSON.parse(await response.text());
+      if(!response.ok) {
+        if(['model_not_found','model_not_available','model_not_allowed','unsupported_model','model_access_denied'].includes(data.error?.code)&&(!data.error.model||data.error.model===model))return {state:'UNAVAILABLE',reason:'O provider recusou explicitamente este modelo nesta conta.'};
+        return unknown(response.status===401?'Reconecte esta conta.':response.status===429?'Limite de uso atingido. Tente mais tarde.':'O provider não conseguiu concluir o teste.');
+      }
+      const text=openai?data.output?.flatMap((i:any)=>i.content??[]).map((c:any)=>c.text??'').join(''):data.content?.map((c:any)=>c.text??'').join('');
+      if(data.model===model&&text?.trim()==='OK'&&(openai?data.status==='completed':data.stop_reason==='end_turn'))return {state:'CONFIRMED_FOR_ACCOUNT',reason:'Disponível nesta conta. O modelo solicitado respondeu ao teste.'};
+      return unknown('A resposta não comprovou o uso do modelo solicitado.');
+    } catch {return unknown(controller.signal.aborted?'O teste excedeu o tempo limite.':'Erro de rede ou resposta ilegível. Verifique a conexão.');}
+    finally {clearTimeout(timeout);}
+  }
+
   private readKey(connectionId: string): string {
     const ciphertext = this.options.database.providerSecrets.get(connectionId);
     if (!ciphertext) return '';

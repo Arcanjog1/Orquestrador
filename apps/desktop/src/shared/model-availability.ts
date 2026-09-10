@@ -13,4 +13,25 @@ export interface AccountModelVerification {
   confirmed: string[];
   denied: string[];
   detail: string;
+  evidence?: ModelVerificationEvidence[];
+}
+export interface ModelVerificationEvidence {
+  providerId: 'openai' | 'anthropic';
+  accountId: string;
+  agentId: string;
+  modelId: string;
+  requestedModel: string;
+  timestamp: string;
+  verifiedAt: string;
+  verificationMethod: 'free-introspection' | 'minimal-probe';
+  source: string;
+  state: ModelAvailability;
+  reason: string;
+  arguments?: string[];
+}
+export interface ModelProbeRequest {
+  agentId: string;
+  accountId: string;
+  modelId: string;
+  authorised: boolean;
 }
