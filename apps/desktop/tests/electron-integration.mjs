@@ -2224,6 +2224,7 @@ test('audit: create, edit, disable and remove agents through the real renderer',
  const a=await waitFor(async()=>window.webContents.executeJavaScript("window.api.agents.manage().then(list=>list.find(a=>a.name==='Audit Backend'))"),10000,'saved agent');
  await click(window,`agent-edit-${a.id}`);
  await nativeClick(window,'agent-enabled');
+ await waitUntil(async()=>window.webContents.executeJavaScript("document.querySelector('[data-testid=agent-enabled]')?.checked===false"),10000,'disabled checkbox');
  await nativeClick(window,'agent-save');
  await waitUntil(async()=>window.webContents.executeJavaScript(`window.api.agents.manage().then(list=>list.find(a=>a.id==='${a.id}')?.enabled===false)`),10000,'disabled agent');
  await reloadWindow(window);
@@ -2235,7 +2236,10 @@ test('audit: create, edit, disable and remove agents through the real renderer',
 });
 
 async function nativeClick(window,id) {
- const point=await window.webContents.executeJavaScript(`(()=>{const e=document.querySelector('[data-testid="${id}"]');if(!e)throw new Error('missing ${id}');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`);
+ // A native click on a disabled/loading button is intentionally ignored by Chromium.
+ // Wait for React, catalog loading and dialog layout before sending exactly one click.
+ await waitUntil(async()=>window.webContents.executeJavaScript(`(()=>{const e=document.querySelector('[data-testid="${id}"]');return !!e&&!e.disabled&&e.getAttribute('aria-disabled')!=='true';})()`),10000,'enabled '+id);
+ const point=await window.webContents.executeJavaScript(`(async()=>{const e=document.querySelector('[data-testid="${id}"]');e.scrollIntoView({block:'center',behavior:'instant'});await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));const r=e.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};})()`);
  window.webContents.focus();
  window.webContents.sendInputEvent({type:'mouseMove',...point});
  window.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...point});
@@ -2525,7 +2529,7 @@ test('phase2: role provider independence and fixed model policy persist through 
  await window.webContents.executeJavaScript("location.hash='#/configuracoes?tab=agents'");await reloadWindow(window);
  if(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=skip-onboarding]')"))await click(window,'skip-onboarding');
  await click(window,'agent-create');
- const input=async(id,value,tag='HTMLInputElement')=>window.webContents.executeJavaScript('(()=>{const e=document.querySelector('+JSON.stringify('[data-testid='+id+']')+');Object.getOwnPropertyDescriptor('+tag+'.prototype,"value").set.call(e,'+JSON.stringify(value)+');e.dispatchEvent(new Event('+JSON.stringify(tag==='HTMLSelectElement'?'change':'input')+',{bubbles:true}));})()');
+ const input=async(id,value,tag='HTMLInputElement')=>{await waitUntil(async()=>window.webContents.executeJavaScript('!!document.querySelector('+JSON.stringify('[data-testid='+id+']')+')'),10000,'field '+id);return window.webContents.executeJavaScript('(()=>{const e=document.querySelector('+JSON.stringify('[data-testid='+id+']')+');Object.getOwnPropertyDescriptor('+tag+'.prototype,"value").set.call(e,'+JSON.stringify(value)+');e.dispatchEvent(new Event('+JSON.stringify(tag==='HTMLSelectElement'?'change':'input')+',{bubbles:true}));})()');};
  await input('agent-name','Phase2 Reviewer');await input('agent-role','ANALYST','HTMLSelectElement');await input('agent-provider','openai','HTMLSelectElement');await input('agent-account',account.id,'HTMLSelectElement');await waitUntil(async()=>window.webContents.executeJavaScript("!!document.querySelector('[data-testid=agent-model] option[value=\"gpt-5.3-codex-spark\"]')"),10000,'OpenAI catalog');await formValue(window,'agent-model','gpt-5.3-codex-spark');
  assert.equal(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=agent-policy-fields]')"),false,'advanced fields removed');
  await nativeClick(window,'agent-save');
