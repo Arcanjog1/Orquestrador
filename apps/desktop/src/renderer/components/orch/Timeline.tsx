@@ -175,7 +175,7 @@ function TimelineItem({
               ))}
             </div>
             {(entry.lines.length > 1 || entry.lines.some(l=>l.length>160) || entry.headline.length>120 || !!entry.stats?.length) && <button
-              className="mt-2 text-xs font-medium text-primary hover:underline" aria-expanded={expanded}
+              className="mt-2 mr-3 text-xs font-medium text-primary hover:underline" aria-expanded={expanded}
               onClick={()=>setExpanded(v=>!v)}>{expanded ? 'Recolher resposta' : 'Ver resposta completa'}</button>}
             {expanded && entry.stats && (
               <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 border-t border-border pt-3">
