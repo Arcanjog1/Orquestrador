@@ -9,14 +9,22 @@ HEAD inicial: `85fc18d41add4982b87c3b9f4644304f149f9fc3`.
 - `HeroPortrait.tsx` e `hero-identity.ts`: sete identidades por função, avatar e sprite, estados `idle`, `working`, `success`, `blocked`, `needs-human`, `offline`. O avatar é um enquadramento CSS do mesmo PNG; nenhuma versão independente pode divergir da identidade. Falhas de carregamento mostram ícone provisório explicitamente identificado.
 - `ExecutionWorktree.tsx`: projeção horizontal dos mesmos nós e vínculos de `executionGraph`. Colunas representam progressão; delegações paralelas ocupam trilhas distintas. Pan, zoom, ajuste à tela, recolhimento, navegação por teclado, detalhes, evidências, diff e cancelamento são preservados. Setas esquerda/direita navegam entre pai e filho.
 - Cards do mapa: resumos de até 100 caracteres. Respostas lineares: título de até 120 caracteres, uma linha de até 160 caracteres, expansão do conteúdo e das métricas. Resultado final compacto em até 180 caracteres. As mensagens e os relatórios originais não são alterados.
-- `ActivityPanel.tsx`: registro ao lado do mapa e da execução linear. Chamadas persistidas mostram função/agente, tarefa, duração medida, status e acesso ao resultado. A equipe continua filtrada pelas invocações reais da run. Histórico de outra run não recebe a Activity da execução atual. Conversas sem pasta não exibem mudanças Git do diretório do aplicativo.
+- `ActivityPanel.tsx`: respostas no painel inferior direito; diagnóstico completo expansível. Chamadas persistidas mostram função/agente, tarefa, duração medida, status e acesso ao resultado. A equipe continua filtrada pelas invocações reais da run. Histórico de outra run não recebe a Activity da execução atual. Conversas sem pasta não exibem mudanças Git do diretório do aplicativo.
 - `AgentsCard.tsx`, `TeamForm.tsx`, `primitives.tsx`: personagens nos cards, seleção e identidades, com conta/provedor/modelo/raciocínio existentes. As políticas continuam acessíveis em sua própria aba. A sidebar oferece acesso direto à guilda.
 - Moldura nativa Windows com cores da madeira; os controles nativos e a região arrastável continuam funcionando.
 - Build copia os assets para `dist-renderer/assets`, incluídos no `asar` pelo empacotamento existente.
 
+## Revisão de composição após comparação com as referências
+
+A primeira versão foi considerada plana. A revisão usa três assets de cenário originais em `assets/scenery`: parede de taverna, floresta com rio e moldura com pergaminho. O cabeçalho ocupa toda a largura; mapa e equipe ficam sobre a conversa e as respostas. As molduras usam `border-image` em nove partes para preservar os cantos ao redimensionar.
+
+`GuildTeam.tsx` mostra os membros realmente configurados no projeto, com conta, provedor, modelo, raciocínio e status da conexão. Isso é separado das participações registradas na execução. A lista completa continua rolável; em telas menores, a edição da equipe permanece no cabeçalho do projeto.
+
+O mapa se ajusta ao abrir uma execução e estabilizar o tamanho da área. Após navegação manual, preserva o enquadramento; atualizações de conteúdo não o reposicionam. No zoom reduzido, exibe títulos e status; o clique mantém acesso ao conteúdo completo. O registro detalhado da Activity fica expansível e abre durante a execução. Falhas e pedidos de intervenção mantêm um aviso legível acima do mapa, mesmo no modo compacto.
+
 ## Animações
 
-Lanterna com flicker discreto, runa e movimento de trabalho, feedback curto de sucesso, entrada de ramificações, hover e transições. Sem canvas, bibliotecas de partículas ou timers extras. `prefers-reduced-motion: reduce` desativa todas as animações e transições.
+Iluminação das lanternas na arte de cenário, runa e movimento de trabalho, feedback curto de sucesso, entrada de ramificações, hover e transições. Sem canvas, bibliotecas de partículas ou timers extras. `prefers-reduced-motion: reduce` desativa todas as animações e transições.
 
 ## Assets e limitações
 
@@ -37,7 +45,7 @@ node apps/desktop/scripts/rpg-visual.mjs --output=out/rpg/after
 node apps/desktop/scripts/rpg-visual.mjs "--binary=apps/desktop/release/win-unpacked/AI Orchestrator.exe" --output=out/rpg/packaged
 ```
 
-O teste visual usa SQLite isolado e dados de demonstração persistidos, sem credenciais ou chamadas a provedores. Valida direção horizontal, delegações paralelas, tamanho dos resumos, participantes reais, abertura do resultado, preservação de pan/zoom ao recolher Activity, os sete personagens, movimento reduzido, telas de configuração, modo claro e largura de 1024 px. O CI passa a executar o mesmo teste visual no aplicativo empacotado de Windows e Linux.
+O teste visual usa SQLite isolado e dados de demonstração persistidos, sem credenciais ou chamadas a provedores. Valida direção horizontal, delegações paralelas, tamanho dos resumos, participantes reais, abertura do resultado, preservação de pan/zoom ao recolher Activity, a composição de quatro painéis, equipe configurada distinta dos participantes, os sete personagens, movimento reduzido, telas de configuração, modo claro e largura de 1024 px. O CI passa a executar o mesmo teste visual no aplicativo empacotado de Windows e Linux.
 
 Um teste Electron antigo assumia que o repositório público ainda tinha `claude/new-session-3am7mo` como branch padrão. Agora ele compara os valores com metadados atuais do GitHub; as verificações de identidade dos projetos e de falha de metadados permanecem.
 

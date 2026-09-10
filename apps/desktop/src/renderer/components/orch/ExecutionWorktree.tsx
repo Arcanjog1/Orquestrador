@@ -4,6 +4,9 @@ import { heroState, questStatus } from '@shared/hero-identity';
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
+  Flag,
+  ScrollText,
+  PackageCheck,
   ChevronDown,
   ChevronRight,
   Crosshair,
@@ -17,10 +20,10 @@ import { executionGraph, type ExecutionNode } from "@shared/execution-graph";
 import type { ChatMessageView, RunDetailView } from "@shared/ipc-contract";
 import { isRunOver } from "@shared/activity";
 
-const WIDTH = 232,
-  HEIGHT = 116,
-  GAP = 280,
-  ROW = 156;
+const WIDTH = 170,
+  HEIGHT = 108,
+  GAP = 212,
+  ROW = 160;
 export function ExecutionWorktree({
   detail,
   messages,
@@ -46,8 +49,9 @@ export function ExecutionWorktree({
   const [collapsed, collapse] = useState<Set<number>>(new Set());
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 40, y: 90 });
-  const [viewport, setViewport] = useState({ width: 900, height: 700 });
+  const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const surface = useRef<HTMLDivElement>(null);
+  const viewTouched = useRef(false);
   const drag = useRef<{ x: number; y: number; ox: number; oy: number } | null>(
     null,
   );
@@ -65,6 +69,7 @@ export function ExecutionWorktree({
     return () => observer.disconnect();
   }, []);
   useEffect(() => {
+    viewTouched.current = false;
     select(null);
     collapse(new Set());
     setZoom(1);
@@ -124,6 +129,7 @@ export function ExecutionWorktree({
     detail.invocations.map((i) => [i.agentId ?? i.workerId ?? i.role, i]),
   );
   function focus(node: ExecutionNode) {
+    viewTouched.current = true;
     const position = byId.get(node.id);
     if (!position) return;
     setOffset({
@@ -148,7 +154,13 @@ export function ExecutionWorktree({
     setZoom(next);
     setOffset({ x: (viewport.width - width * next) / 2, y: 80 + (viewport.height - 130 - height * next) / 2 });
   }
+  useEffect(() => {
+    if (viewport.width > 0 && viewport.height > 0 && !viewTouched.current) {
+      fit();
+    }
+  }, [detail.run.id, viewport.width, viewport.height]);
   function scale(factor: number) {
+    viewTouched.current = true;
     const next = Math.min(2, Math.max(0.15, zoom * factor));
     setOffset((p) => ({
       x: viewport.width / 2 - ((viewport.width / 2 - p.x) * next) / zoom,
@@ -161,6 +173,7 @@ export function ExecutionWorktree({
     if (!element) return;
     const wheel = (event: WheelEvent) => {
       event.preventDefault();
+      viewTouched.current = true;
       if (event.ctrlKey) scale(event.deltaY < 0 ? 1.1 : 1 / 1.1);
       else setOffset((p) => ({ x: p.x - event.deltaX, y: p.y - event.deltaY }));
     };
@@ -190,7 +203,7 @@ export function ExecutionWorktree({
       )
       .filter(Boolean);
   return (
-    <div className="execution-worktree" data-testid="execution-worktree" data-orientation="horizontal">
+    <div className="execution-worktree" data-testid="execution-worktree" data-orientation="horizontal" data-compact={zoom < 0.8}>
       <div className="worktree-summary">
         <span>
           <GitBranch size={14} /> Mapa da missão · {questStatus(detail.run.status)}
@@ -204,6 +217,9 @@ export function ExecutionWorktree({
         </span>
         <span>{detail.baseline.branch ?? "Sem branch local"}</span>
       </div>
+      {['FAILED', 'BLOCKED', 'NEEDS_HUMAN', 'PAUSED'].includes(detail.run.status) && detail.run.summary && <div className="worktree-attention" role="status">
+        <span>{detail.run.summary}</span><button onClick={() => select(`end:${detail.run.id}`)}>Ver detalhes</button>
+      </div>}
       <div className="worktree-body">
         <div
           ref={surface}
@@ -213,6 +229,7 @@ export function ExecutionWorktree({
           data-testid="worktree-canvas"
           onPointerDown={(e) => {
             if ((e.target as HTMLElement).closest("button")) return;
+            viewTouched.current = true;
             drag.current = {
               x: e.clientX,
               y: e.clientY,
@@ -360,7 +377,7 @@ export function ExecutionWorktree({
               >
                 <button
                   className="node-content"
-                  onClick={() => select(node.id)}
+                  onClick={() => { viewTouched.current = true; select(node.id); }}
                   aria-label={`${node.label}: ${node.status}. Ver resposta completa`}
                 >
                   <span className="node-heading">
@@ -373,14 +390,17 @@ export function ExecutionWorktree({
                           : "node-dot"
                       }
                     />
-                    <strong>{node.label}</strong>
+                    {node.kind === 'user' && <Flag className="node-emblem"/>}
+                    {node.kind === 'evidence' && <ScrollText className="node-emblem"/>}
+                    {node.kind === 'done' && <PackageCheck className="node-emblem"/>}
+                    <strong title={node.label}>{node.kind === 'done' ? 'Resultado' : node.kind === 'evidence' ? 'Evidências' : node.kind === 'orchestrator' ? 'Análise' : node.label}</strong>
                     <span className="node-state">{questStatus(node.status)}</span>
                   </span>
                   <span className="node-summary">
                     {briefText(node.summary, 100) || (node.finishedAt ? "Sem resposta registrada." : "Aguardando resultado.")}
                   </span>
                   <span className="node-footer">
-                    {node.invocation?.model ?? node.kind}{" "}
+                    {questStatus(node.status)}{" "}
                     <span>Ver detalhes →</span>
                   </span>
                 </button>

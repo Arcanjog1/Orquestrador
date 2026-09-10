@@ -22,8 +22,8 @@ export function HeroPortrait({ role, state = 'idle', variant = 'avatar', size = 
 
 export function GuildBanner({ title, subtitle }: { title: string; subtitle: string }) {
   return <header className="guild-banner">
-    <span className="guild-lantern" aria-hidden="true"><i /></span>
-    <div><p className="guild-eyebrow">AI ORCHESTRATOR · GUILDA DE AGENTES</p><h1>{title}</h1><p>{subtitle}</p></div>
-    <span className="guild-sigil" aria-hidden="true">✦</span>
+    <span className="guild-banner-brand"><span aria-hidden="true">✦</span><strong>AI Orchestrator<small>IDEIAS EM AÇÃO, JUNTOS.</small></strong></span>
+    <div><h1>{title}</h1><p>{subtitle}</p></div>
+    <span className="guild-sigil" aria-hidden="true">PLANEJE<br/>DELEGUE<br/>EXECUTE<br/><b>✦</b></span>
   </header>;
 }

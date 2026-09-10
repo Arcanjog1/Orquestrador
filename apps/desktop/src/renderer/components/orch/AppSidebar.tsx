@@ -483,7 +483,7 @@ export function AppSidebar({
         <div className="grid size-7 shrink-0 place-items-center rounded-md bg-primary/15">
           <Sparkles className="size-4 text-primary" />
         </div>
-        {!collapsed && <span className="truncate text-sm font-semibold">AI Orchestrator</span>}
+        {!collapsed && <span className="truncate text-sm font-semibold">Painel do projeto</span>}
         <button
           onClick={onToggle}
           className="ml-auto grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"

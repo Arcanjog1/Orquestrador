@@ -1,3 +1,4 @@
+import { GuildTeam } from '@/components/orch/GuildTeam';
 import { GuildBanner, HeroPortrait } from '@/components/orch/HeroPortrait';
 import {AgentCallDetails} from '@/components/orch/AgentCallDetails';
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -63,15 +64,8 @@ import type {
   WorkspaceView,
 } from "@shared/ipc-contract";
 
-/**
- * The workspace, exactly as approved.
- *
- * Layout, panel order, the xl breakpoint on the activity panel, the collapse
- * button and the keyboard shortcuts are the design's. Everything it shows is
- * the real run: the timeline is built from persisted chat messages, the status
- * from the run record and the live `run:progress` stage, and the composer
- * calls `chat.sendMessage`, which is what actually starts the loop.
- */
+/** Tavern panels present the persisted workspace and run. Configured team,
+ * recorded participation and live execution remain separate data sources. */
 export function WorkspacePage({
   workspaces,
   workspace,
@@ -985,7 +979,9 @@ export function WorkspacePage({
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="guild-workspace-shell flex h-screen flex-col overflow-hidden">
+      <GuildBanner title="Taverna da IA" subtitle="Planeje · Delegue · Execute" />
+      <div className="guild-workspace-body">
       <AppSidebar
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed((v) => !v)}
@@ -1016,8 +1012,9 @@ export function WorkspacePage({
         onShowArchived={setShowArchived}
       />
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        <GuildBanner title="Taverna da IA" subtitle="Planeje. Delegue. Execute." />
+      <main className="guild-workspace-main">
+        <section className="guild-mission-board guild-paper">
+        <div className="guild-project-title"><h2>{workspace.name}</h2><p>Sua ideia. Uma equipe. Um caminho.</p></div>
         <TopContextBar
           state={runState}
           iteration={iteration}
@@ -1048,8 +1045,8 @@ export function WorkspacePage({
 
         <nav className="run-view-tabs" aria-label="Visualização da execução">
           <button aria-pressed={view === 'worktree'} onClick={()=>setView('worktree')}>Worktree</button>
-          <button aria-pressed={view === 'timeline'} onClick={()=>setView('timeline')}>Ver execução linear</button>
-          <button onClick={()=>setEvidenceOpen(true)}>Arquivos e evidências</button>
+          <button aria-pressed={view === 'timeline'} onClick={()=>setView('timeline')}>Execução linear</button>
+          <button onClick={()=>setEvidenceOpen(true)}>Arquivos</button>
           <button onClick={()=>setDiffOpen(true)}>Diff</button>
           <select aria-label="Execução no histórico" value={historyDetail?.run.id ?? ''} onChange={e=>void openHistoricalRun(e.target.value)}><option value="">Execução atual</option>{historyRuns.map(r=><option key={r.id} value={r.id}>{r.status} · {r.objective.slice(0,55)}</option>)}</select><span>{historyDetail?.run.objective ?? run?.objective}</span>
         </nav>
@@ -1077,38 +1074,13 @@ export function WorkspacePage({
             )}
           </div>}
 
-          {!historyDetail && (activityOpen ? (
-            <div className="hidden xl:block">
-              <ActivityPanel
-                records={runDetail?.run.id === run?.id ? runDetail?.invocations : []}
-                state={runState}
-                iteration={iteration}
-                elapsed={elapsed}
-                onClose={() => setActivityOpen(false)}
-                onOpenEvidence={() => setEvidenceOpen(true)}
-                currentAgent={currentAgent}
-                steps={steps}
-                filesChanged={workspace.localPath && changes?.isRepository ? changes.files.length : null}
-                tests={tests}
-                contextPercent={null}
-                onOpenStep={() => (run ? setDetailRunId(run.id) : setEvidenceOpen(true))}
-                liveness={liveness}
-                exchange={exchange}
-                agents={participants}
-                onCancel={() => setCancelOpen(true)}
-              />
-            </div>
-          ) : (
-            <button
-              onClick={() => setActivityOpen(true)}
-              className="absolute top-3 right-3 hidden size-8 place-items-center rounded-md border border-border bg-surface text-muted-foreground transition-colors hover:text-foreground xl:grid"
-              aria-label="Abrir painel de atividade"
-            >
-              <PanelRightOpen className="size-4" />
-            </button>
-          ))}
+
         </div>
 
+        </section>
+        <GuildTeam workspace={workspace} statuses={agentStatus} onEdit={() => setTeamOpen(true)} onManage={() => router.navigate("/configuracoes", { tab: "agents" })}/>
+        <section className="guild-conversation">
+        <h2>Conversa com a equipe</h2>
         {pendingPermissions.length > 0 && (
           <div
             className="mx-4 mb-2 rounded-lg border border-attention/40 bg-attention/5 px-3 py-2"
@@ -1149,7 +1121,39 @@ export function WorkspacePage({
           disabled={sending}
           inputRef={composerRef}
         />
+        </section>
+          {!historyDetail && (activityOpen ? (
+            <div className="guild-activity-dock">
+              <ActivityPanel
+                records={runDetail?.run.id === run?.id ? runDetail?.invocations : []}
+                state={runState}
+                iteration={iteration}
+                elapsed={elapsed}
+                onClose={() => setActivityOpen(false)}
+                onOpenEvidence={() => setEvidenceOpen(true)}
+                currentAgent={currentAgent}
+                steps={steps}
+                filesChanged={workspace.localPath && changes?.isRepository ? changes.files.length : null}
+                tests={tests}
+                contextPercent={null}
+                onOpenStep={() => (run ? setDetailRunId(run.id) : setEvidenceOpen(true))}
+                liveness={liveness}
+                exchange={exchange}
+                agents={participants}
+                onCancel={() => setCancelOpen(true)}
+              />
+            </div>
+          ) : (
+            <button
+              onClick={() => setActivityOpen(true)}
+              className="absolute top-3 right-3 hidden size-8 place-items-center rounded-md border border-border bg-surface text-muted-foreground transition-colors hover:text-foreground xl:grid"
+              aria-label="Abrir painel de atividade"
+            >
+              <PanelRightOpen className="size-4" />
+            </button>
+          ))}
       </main>
+      </div>
 
       <DiffDialog open={diffOpen} onOpenChange={setDiffOpen} workspace={workspace} />
       <EvidenceDialog
@@ -1389,8 +1393,7 @@ function EmptyState({ onSubmit }: { onSubmit: (text: string) => void }) {
         O que vamos construir hoje?
       </h1>
       <p className="mt-2 text-sm text-muted-foreground">
-        Defina o objetivo uma vez. A equipe planeja, delega, executa, verifica e corrige
-        até provar que terminou — ou até precisar da sua decisão.
+        Conte sua ideia. A equipe cuida das próximas etapas.
       </p>
 
       <div className="mt-6">

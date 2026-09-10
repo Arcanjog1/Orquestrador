@@ -39,7 +39,9 @@ services.database.accounts.create({id:'overflow-api',providerId:'anthropic',disp
 const guildAccount=services.accounts.create('Conta de demonstração','openai');
 const roles=['ORCHESTRATOR','CODING_WORKER','ANALYST','DESIGNER','TESTER','RESEARCHER','IMAGE_GENERATOR'];
 const names=['Mago da estratégia','Ferreiro do código','Sábio da revisão','Artista da interface','Guardião dos testes','Explorador de soluções','Ilusionista de imagens'];
-for(let i=0;i<roles.length;i++) services.agents.create({name:names[i],role:roles[i],provider:'openai',accountId:guildAccount.id,model:null,reasoning:null,maxCapability:'BALANCED',maxReasoning:'MEDIUM',enabled:true});
+const guildAgents=[];
+for(let i=0;i<roles.length;i++) guildAgents.push(services.agents.create({name:names[i],role:roles[i],provider:'openai',accountId:guildAccount.id,model:null,reasoning:null,maxCapability:'BALANCED',maxReasoning:'MEDIUM',enabled:true}));
+services.database.workspaces.setTeam(workspace.id, {agentId:guildAgents[0].id}, guildAgents.slice(1,4).map(a=>({agentId:a.id})));
 await services.shutdown();
 
 const port = await new Promise(resolvePort => { const server=createServer(); server.listen(0,'127.0.0.1',()=>{const p=server.address().port;server.close(()=>resolvePort(p));}); });
@@ -97,6 +99,11 @@ try {
     assert.notEqual(workers[0].y,workers[1].y,'parallel delegates have separate tracks');
     assert.equal(await evaluate('[...document.querySelectorAll(".node-summary")].every(e=>e.textContent.length<=100)'),true,'concise graph summaries');
     checks.push('horizontal topology and separate parallel tracks with brief summaries');
+    assert.equal(await evaluate('document.querySelectorAll(".guild-team-card").length'),4,'four configured project members');
+    assert.equal(await evaluate('document.querySelectorAll(".mission-record").length'),3,'configured members do not imply run participation');
+    const composition=await evaluate('(()=>{const r=s=>document.querySelector(s).getBoundingClientRect();return {map:r(".guild-mission-board").toJSON(),team:r(".guild-team").toJSON(),chat:r(".guild-conversation").toJSON(),responses:r(".guild-activity-dock").toJSON()}})()');
+    assert.ok(composition.team.x>composition.map.x && composition.chat.y>=composition.map.bottom && composition.responses.y>=composition.team.bottom,'map and team above conversation and responses');
+    checks.push('reference composition separates configured team from recorded participants');
     assert.equal(await evaluate('document.querySelectorAll(".mission-record").length'),3,'exactly the three recorded invocations');
     const before=await evaluate('document.querySelector(".worktree-world").style.transform');
     await click('[aria-label="Recolher painel de atividade"]');
@@ -121,7 +128,8 @@ try {
   checks.push('brief response expands to the complete original text and collapses again');
   await evaluate("location.hash='#/configuracoes?tab=agents';true");
   await waitFor('!!document.querySelector("[data-testid=agent-card-grid]")');
-  await delay(500);await saveScreenshot('agents');
+  await waitFor('[...document.querySelectorAll(".hero-portrait img")].every(i=>i.complete&&i.naturalWidth>0)');
+  await delay(100);await saveScreenshot('agents');
   if(!process.argv.includes('--baseline')) {
     await waitFor('[...document.querySelectorAll(".hero-portrait img")].every(i=>i.complete&&i.naturalWidth>0)');
     assert.equal(await evaluate('document.querySelectorAll(".hero-portrait[data-placeholder]").length'),0,'all hero images loaded');

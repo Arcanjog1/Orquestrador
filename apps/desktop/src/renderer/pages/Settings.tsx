@@ -142,7 +142,7 @@ export function SettingsPage({
   };
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="guild-settings flex h-screen overflow-hidden bg-background">
       <aside className="guild-sidebar w-[248px] shrink-0 border-r border-sidebar-border bg-sidebar p-3">
         <Link
           to="/"

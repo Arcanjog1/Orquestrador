@@ -1179,7 +1179,7 @@ test('a run that cannot start says which account is missing, and "Detalhes" show
 
     await waitForText(window, /Conecte a conta|não está configurado/, 20000);
     assert.ok(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=execution-worktree]')"));
-    await window.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent==='Ver execução linear').click()");
+    await window.webContents.executeJavaScript("[...document.querySelectorAll('button')].find(b=>b.textContent==='Execução linear').click()");
     const card = await waitForText(window, /A execução não pôde começar/, 20_000);
     assert.doesNotMatch(card, /Sem progresso detectado/, 'a readiness refusal is not "no progress"');
     assert.match(card, /não está configurado|Conecte a conta/);

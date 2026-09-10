@@ -82,16 +82,8 @@ function duration(ms: number): string {
   return `${seconds}s`;
 }
 
-/**
- * The activity panel, exactly as approved.
- *
- * Width (286), section order, dividers, the pulsing run dot and the step rows
- * are the design's. The prototype filled it with fixed numbers - "7 modified",
- * "236 / 237", "64%" and a six-row step list. Those are gone: the steps are the
- * stages the run actually reported, and a figure the application has not
- * measured is an em dash. The context meter renders only when there is a real
- * measurement, which there is not yet - so it is absent, not approximated.
- */
+/** Recorded responses lead the panel; expandable diagnostics retain measured
+ * progress, live tool activity, participant status and cancellation controls. */
 export function ActivityPanel({
   records = [],
   state,
@@ -139,7 +131,7 @@ export function ActivityPanel({
   return (
     <aside data-testid="mission-log" className="mission-log flex h-full w-[286px] shrink-0 flex-col border-l border-border bg-chrome">
       <div className="flex h-14 items-center gap-2 border-b border-border px-4">
-        <span className="text-sm font-semibold">Registro da missão</span>
+        <span className="text-sm font-semibold">Respostas da equipe</span>
         <button
           onClick={onClose}
           className="ml-auto grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -149,7 +141,25 @@ export function ActivityPanel({
         </button>
       </div>
 
-      <div className="flex-1 space-y-5 overflow-y-auto p-4">
+      <div className="mission-log-content flex-1 overflow-y-auto p-4">
+        {records.length > 0 && <section className="mission-records border-t border-border pt-4">
+          <SectionLabel>Participações registradas</SectionLabel>
+          {records.map((record, index) => {
+            const role = HEROES[heroKey(record.role) ?? 'programmer'];
+            const status = !running && ['running','started'].includes(record.outcome) ? 'stopped' : record.outcome;
+            return <button className="mission-record" key={record.id} onClick={() => onOpenStep(index)}
+              aria-label={role.role + ' · ' + questStatus(status) + '. Ver resultado'}>
+              <HeroPortrait role={record.role} state={heroState(status)} size={36}/>
+              <span className="min-w-0"><strong>{agents.find(a=>a.agentId===record.agentId)?.name ?? role.role}</strong>
+                <span>{record.task ?? 'Coordenação e revisão da missão'}</span>
+                <small>{questStatus(status)} · {record.durationMs === null ? 'Duração não informada' : duration(record.durationMs)}</small>
+                <small className="mission-record-link">Ver resultado →</small>
+              </span>
+            </button>;
+          })}
+        </section>}
+        {records.length === 0 && <p className="text-xs text-muted-foreground">As respostas aparecem aqui.</p>}
+        <details className="guild-run-diagnostics" open={running || undefined}><summary>Registro da missão · detalhes</summary><div className="space-y-5">
         <div>
           <SectionLabel>Missão · Activity</SectionLabel>
           <div className="mt-2 flex items-center gap-2">
@@ -246,22 +256,7 @@ export function ActivityPanel({
           </div>
         )}
 
-        {records.length > 0 && <section className="mission-records border-t border-border pt-4">
-          <SectionLabel>Participações registradas</SectionLabel>
-          {records.map((record, index) => {
-            const role = HEROES[heroKey(record.role) ?? 'programmer'];
-            const status = !running && ['running','started'].includes(record.outcome) ? 'stopped' : record.outcome;
-            return <button className="mission-record" key={record.id} onClick={() => onOpenStep(index)}
-              aria-label={role.role + ' · ' + questStatus(status) + '. Ver resultado'}>
-              <HeroPortrait role={record.role} state={heroState(status)} size={36}/>
-              <span className="min-w-0"><strong>{agents.find(a=>a.agentId===record.agentId)?.name ?? role.role}</strong>
-                <span>{record.task ?? 'Coordenação e revisão da missão'}</span>
-                <small>{questStatus(status)} · {record.durationMs === null ? 'Duração não informada' : duration(record.durationMs)}</small>
-                <small className="mission-record-link">Ver resultado →</small>
-              </span>
-            </button>;
-          })}
-        </section>}
+
 
         {agents.length > 0 && (
           <div className="border-t border-border pt-4">
@@ -382,8 +377,8 @@ export function ActivityPanel({
             )}
           </div>
         </div>
+      </div></details>
       </div>
-
       <div className="border-t border-border p-3">
         <button
           onClick={onOpenEvidence}

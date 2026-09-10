@@ -126,3 +126,77 @@ button:not(:disabled):active { filter: brightness(.95); }
 .node-heading strong { max-width:118px; }
 .node-footer { overflow:hidden;white-space:nowrap; }
 .node-footer>span { flex-shrink:0; }
+/* Tavern composition: scenery surrounds real, independently scrolling panels. */
+.guild-workspace-shell { background:#30201b url('./assets/scenery/tavern.png') center/cover; padding:0 10px 12px; }
+.guild-workspace-shell>.guild-banner { min-height:118px; height:118px; border:0; box-shadow:none; background:none; padding:12px 42px 10px 6px; gap:35px; overflow:visible; }
+.guild-banner-brand { display:flex;align-items:center;gap:12px;flex:0 0 245px;background:repeating-linear-gradient(0deg,#0000 0 18px,#1d0d0950 19px 21px),linear-gradient(#75502e,#3e251a);border:5px ridge #a4753c;box-shadow:3px 4px 0 #170e0c;outline:2px solid #2d1b14;padding:12px;color:#ffdf94; }
+.guild-banner-brand>span { font-size:38px; }.guild-banner-brand strong { font:700 19px Georgia,serif;white-space:nowrap; }.guild-banner-brand small { display:block;font:9px monospace;letter-spacing:.08em;margin-top:8px; }
+.guild-workspace-shell>.guild-banner>div { flex:0 1 340px;text-align:center;padding:8px 26px;background:linear-gradient(100deg,#bf8648,#e4b874 50%,#bf8648);border:5px ridge #99622f;box-shadow:4px 5px 0 #21130b, inset 0 0 12px #62351260; }
+.guild-workspace-shell>.guild-banner h1 { font:bold 26px Georgia,serif;letter-spacing:.12em;text-transform:uppercase;color:#3d230f;text-shadow:1px 1px #f0c98c; }
+.guild-workspace-shell>.guild-banner p { color:#5a351b;font:700 11px monospace;letter-spacing:.06em; }
+.guild-workspace-shell>.guild-banner .guild-sigil { margin-left:auto;margin-right:8%;align-self:flex-start;background:#173b50;border:4px ridge #b98944;border-top:0;font:700 11px/1.5 monospace;text-align:center;padding:6px 16px 12px;clip-path:polygon(0 0,100% 0,100% 85%,50% 100%,0 85%);box-shadow:none; }
+.guild-sigil b { font-size:22px; }
+.guild-workspace-body { flex:1;min-height:0;display:flex;gap:12px; }
+.guild-workspace-body>.guild-sidebar { background-color:#251a17ed;border:6px ridge #86572f;box-shadow:2px 3px 0 #100c0a; }
+.guild-workspace-body .guild-brand { margin-top:5px;font-size:11px;height:40px; }
+.guild-workspace-main { flex:1;min-width:0;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) clamp(340px,30vw,440px);grid-template-rows:minmax(0,1fr) 210px;gap:12px;position:relative; }
+.guild-paper { --foreground:#302114;--muted-foreground:#745233;--surface:#ebcc98;--surface-raised:#ddbc87;--chrome:#edcf9c;--border:#bd965b;--border-strong:#846039;--primary:#216a69;--primary-foreground:#f7f0d7;--accent:#dcb981;--accent-foreground:#382817;--background:#efce96;--running:#23647e;--success:#3f6d31;--attention:#8b581c;--danger:#a23a31;color:var(--foreground);background:radial-gradient(ellipse at center,#f7dfad,#e9c389);border:10px solid #754a28;box-shadow:2px 3px 0 #1f120e,inset 0 0 0 2px #d5a96b,inset 0 0 28px #95602d70; }
+.guild-mission-board { min-width:0;min-height:0;display:flex;flex-direction:column;position:relative;padding:8px; }
+.guild-project-title { padding:0 8px 7px; }.guild-project-title h2 { font-size:19px;font-weight:700;line-height:1.3; }.guild-project-title p { font-size:11px;color:#785334;margin-top:3px; }
+.guild-mission-board .guild-context { padding:5px 7px;gap:6px;min-height:40px;height:auto;flex-wrap:wrap;background:transparent;box-shadow:none;border:0; }
+.guild-mission-board .guild-context button>span { max-width:180px;font-size:10px; }
+.guild-mission-board .run-view-tabs { padding:6px 6px 9px;background:transparent;border:0;gap:5px; }
+.guild-mission-board .run-view-tabs button { background:#c49b5b40;border:1px solid #ba8c50;border-radius:4px;font-size:11px;padding:6px 8px; }
+.guild-mission-board .run-view-tabs button[aria-pressed=true] { background:#183c40;color:#cff5e7;border-color:#2b7474; }
+.guild-mission-board .run-view-tabs>span { display:none; }.guild-mission-board .run-view-tabs select { max-width:150px;min-width:120px;font-size:10px;background:#e2bd83; }
+.guild-mission-board .worktree-summary { padding:5px 8px;font-size:10px;gap:5px 10px;background:transparent;border:0; }
+.guild-mission-board .worktree-summary>span:last-child { margin-left:auto; }
+.guild-mission-board .execution-worktree { gap:5px; }
+.guild-mission-board .worktree-body { border:3px ridge #aa8350;min-width:0; }
+.worktree-canvas { background:#354935 url('./assets/scenery/forest.png') center/cover no-repeat;image-rendering:pixelated;box-shadow:inset 0 0 45px #11201c77; }
+.worktree-canvas::before { content:none; }
+.worktree-toolbar { background:#1e312bed;color:#f2deb1;--foreground:#f2deb1;--border:#846e46;--accent:#405447;top:10px;left:10px;max-width:calc(100% - 20px);flex-wrap:wrap; }
+.worktree-legend { font-size:9px;right:10px;bottom:8px; }
+.execution-node { background:linear-gradient(115deg,#f9e0ac,#dcb171);border:4px ridge #ad773f;box-shadow:3px 4px 0 #19291be6,inset 0 0 9px #92602a55; }
+.node-heading strong { font-size:13px; }.node-summary { font-size:11px;line-height:1.4; }.worktree-detail { background:#2a231f;color:#f4e7cd;--foreground:#f4e7cd;--muted-foreground:#bfae97;--surface:#362c24;--border:#775d3f;--primary:#80d6c7; }
+.guild-team { min-height:0;min-width:0;display:flex;flex-direction:column;padding:8px; }
+.guild-panel-heading { display:flex;align-items:flex-start;gap:8px;padding:0 2px 12px; }.guild-panel-heading>div { flex:1;min-width:0; }.guild-panel-heading h2 { display:flex;align-items:center;gap:5px;font-size:17px;font-weight:700; }.guild-panel-heading p { font-size:11px;margin-top:4px;color:#735235; }
+.guild-create { display:flex;align-items:center;gap:3px;flex-shrink:0;font-size:10px;padding:7px;background:#62cbc8;color:#173637;border:1px solid #267a7c;border-radius:4px;box-shadow:0 2px 0 #88633b; }
+.guild-team-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;gap:10px;overflow:auto;min-height:0;padding:2px 2px 5px;flex:1; }
+.guild-team-card { min-width:0;text-align:left;border:3px ridge #c09762;background:linear-gradient(110deg,#f1d4a3,#e1b879);box-shadow:2px 2px #6d4a29; }
+.guild-team-identity { display:flex;align-items:center;flex-wrap:wrap;justify-content:center;gap:0;min-height:122px;padding:2px 4px 7px; }
+.guild-team-identity>div { flex:1;min-width:80px;padding:0 4px; }.guild-team-identity h3 { font-weight:700;font-size:12px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden; }
+.guild-team-identity>div>span { display:block;font-size:10px;margin-top:5px;color:#5f543c; }.guild-team-identity>div>span::before { content:'●';color:#967952;margin-right:4px; }.guild-team-identity [data-status=idle]::before { color:#2b8170; }.guild-team-identity [data-status=running]::before { color:#258398; }
+.guild-team-card dl { display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 7px;background:#ffe3b180;padding:7px;font-size:10px;line-height:1.4; }.guild-team-card dt { color:#86603d; }.guild-team-card dd { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }.guild-team-card:hover { border-color:#317e77; }
+.guild-team-edit { display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:7px;border:1px solid #a97e46;background:#deba804d;font-size:11px; }
+.guild-team-empty { grid-column:1/-1;text-align:center;padding:25px 5px;color:#79573a;font-size:12px; }
+.guild-conversation,.guild-activity-dock { min-height:0;min-width:0;background:#221d1def;border:7px ridge #794b2b;box-shadow:2px 3px 0 #170f0c;overflow:auto; }
+.guild-conversation { grid-column:1;grid-row:2;display:flex;flex-direction:column; }
+.guild-conversation>h2 { color:#eadbc6;padding:10px 16px 0;font-size:13px;font-weight:600; }.guild-conversation>h2::before { content:'◈';color:#6cc4cf;margin-right:9px; }
+.guild-conversation>div { background:transparent;border:0;padding:10px 14px; }.guild-conversation textarea { font-size:12px; }.guild-conversation .max-w-3xl { max-width:none; }.guild-conversation>div>p { font-size:9px; }.guild-conversation>div>div { border-radius:6px;background:#25282ce6; }
+.guild-activity-dock { grid-column:2;grid-row:2; }
+.guild-activity-dock .mission-log { width:100%;border:0;background:transparent; }.guild-activity-dock .mission-log>div:first-child { min-height:34px;height:34px;padding:0 10px;background:transparent;border:0;color:#f3dfc3; }
+.guild-activity-dock .mission-log-content { padding:0 8px 8px; }.guild-activity-dock .mission-records { padding:0;border:0; }.mission-records>div:first-child { display:none; }.guild-activity-dock .mission-record { padding:7px!important;gap:8px;background:#282a2f;border:1px solid #494744!important;border-radius:5px!important;margin-bottom:5px; }.guild-activity-dock .mission-record strong { font-size:11px; }.guild-activity-dock .mission-record small { display:inline;font-size:9px; }.guild-activity-dock .mission-record .mission-record-link { margin-left:10px;white-space:nowrap; }.guild-activity-dock .mission-record span>span { font-size:10px;-webkit-line-clamp:1; }
+.guild-run-diagnostics { margin-top:9px; }.guild-run-diagnostics>summary { cursor:pointer;font-size:11px;color:#cba971;padding:6px 0; }.guild-run-diagnostics>div { padding-top:10px; }.guild-activity-dock .mission-log>div:last-child { padding:5px 8px; }
+.guild-workspace-main>[aria-label='Abrir painel de atividade'] { grid-column:2;grid-row:2;position:static;display:block;width:100%;height:100%;background:#241c17d9;border:5px ridge #7b542f; }
+.guild-empty { background:#f1d49bdc;margin:15px;border:3px ridge #a87a42;max-width:calc(100% - 30px);width:100%;color:#3b2a18; }.guild-empty h1 { font-size:25px; }.guild-empty p { color:#6b4d30; }
+@media(min-width:1550px) { .guild-team-identity { flex-wrap:nowrap;min-height:105px; }.guild-team-identity>div { min-width:0; }.guild-team-card dl { font-size:12px; }.guild-team-identity h3 { font-size:14px; }.guild-workspace-main { grid-template-columns:minmax(0,1fr) 440px; } }
+@media(max-width:1279px) { .guild-workspace-main { grid-template-columns:minmax(0,1fr); }.guild-team,.guild-activity-dock { display:none; }.guild-workspace-main>[aria-label='Abrir painel de atividade'] { display:none; }.guild-workspace-shell>.guild-banner .guild-sigil { margin-right:0; }.guild-workspace-shell>.guild-banner { gap:20px; }.guild-workspace-shell>.guild-banner>div { flex:1; }.guild-workspace-body { gap:9px; } }
+@media(max-height:800px) { .guild-workspace-shell>.guild-banner { min-height:90px;height:90px;padding-block:5px; }.guild-workspace-main { grid-template-rows:minmax(0,1fr) 180px; }.guild-workspace-shell>.guild-banner h1 { font-size:21px; }.guild-team-identity { min-height:90px; }.guild-team-identity>.hero-portrait { width:62px!important;height:62px!important; }.guild-conversation>h2 { padding-top:5px; } }
+.guild-paper { border-width:14px;border-image:url('./assets/scenery/parchment-frame.png') 84 fill / 14px / 0 stretch;box-shadow:3px 4px 0 #180f0c; }
+.guild-team-card { border-image:url('./assets/scenery/parchment-frame.png') 84 fill / 5px / 0 stretch;border-width:5px; }
+.guild-workspace-body>.guild-sidebar,.guild-conversation,.guild-activity-dock { border-image:url('./assets/scenery/parchment-frame.png') 68 / 9px / 0 stretch;border-width:9px; }
+.execution-node { border-image:url('./assets/scenery/parchment-frame.png') 84 fill / 7px / 0 stretch;border-width:7px; }
+.execution-node .node-content { padding:4px 5px;gap:3px; }.node-heading { flex-wrap:wrap;gap:4px; }.node-heading strong { max-width:105px;font-size:14px; }.node-heading .node-state { display:none; }.node-emblem { width:28px;height:28px;stroke-width:2;color:#6e441c; }.node-heading>.node-dot { display:none; }.node-footer { font-size:10px; }
+[data-compact=true] .node-summary { display:none; }[data-compact=true] .node-heading { flex:1;align-content:center;gap:5px; }[data-compact=true] .node-heading strong { font-size:18px;max-width:100%; }[data-compact=true] .node-footer { font-size:12px; }[data-compact=true] .node-footer>span { display:none; }
+.worktree-edges path { stroke-width:5;stroke-dasharray:10 6;opacity:1; }
+.hero-portrait[data-state=offline] img { filter:grayscale(.2);opacity:.8; }
+.guild-team-identity .hero-sprite img { mix-blend-mode:multiply; }
+.guild-team-identity { min-height:107px; }.guild-team-card dl { padding:6px;font-size:10px; }
+.guild-settings { background:#31231d url('./assets/scenery/tavern.png') center/cover fixed; }.guild-settings>aside { background-color:#271d19eb; }.guild-settings>main { background:#231c17a8; }
+[data-testid=agents-manager] .guild-banner { border:12px solid transparent;border-image:url('./assets/scenery/parchment-frame.png') 84 fill / 12px;box-shadow:3px 4px #160f0b;min-height:115px; }.guild-banner-brand { display:none; }.guild-workspace-shell>.guild-banner .guild-banner-brand { display:flex; }
+[data-testid=agents-manager] .guild-banner h1 { font:bold 24px Georgia,serif;color:#442611;letter-spacing:.06em;text-transform:uppercase; }[data-testid=agents-manager] .guild-banner p { color:#785532; }[data-testid=agents-manager] .guild-sigil { display:none; }
+.hero-card { border:9px solid transparent;border-image:url('./assets/scenery/parchment-frame.png') 84 fill / 9px;box-shadow:3px 4px #160f0b;padding:16px; }.hero-card:hover { border-image-source:url('./assets/scenery/parchment-frame.png'); }.hero-card::after { display:none; }
+.guild-team-identity { flex-wrap:nowrap;min-height:98px; }.guild-team-identity>.hero-portrait { width:76px!important;height:76px!important; }.guild-team-identity>div { min-width:0; }.guild-team-card dl { padding:7px; }
+.worktree-attention { display:flex;align-items:center;gap:10px;flex-shrink:0;border:1px solid #a65c36;background:#f5d4a3;padding:8px 10px;font-size:12px;color:#733a1f; }.worktree-attention>span { flex:1;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden; }.worktree-attention>button { flex-shrink:0;text-decoration:underline; }
+.guild-banner-brand strong { font-family:'JetBrains Mono',monospace;font-size:17px;letter-spacing:-.04em; }.guild-workspace-shell>.guild-banner h1,[data-testid=agents-manager] .guild-banner h1 { font-family:'JetBrains Mono',monospace; }

@@ -35,7 +35,7 @@ export const HERO_STATE_LABELS: Record<HeroState, string> = {
 export function questStatus(status: string): string {
   const labels: Record<string, string> = {
     running: 'Executando', started: 'Executando', pending: 'Aguardando', queued: 'Aguardando',
-    idle: 'Aguardando', done: 'Concluído', completed: 'Concluído', passed: 'Validado',
+    read: 'Registrado', idle: 'Aguardando', done: 'Concluído', completed: 'Concluído', passed: 'Validado',
     failed: 'Falhou', error: 'Erro', blocked: 'Bloqueado', partial: 'Parcial', stopped: 'Interrompido',
     cancelled: 'Cancelado', canceled: 'Cancelado', 'needs-human': 'Precisa de você', paused: 'Pausado',
   };
