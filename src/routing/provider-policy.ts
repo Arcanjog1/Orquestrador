@@ -36,6 +36,8 @@ export interface WorkerRuntimeCapabilities {
   effortFlag: boolean;
   /** Model aliases the help page names, when it names any. */
   declaredModels: readonly string[] | null;
+  /** False for a partial cache/catalog: omission is not proof of lack of support. */
+  declaredModelsComplete?: boolean;
   /** Effort values the help page names, when it names any. */
   declaredEfforts: readonly string[] | null;
   modelEfforts?: Readonly<Record<string, readonly string[]>>;

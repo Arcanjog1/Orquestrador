@@ -121,7 +121,7 @@ export class IpcRouter {
     );
     this.handlers.set('settings.set', (p) => {
       const { key, value } = p as { key: string; value: string };
-      if (key.endsWith('.enc')) throw new IpcValidationError('payload.key is not a setting the interface may write');
+      if (key.endsWith('.enc') || key.startsWith('account-model-availability.')) throw new IpcValidationError('payload.key is not a setting the interface may write');
       s.database.settings.set(key, value);
       return { saved: true };
     });
@@ -187,6 +187,7 @@ export class IpcRouter {
     this.handlers.set('agents.manage', () => s.agents.manage());
     this.handlers.set('agents.roles', () => s.agents.roles());
     this.handlers.set('agents.models', p => {const input=p as IpcMap['agents.models']['request'];return s.agentModels(input.accountId,input.role);});
+    this.handlers.set('agents.verifyModels', p => s.verifyAgentModels((p as IpcMap['agents.verifyModels']['request']).agentId));
     this.handlers.set('agents.policies', () => s.agents.policies());
     this.handlers.set('agents.savePolicies', p => s.agents.savePolicies(p as IpcMap['agents.savePolicies']['request']));
     this.handlers.set('agents.projectPolicy', p => s.agents.projectPolicy((p as IpcMap['agents.projectPolicy']['request']).workspaceId));

@@ -2613,6 +2613,35 @@ test('cards: simple model selector shows official provider names without advance
  }finally{services.agentModels=original;}
 });
 
+test('cards: account verification is neutral, isolated and preserves fixed selection',async()=>{
+ const window=await openWindow();
+ const {AccountModelAvailability}=await load('apps/desktop/src/main/services/account-model-availability.js');
+ const {decorateAgentModels,knownAgentModels}=await load('apps/desktop/src/main/services/agent-model-catalog.js');
+ const {defaultAgentPolicy}=await load('apps/desktop/src/shared/agent-policy.js');
+ const original=services.agentModels.bind(services),originalVerify=services.verifyAgentModels.bind(services);
+ const store=new AccountModelAvailability(services.database.settings);
+ const a=services.accounts.create('Verification A','anthropic'),b=services.accounts.create('Verification B','anthropic');
+ services.database.accounts.updateAuth(a.id,'connected','fixture');services.database.accounts.updateAuth(b.id,'connected','fixture');
+ const create=account=>services.agents.create({name:account.id===a.id?'Verification A':'Verification B',role:'CODING_WORKER',provider:'anthropic',accountId:account.id,model:'claude-sonnet-5',reasoning:null,maxCapability:null,maxReasoning:null,enabled:true,policy:defaultAgentPolicy('CODING_WORKER','claude-sonnet-5')});
+ const first=create(a),second=create(b);const verified=[];
+ services.agentModels=async(id,role)=>decorateAgentModels(store.apply(id,'anthropic',knownAgentModels('anthropic')),services.database.accounts.require(id),services.agents.policies(),role);
+ services.verifyAgentModels=async id=>{verified.push(id);const accountId=services.database.agents.require(id).account_id;const value={accountId,provider:'anthropic',checkedAt:new Date().toISOString(),confirmed:['claude-sonnet-5'],denied:[],detail:'Verificação concluída para esta conta.'};store.write(accountId,value);return value;};
+ try {
+  await window.webContents.executeJavaScript("location.hash='#/configuracoes?tab=agents'");await reloadWindow(window);
+  if(await window.webContents.executeJavaScript("!!document.querySelector('[data-testid=skip-onboarding]')"))await click(window,'skip-onboarding');
+  const status=async id=>window.webContents.executeJavaScript('(()=>{const el=document.querySelector('+JSON.stringify('[data-testid="agent-availability-'+id+'"]')+');return el?{text:el.textContent,classes:el.className}:null})()');
+  await waitUntil(async()=>(await status(first.id))?.text==='Disponível no catálogo — ainda não verificado nesta conta',10000,'neutral availability');
+  assert.ok((await status(first.id)).classes.includes('text-muted-foreground'));
+  assert.equal(verified.length,0,'render never verifies automatically');
+  await click(window,'agent-verify-'+first.id);
+  await waitUntil(async()=>(await status(first.id))?.text==='Disponível nesta conta',10000,'account confirmed');
+  assert.deepEqual(verified,[first.id]);assert.equal((await status(second.id)).text,'Disponível no catálogo — ainda não verificado nesta conta');
+  store.write(a.id,{accountId:a.id,provider:'anthropic',checkedAt:new Date().toISOString(),confirmed:[],denied:['claude-sonnet-5'],detail:'fixture'});
+  await reloadWindow(window);await waitUntil(async()=>(await status(first.id))?.text==='Indisponível nesta conta',10000,'explicit denial');
+  assert.equal(services.agents.manage().find(agent=>agent.id===first.id).policy.primaryModel,'claude-sonnet-5');
+ }finally{services.agentModels=original;services.verifyAgentModels=originalVerify;}
+});
+
 /* --------------------------------------------------------------- the run */
 
 console.log('# electron main started, waiting for app ready');

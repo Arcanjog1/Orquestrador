@@ -84,6 +84,7 @@ export class CodexAdapter implements AgentRunner {
     const models=this.cachedModels();
     return {modelFlag:caps.flags.has('--model'),effortFlag:caps.flags.has('--config'),
       declaredModels:models.length?models.map(m=>m.id):null,
+      declaredModelsComplete:false,
       modelEfforts:Object.fromEntries(models.map(m=>[m.id,m.reasoning])),
       declaredEfforts:codexSupportedEfforts(await this.readVersion(executable,cwd))};
   }

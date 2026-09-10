@@ -10,6 +10,7 @@
  */
 
 import {selectionProblem} from '../../shared/model-display.js';
+import {AccountModelAvailability,parseAccountModelListing,UNVERIFIED_DETAIL} from './account-model-availability.js';
 import {decorateAgentModels,knownAgentModels} from './agent-model-catalog.js';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -576,12 +577,18 @@ export class AppServices {
         const saved=this.agents.manage().filter(a=>a.accountId===accountId).flatMap(a=>a.policy?.allowedModels??(a.model?[a.model]:[]));
         for(const id of new Set(saved))if(/^(opus|sonnet|haiku|fable)$/.test(id)&&!rows.some(m=>m.id===id))rows.push({id,provider:'anthropic',source:'catalog',reasoning:[],accountAllowed:null});
       }
-      return decorateAgentModels(rows,account,this.agents.policies(),role);
+      const known=knownAgentModels(account.provider_id as 'openai'|'anthropic');
+      rows=[...rows,...known.filter(m=>!rows.some(row=>row.id===m.id))];
+      const availability=new AccountModelAvailability(this.database.settings);
+      const evidence=availability.read(accountId,account.provider_id);
+      for(const id of new Set([...(evidence?.confirmed??[]),...(evidence?.denied??[])]))if(!rows.some(row=>row.id===id))rows.push({id,provider:account.provider_id as 'openai'|'anthropic',source:account.connection_kind==='api'?'provider':'runtime',reasoning:[],accountAllowed:null});
+      return decorateAgentModels(availability.apply(accountId,account.provider_id,rows),account,this.agents.policies(),role);
     };
     if(account.connection_kind==='api') {
       const api=this.apiProviderFor(accountId,'');
       if(!api) return decorate(knownAgentModels(account.provider_id as 'openai'|'anthropic'));
-      const models=await api.getAvailableModels();
+      let models:Awaited<ReturnType<typeof api.getAvailableModels>>;
+      try {models=await api.getAvailableModels();} catch {return decorate(knownAgentModels(account.provider_id as 'openai'|'anthropic'));}
       return decorate(models.map(m=>({id:m.id,displayName:m.displayName,provider:account.provider_id as 'openai'|'anthropic',source:'provider' as const,reasoning:[],accountAllowed:true})));
     }
     const adapter=account.provider_id==='openai'?this.codexAdapterFor(accountId):this.claudeAdapterFor({local_path:'',id:''} as WorkspaceWithAgents,accountId,null);
@@ -589,6 +596,48 @@ export class AppServices {
     try {capabilities=await adapter.describeCapabilities();} catch {return decorate(knownAgentModels(account.provider_id as 'openai'|'anthropic'));}
     const cached=adapter instanceof CodexAdapter?adapter.cachedModels():[];
     return decorate(capabilities.declaredModels?.length?capabilities.declaredModels.map(id=>({id,displayName:cached.find(m=>m.id===id)?.displayName,provider:account.provider_id as 'openai'|'anthropic',source:'runtime' as const,reasoning:[...(cached.find(m=>m.id===id)?.reasoning??capabilities.declaredEfforts??[])],accountAllowed:null})):knownAgentModels(account.provider_id as 'openai'|'anthropic',capabilities));
+  }
+
+  /** Explicit, account-bound metadata check. No prompt, exec, chat or completion is ever sent. */
+  async verifyAgentModels(agentId:string):Promise<import('../../shared/model-availability.js').AccountModelVerification> {
+    const agent=this.database.agents.require(agentId);
+    if(!agent.account_id)throw new Error('Vincule uma conta ao agente.');
+    const account=this.database.accounts.require(agent.account_id);
+    const provider=account.provider_id as 'openai'|'anthropic';
+    const result:import('../../shared/model-availability.js').AccountModelVerification={accountId:account.id,provider,checkedAt:new Date().toISOString(),confirmed:[],denied:[],detail:account.connection_kind==='api'?'A conexão não informou modelos disponíveis nesta conta. Os modelos do catálogo continuam não verificados. Nenhuma chamada ao modelo foi feita.':UNVERIFIED_DETAIL};
+    try {
+      if(account.connection_kind==='api') {
+        const api=this.apiProviderFor(account.id,'');
+        if(api)result.confirmed=(await api.getAvailableModels()).map(m=>m.id);
+      } else {
+        const runtime=provider==='openai'?'codex':'claude-code';
+        const command=await this.runtimeManager.getExecutablePath(runtime);
+        const env={...this.runtimeManager.childEnvironmentOverlay(runtime),...(provider==='openai'?this.codexAccountManager:this.accountManager).buildEnvironment(account.id)};
+        const run=(args:string[])=>this.processManager.run({command,args,env,cwd:this.paths.root,timeoutMs:10_000});
+        // Auth status is a known non-inference command; model-list commands are only used when advertised.
+        const help=await run(['--help']);
+        const probes:string[][]=[];
+        if(help.exitCode===0&&help.outcome==='completed'&&/^\s+models\s/m.test(help.stdout)) {
+          const modelsHelp=await run(['models','--help']);
+          if(modelsHelp.exitCode===0&&modelsHelp.outcome==='completed'&&/^\s+list\s/m.test(modelsHelp.stdout)) {
+            const listHelp=await run(['models','list','--help']);
+            if(listHelp.exitCode===0&&listHelp.outcome==='completed'&&listHelp.stdout.includes('--json'))probes.push(['models','list','--json']);
+          }
+        }
+        if(provider==='anthropic')probes.push(['auth','status','--json']);
+        for(const args of probes) {
+          const response=await run(args);
+          if(response.exitCode!==0||response.outcome!=='completed'||response.truncated)continue;
+          const listing=parseAccountModelListing(response.stdout,account.id);
+          if(listing){result.confirmed=listing.confirmed;result.denied=listing.denied;break;}
+        }
+      }
+      if(result.confirmed.length||result.denied.length)result.detail='Verificação concluída somente para esta conta. Modelos sem informação continuam não verificados. Nenhuma chamada ao modelo foi feita.';
+    } catch {result.detail='Não foi possível concluir a verificação desta conta. Tente novamente. Nenhum modelo foi marcado como indisponível e nenhuma chamada ao modelo foi feita.';}
+    // A relink while the check was running must not update the newly linked account.
+    if(this.database.agents.require(agentId).account_id!==account.id)throw new Error('A conta do agente mudou. Verifique novamente.');
+    new AccountModelAvailability(this.database.settings).write(account.id,result);
+    return result;
   }
 
   /** All renderer saves re-read the selected account's catalog; no trust in submitted labels/capabilities. */

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import {AccountModelAvailability} from './account-model-availability.js';
 import type { Database } from '../core.js';
 import { newId } from '../core.js';
 import type { AgentInput, AgentResult } from '../../../../../src/core/types.js';
@@ -38,7 +39,8 @@ export class AgentExecutionPolicy {
     const global=service.policies();
     const project=service.projectPolicy(workspaceId);
     const options=agent?agentConfig(agent.runtime_options):{};
-    const restricted=options.policy || global.models.length || Object.keys(global.defaults).length || Object.keys(project).length || (agent&&((roleDefinition(agent.role)?.id!=='CODING_WORKER'&&roleDefinition(agent.role)?.lane==='delegate')||(agent.role==='ORCHESTRATOR'&&agent.provider_id==='anthropic')));
+    const accountEvidence=accountId&&agent?new AccountModelAvailability(this.database.settings).read(accountId,agent.provider_id):null;
+    const restricted=accountEvidence?.denied.length || options.policy || global.models.length || Object.keys(global.defaults).length || Object.keys(project).length || (agent&&((roleDefinition(agent.role)?.id!=='CODING_WORKER'&&roleDefinition(agent.role)?.lane==='delegate')||(agent.role==='ORCHESTRATOR'&&agent.provider_id==='anthropic')));
     if(!restricted) {input.beforeInvocation?.();return runner.run(args);}
     const startedAt=new Date().toISOString();
     const id=newId('policy-call');
@@ -55,7 +57,7 @@ export class AgentExecutionPolicy {
       const rows=this.database.driver.all<{snapshot:string;observation:string|null;status:string}>('SELECT snapshot,observation,status FROM agent_policy_calls WHERE run_id=? AND agent_id=?',[args.runId,agent.id]);
       const actual=rows.filter(row=>['RUNNING','COMPLETED','FAILED','CANCELLED'].includes(row.status));
       const observations=actual.map(row=>row.observation?JSON.parse(row.observation) as {failure?:string;model?:string;usage?:{totalTokens:number|null;costUsd:number|null}}:null);
-      const unavailable=observations.filter(o=>o?.failure==='model-unavailable').map(o=>o!.model!);
+      const unavailable=[...actual.filter(row=>JSON.parse(row.snapshot).accountId===account.id).map(row=>row.observation?JSON.parse(row.observation):null).filter(o=>o?.failure==='model-unavailable').map(o=>o.model),...(new AccountModelAvailability(this.database.settings).read(account.id,account.provider_id)?.denied??[])];
       const fingerprint=this.fingerprint(agent.id,workspaceId);
       snapshot={...snapshot,accountName:account.display_name,policyFingerprint:fingerprint,policy,globalPolicy:global,projectPolicy:project};
       // Model confirmation is tied to the entire policy and the run, not an enduring credit grant.

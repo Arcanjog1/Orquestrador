@@ -441,6 +441,7 @@ export const REQUEST_VALIDATORS: {
   'agents.manage': noArgs,
   'agents.roles':noArgs,
   'agents.models':obj({accountId:id,role:str({min:1,max:80})},{optional:['role']}),
+  'agents.verifyModels':obj({agentId:id}),
   'agents.policies':noArgs,
   'agents.savePolicies':globalPolicy,
   'agents.projectPolicy':obj({workspaceId:id}),

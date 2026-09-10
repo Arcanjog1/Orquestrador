@@ -80,3 +80,32 @@ test('explicit Astra and Fable global blocks prevent fixed calls before invocati
  const result=await p.boundary.invoke({workspaceId:p.ws.id,agentId:p.agent.id,accountId:p.account.id,runner:p.runner,args:p.args,capabilities:{...caps,declaredModels:[...caps.declaredModels,model]}});
  assert.equal(result.invocationSkipped,true);assert.equal(p.runner.calls.length,0);
 }finally{await p.f.cleanup();}}});
+
+for(const scenario of ['unverified','denied','other-account-denied','global-blocked','premium-blocked'] as const) {
+ test('availability execution boundary: '+scenario,async()=>{
+  const p=prepare();try {
+   const {AccountModelAvailability}=await import('../apps/desktop/src/main/services/account-model-availability.js');
+   const store=new AccountModelAvailability(p.db.settings);
+   const accountId=scenario==='other-account-denied'?p.f.services.accounts.create('B','anthropic').id:p.account.id;
+   store.write(accountId,{accountId,provider:'anthropic',checkedAt:new Date().toISOString(),confirmed:scenario.endsWith('blocked')?['sonnet']:[],denied:scenario.includes('denied')?['sonnet']:[],detail:'fixture'});
+   if(scenario==='global-blocked')p.f.services.agents.savePolicies({models:[blocked('sonnet')],defaults:{},routing:{}});
+   if(scenario==='premium-blocked')p.f.services.agents.savePolicies({models:[{...blocked('sonnet'),allowed:true,premium:true}],defaults:{},routing:{}});
+   const result=await p.boundary.invoke({workspaceId:p.ws.id,agentId:p.agent.id,accountId:p.account.id,runner:p.runner,args:p.args,capabilities:{...caps,declaredModels:['haiku'],declaredModelsComplete:false}});
+   if(scenario==='unverified'||scenario==='other-account-denied') {assert.equal(p.runner.calls.length,1);assert.equal(p.runner.calls[0]?.routing?.model,'sonnet');}
+   else {assert.equal(result.invocationSkipped,true);assert.equal(p.runner.calls.length,0);}
+   assert.equal(p.f.services.agents.manage().find(a=>a.id===p.agent.id)?.policy?.primaryModel,'sonnet');
+  }finally{await p.f.cleanup();}
+ });
+}
+
+test('a prior runtime refusal never follows an agent relinked from account A to account B',async()=>{
+ const p=prepare();try {
+  const run=p.runner.run.bind(p.runner);
+  p.runner.run=async args=>({...await run(args),exitCode:1,failure:'model-unavailable'});
+  await p.invoke();assert.equal(p.runner.calls.length,1);
+  const b=p.f.services.accounts.create('Account B','anthropic');p.db.accounts.updateAuth(b.id,'connected','fixture');
+  p.f.services.agents.update(p.agent.id,{...p.config,accountId:b.id});p.runner.run=run;
+  const result=await p.boundary.invoke({workspaceId:p.ws.id,agentId:p.agent.id,accountId:b.id,runner:p.runner,args:p.args,capabilities:caps});
+  assert.notEqual(result.invocationSkipped,true);assert.equal(p.runner.calls.length,2);assert.equal(p.runner.calls[1]?.routing?.model,'sonnet');
+ }finally{await p.f.cleanup();}
+});

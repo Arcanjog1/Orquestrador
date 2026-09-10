@@ -103,7 +103,7 @@ export class OpenAiApiProvider implements AgentProvider {
   }
 
   async describeCapabilities():Promise<import('../routing/provider-policy.js').WorkerRuntimeCapabilities> {
-    return {modelFlag:true,effortFlag:true,declaredModels:(await this.getAvailableModels()).map(m=>m.id),declaredEfforts:OPENAI_EFFORTS};
+    return {modelFlag:true,effortFlag:true,declaredModels:(await this.getAvailableModels()).map(m=>m.id),declaredModelsComplete:false,declaredEfforts:OPENAI_EFFORTS};
   }
 
   getCapabilities(): ProviderCapabilities {

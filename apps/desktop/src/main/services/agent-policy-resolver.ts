@@ -48,7 +48,7 @@ export function resolveAgentPolicy(input:PolicyResolutionInput) {
     const tier=rules.find(m=>m.capability)?.capability??modelCapability(provider,model);
     if([account.maxCapability,...layers.map(l=>l.maxCapability)].some(ceiling=>ceiling&&(!tier||tiers.indexOf(tier)>tiers.indexOf(ceiling)))) return 'teto de modelo';
     if(!capabilities.modelFlag) return 'runtime não garante o modelo';
-    if(capabilities.declaredModels&&!capabilities.declaredModels.includes(model)) return 'modelo não suportado pelo runtime';
+    if(capabilities.declaredModelsComplete!==false&&capabilities.declaredModels&&!capabilities.declaredModels.includes(model)) return 'modelo não suportado pelo runtime';
     if(input.unavailable?.includes(model)) return 'modelo indisponível nesta execução';
     return null;
   };
