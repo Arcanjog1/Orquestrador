@@ -2,6 +2,12 @@ import type {ProcessResult} from '../../../../../src/process/process-manager.js'
 import type {ModelAvailability} from '../../shared/model-availability.js';
 
 export const PROBE_PROMPT='Responda apenas OK. Não use ferramentas.';
+/** A shell's cloud-provider mode must not redirect a subscription account. */
+export function modelVerificationEnvironment(env:Record<string,string|undefined>):Record<string,string|undefined> {
+  const isolated={...env};
+  for(const key of ['CLAUDE_CODE_SIMPLE','CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY','ANTHROPIC_BASE_URL','OPENAI_BASE_URL','CODEX_API_KEY'])isolated[key]=undefined;
+  return isolated;
+}
 export function probeArguments(provider:'openai'|'anthropic',model:string):string[] {
   if(provider==='anthropic')return ['--print','--model',model,'--output-format','json','--safe-mode','--tools','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--no-session-persistence','--max-turns','1','--system-prompt','Responda apenas OK.'];
   return ['exec','--model',model,'--json','--ephemeral','--ignore-user-config','--ignore-rules','--skip-git-repo-check','--sandbox','read-only',

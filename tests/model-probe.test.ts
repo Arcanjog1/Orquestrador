@@ -102,3 +102,10 @@ test('Claude subscription probe preserves OAuth: safe mode, never bare mode',()=
  assert.equal(args[args.indexOf('--tools')+1],'');assert.equal(args[args.indexOf('--mcp-config')+1],'{"mcpServers":{}}');
  assert.ok(args.includes('--no-session-persistence'));assert.equal(args[args.indexOf('--max-turns')+1],'1');
 });
+
+test('subscription verification cannot inherit a different cloud provider or bare mode',async()=>{
+ const {modelVerificationEnvironment}=await import('../apps/desktop/src/main/services/model-probe.js');
+ const env=modelVerificationEnvironment({CLAUDE_CONFIG_DIR:'account-A',CODEX_HOME:'account-B',CLAUDE_CODE_SIMPLE:'1',CLAUDE_CODE_USE_BEDROCK:'1',ANTHROPIC_BASE_URL:'https://other.invalid',OPENAI_BASE_URL:'https://other.invalid',CODEX_API_KEY:'ambient'});
+ for(const key of ['CLAUDE_CODE_SIMPLE','CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY','ANTHROPIC_BASE_URL','OPENAI_BASE_URL','CODEX_API_KEY'])assert.equal(env[key],undefined);
+ assert.equal(env.CLAUDE_CONFIG_DIR,'account-A');assert.equal(env.CODEX_HOME,'account-B');
+});

@@ -14,7 +14,7 @@ import {AccountModelAvailability,parseAccountModelListing,UNVERIFIED_DETAIL} fro
 import {decorateAgentModels,knownAgentModels} from './agent-model-catalog.js';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import {PROBE_PROMPT,probeArguments,classifyProbe,diagnostic} from './model-probe.js';
+import {PROBE_PROMPT,probeArguments,classifyProbe,diagnostic,modelVerificationEnvironment} from './model-probe.js';
 import { join } from 'node:path';
 import {
   ClaudeAccountManager,
@@ -613,7 +613,7 @@ export class AppServices {
       } else {
         const runtime=provider==='openai'?'codex':'claude-code';
         const command=await this.runtimeManager.getExecutablePath(runtime);
-        const env={...this.runtimeManager.childEnvironmentOverlay(runtime),...(provider==='openai'?this.codexAccountManager:this.accountManager).buildEnvironment(account.id)};
+        const env=modelVerificationEnvironment({...this.runtimeManager.childEnvironmentOverlay(runtime),...(provider==='openai'?this.codexAccountManager:this.accountManager).buildEnvironment(account.id)});
         const run=(args:string[])=>this.processManager.run({command,args,env,cwd:this.paths.root,timeoutMs:10_000});
         // Auth status is a known non-inference command; model-list commands are only used when advertised.
         const help=await run(['--help']);
@@ -674,7 +674,7 @@ export class AppServices {
         const manager=provider==='openai'?this.codexAccountManager:this.accountManager;
         if(!manager.hasOwnCredentials(account.id)){reason='Conecte esta conta antes de testar. Nenhuma chamada ao modelo foi feita.';throw new Error('Missing account credentials');}
         const command=await this.runtimeManager.getExecutablePath(runtime);
-        const env={...this.runtimeManager.childEnvironmentOverlay(runtime),...manager.buildEnvironment(account.id)};
+        const env=modelVerificationEnvironment({...this.runtimeManager.childEnvironmentOverlay(runtime),...manager.buildEnvironment(account.id)});
         cwd=mkdtempSync(join(tmpdir(),'orchestrator-model-probe-'));
         // This check is metadata only. Old CLIs must not silently drop isolation/model flags.
         const help=await this.processManager.run({command,args:provider==='openai'?['exec','--help']:['--help'],env,cwd,timeoutMs:10_000});
