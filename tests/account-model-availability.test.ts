@@ -69,3 +69,15 @@ test('confirmed availability remains separate from global, premium, allowed-mode
  assert.match(decorateAgentModels(rows,account,{models:[],defaults:{allowedModels:['claude-sonnet-5']},routing:{}}).find(m=>m.id===opus)!.blockedReason!,/global/);
  assert.match(decorateAgentModels(rows,{...account,max_capability:'FAST'},{models:[],defaults:{},routing:{}}).find(m=>m.id===opus)!.blockedReason!,/máximo/);
 });
+
+test('a saved model omitted by the runtime stays unverified on its own account, without fallback',async()=>{
+ const f=createDesktopFixture();try {
+  const a=f.services.accounts.create('OpenAI A','openai'),b=f.services.accounts.create('OpenAI B','openai');
+  const id='gpt-previously-listed';
+  f.services.agents.create({name:'Saved model',provider:'openai',accountId:a.id,role:'CODING_WORKER',model:id,reasoning:null,maxCapability:null,maxReasoning:null,enabled:true,policy:defaultAgentPolicy('CODING_WORKER',id)});
+  f.services.runtimeManager.getExecutablePath=async()=>{throw new Error('runtime unavailable');};
+  const row=(await f.services.agentModels(a.id)).find(m=>m.id===id)!;
+  assert.equal(row.availability,'KNOWN_BUT_UNVERIFIED');assert.equal(row.blockedReason,null);
+  assert.equal((await f.services.agentModels(b.id)).some(m=>m.id===id),false);
+ }finally{await f.cleanup();}
+});

@@ -573,10 +573,9 @@ export class AppServices {
   async agentModels(accountId:string,role?:string):Promise<import('../../shared/agent-policy.js').ModelCatalogEntry[]> {
     const account=this.database.accounts.require(accountId);
     const decorate=(rows:import('../../shared/agent-policy.js').ModelCatalogEntry[])=>{
-      if(account.provider_id==='anthropic'&&account.connection_kind!=='api') {
-        const saved=this.agents.manage().filter(a=>a.accountId===accountId).flatMap(a=>a.policy?.allowedModels??(a.model?[a.model]:[]));
-        for(const id of new Set(saved))if(/^(opus|sonnet|haiku|fable)$/.test(id)&&!rows.some(m=>m.id===id))rows.push({id,provider:'anthropic',source:'catalog',reasoning:[],accountAllowed:null});
-      }
+      // A previously saved model is still known when a partial listing or cache omits it.
+      const saved=this.agents.manage().filter(a=>a.accountId===accountId).flatMap(a=>a.policy?.allowedModels??(a.model?[a.model]:[]));
+      for(const id of new Set(saved))if(!rows.some(m=>m.id===id))rows.push({id,provider:account.provider_id as 'openai'|'anthropic',source:'catalog',reasoning:[],accountAllowed:null});
       const known=knownAgentModels(account.provider_id as 'openai'|'anthropic');
       rows=[...rows,...known.filter(m=>!rows.some(row=>row.id===m.id))];
       const availability=new AccountModelAvailability(this.database.settings);
