@@ -3,7 +3,7 @@ import type {ModelAvailability} from '../../shared/model-availability.js';
 
 export const PROBE_PROMPT='Responda apenas OK. Não use ferramentas.';
 export function probeArguments(provider:'openai'|'anthropic',model:string):string[] {
-  if(provider==='anthropic')return ['--print','--model',model,'--output-format','json','--bare','--tools','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--no-session-persistence','--max-turns','1','--system-prompt','Responda apenas OK.'];
+  if(provider==='anthropic')return ['--print','--model',model,'--output-format','json','--safe-mode','--tools','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--no-session-persistence','--max-turns','1','--system-prompt','Responda apenas OK.'];
   return ['exec','--model',model,'--json','--ephemeral','--ignore-user-config','--ignore-rules','--skip-git-repo-check','--sandbox','read-only',
     ...['approval_policy="never"','web_search="disabled"','features.shell_tool=false','features.unified_exec=false','features.multi_agent=false','features.apps=false','features.js_repl=false','features.apply_patch_freeform=false','features.image_generation=false','features.browser_use=false','features.memories=false','tools.view_image=false','project_doc_max_bytes=0','model_provider="openai"','model_providers.openai.request_max_retries=0','model_providers.openai.stream_max_retries=0'].flatMap(v=>['-c',v]),'-'];
 }

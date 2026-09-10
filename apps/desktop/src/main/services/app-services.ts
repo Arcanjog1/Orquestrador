@@ -678,7 +678,7 @@ export class AppServices {
         cwd=mkdtempSync(join(tmpdir(),'orchestrator-model-probe-'));
         // This check is metadata only. Old CLIs must not silently drop isolation/model flags.
         const help=await this.processManager.run({command,args:provider==='openai'?['exec','--help']:['--help'],env,cwd,timeoutMs:10_000});
-        const required=provider==='openai'?['--model','--json','--ephemeral','--ignore-user-config','--ignore-rules','--sandbox']:['--model','--output-format','--bare','--tools','--strict-mcp-config','--no-session-persistence','--max-turns'];
+        const required=provider==='openai'?['--model','--json','--ephemeral','--ignore-user-config','--ignore-rules','--sandbox']:['--model','--output-format','--safe-mode','--tools','--strict-mcp-config','--no-session-persistence','--max-turns'];
         if(help.exitCode!==0||help.outcome!=='completed'||required.some(flag=>!help.stdout.includes(flag))) {
           reason='Atualize o CLI para testar com isolamento e sem ferramentas. Nenhuma chamada ao modelo foi feita.';
         } else {

@@ -95,3 +95,10 @@ test('unsupported CLI, missing own credentials, concurrency and changed selectio
  release();await pending;assert.equal(calls,3,'one help plus exactly one inference');
  }finally{await f.cleanup();}
 });
+
+test('Claude subscription probe preserves OAuth: safe mode, never bare mode',()=>{
+ const args=probeArguments('anthropic',model);
+ assert.ok(args.includes('--safe-mode'));assert.ok(!args.includes('--bare'));
+ assert.equal(args[args.indexOf('--tools')+1],'');assert.equal(args[args.indexOf('--mcp-config')+1],'{"mcpServers":{}}');
+ assert.ok(args.includes('--no-session-persistence'));assert.equal(args[args.indexOf('--max-turns')+1],'1');
+});
