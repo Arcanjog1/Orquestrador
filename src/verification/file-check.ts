@@ -429,7 +429,6 @@ export function compareFileBytes(
           `encontrado ${bytes.byteLength} bytes (${hexOf(bytes)}).`,
       };
     }
-    return null;
   }
 
   if (request.expectSizeBytes !== undefined && bytes.byteLength !== request.expectSizeBytes) {

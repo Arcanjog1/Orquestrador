@@ -248,7 +248,7 @@ test('the cancellation survives reopening the application', async () => {
 
 /* ---- two rounds with no new evidence ------------------------------------ */
 
-test('two iterations that prove nothing new stop for a person, without escalating', async () => {
+test('two iterations that prove nothing new stop as an internal failure, without escalating', async () => {
   // The shape of the incident: the supervisor keeps asking for the same thing,
   // the workspace does not change, the criteria stay pending. Repeating that is
   // a loop, and a stronger model does not break it.
@@ -265,7 +265,7 @@ test('two iterations that prove nothing new stop for a person, without escalatin
     const sent = value<{ run: { id: string } }>(await prepared.send('faça'));
     const run = await prepared.fixture.services.orchestration.waitFor(sent.run.id);
 
-    assert.equal(run.status, 'NEEDS_HUMAN');
+    assert.equal(run.status, 'FAILED');
     assert.match(run.summary ?? '', /não produziram nenhuma evidência nova/);
     const steps = prepared.fixture.services.database.runs.steps(sent.run.id);
     assert.equal(steps.find((s) => s.phase === 'progress')?.status, 'stagnant');

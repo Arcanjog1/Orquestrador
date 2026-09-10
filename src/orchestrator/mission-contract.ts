@@ -33,7 +33,7 @@ export function createMissionContract(objective: string): MissionContract {
     const quoted = /^`([^`]+)`|^"([^"\r\n]*)"/.exec(tail);
     if (fenced) content = fenced[1];
     else if (quoted) content = quoted[1] ?? quoted[2];
-    else if (noNewline) content = tail.split(/\r?\n[ \t]*\r?\n|\r?\n(?:SEM|sem|without|Without|No)\b/)[0];
+    else if (noNewline || /\r?\n/.test(marker[0]) && /\r?\n[ \t]*\r?\n/.test(tail)) content = tail.split(/\r?\n[ \t]*\r?\n|\r?\n(?:SEM|sem|without|Without|No)\b/)[0];
   }
   if (content !== undefined && noNewline) content = content.replace(/(?:\r?\n)+$/, '');
   const exactLiterals: ExactLiteral[] = content === undefined ? [] : [literal(paths[0]!, content)];
@@ -55,13 +55,31 @@ export function contractChecks(contract: MissionContract): FileCheckRequest[] {
     criteria: [contract.acceptanceCriteria[i]!] }));
 }
 
+/** Bind only file existence/exact-byte criteria to their canonical comparison.
+ * A content measurement cannot certify behavior, tests, or unrelated files. */
+export function bindContractCriteria(contract: MissionContract, checks: readonly FileCheckRequest[], criteria: readonly string[]): FileCheckRequest[] {
+  return checks.map(check => {
+    if (!contract.exactLiterals.some(l => l.path === check.path)) return check;
+    const bound = criteria.filter(c => {
+      const text = normalizeObjective(c), intent = classifyObjective(c);
+      return c.includes(check.path) && intent.targets.every(p => p === check.path) && !intent.requiresExecution && !intent.requiresSemanticRead &&
+        !/\b(other|outro|outros|outside|fora|comportamento|behavior|funciona|works|build)\b/.test(text) &&
+        /\b(exists?|existe|existencia|content|conteudo|bytes?|sha256|newline)\b/.test(text);
+    });
+    return {...check,criteria:[...new Set([...(check.criteria ?? []),...bound])]};
+  });
+}
+
 /** Pin the first check per path as well as the user-owned bytes. Later model
  * decisions may add criteria, never rewrite an existing expectation. */
 export function preserveChecks(requests: readonly FileCheckRequest[], pinned: Map<string, FileCheckRequest>): FileCheckRequest[] {
   return requests.map(request => {
     const original = pinned.get(request.path);
     const criteria = [...new Set([...(original?.criteria ?? []), ...(request.criteria ?? [])])];
-    const check = Object.freeze({ ...(original ?? request), criteria: Object.freeze(criteria) });
+    const merged = {...request, ...original};
+    if (original?.expectText !== undefined) delete merged.expectBytesHex;
+    else if (original?.expectBytesHex !== undefined) delete merged.expectText;
+    const check = Object.freeze({ ...merged, criteria: Object.freeze(criteria) });
     pinned.set(request.path, check);
     return check;
   });
@@ -74,7 +92,7 @@ export function preserveDecision(decision: Decision, contract: MissionContract, 
   const fileChecks = preserveChecks(requested, pinned);
   const task = (value: string) => contract.exactLiterals.length
     ? `Execute a especificação canônica abaixo. A expectativa de bytes é imutável em toda tentativa.\n${JSON.stringify(contract)}\nNão reconstrua o literal a partir de paráfrases.`
-    : `${value}\n\nOBJETIVO ORIGINAL (imutável):\n${contract.objective}\nEXPECTATIVAS FIXADAS:\n${JSON.stringify([...pinned.values()])}`;
+    : value;
   return {...decision, fileChecks, acceptanceCriteria: [...new Set([...decision.acceptanceCriteria, ...contract.acceptanceCriteria])],
     ...(decision.action === 'delegate' ? {task: task(decision.task ?? contract.objective)} : {}),
     ...(decision.delegations ? {delegations: decision.delegations.map(d => ({...d, task: task(d.task)}))} : {})};

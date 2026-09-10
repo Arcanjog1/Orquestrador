@@ -431,7 +431,7 @@ test('an unparsable answer is asked to fix its format once, then the run fails c
       assert.equal(typeof parsed.parseError, 'string');
       assert.equal(typeof parsed.stdoutExcerpt, 'string');
     }
-    assert.equal(detail.steps.at(-1)?.status, 'gave-up');
+    assert.equal(detail.steps.filter(s => s.phase === 'orchestrator').at(-1)?.status, 'gave-up');
   } finally {
     await prepared.cleanup();
   }

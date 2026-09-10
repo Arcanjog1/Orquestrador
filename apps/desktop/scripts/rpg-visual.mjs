@@ -22,17 +22,20 @@ const controlled=process.argv.includes('--mission');
 const {makeAgentResult}=await load('src/agents/agent-runner.js');
 const {ProcessManager}=await load('src/process/process-manager.js');
 const childRunner=new ProcessManager();
-let workerCalls=0;
-const criterion='hello.txt contém pronto';
-const orchestrator={kind:'mock-codex',label:'Orquestrador de teste',cancel:async()=>{},healthCheck:async()=>({available:true}),run:async()=>makeAgentResult({startedAt:new Date().toISOString(),stdout:JSON.stringify({action:'delegate',task:'Crie hello.txt com o conteúdo exato pronto.',acceptanceCriteria:[criterion],fileChecks:[{path:'hello.txt',expectText:'pronto',criteria:[criterion]}],mission:{expectedResult:'Arquivo hello.txt criado e validado.',acceptanceCriteria:[criterion],evidence:['Leitura independente dos bytes do arquivo'],relevantFiles:['hello.txt'],constraints:['Somente a pasta isolada de teste'],outOfScope:['Outros arquivos e serviços externos']},summary:'Criar o arquivo e validar seu conteúdo.'})})};
+let workerCalls=0, orchestratorCalls=0;
+const exactContent='AI Orchestrator Team Test\nStatus: OK';
+const exactFile='orchestrator-team-test.txt';
+const exactObjective=`Crie ${exactFile} na raiz.\n\nConteúdo exato:\n\n${exactContent}\n\nSEM newline final.`;
+const criterion='orchestrator-team-test.txt tem os bytes solicitados';
+const orchestrator={kind:'mock-codex',label:'Orquestrador de teste',cancel:async()=>{},healthCheck:async()=>({available:true}),run:async()=>{orchestratorCalls++;return makeAgentResult({startedAt:new Date().toISOString(),stdout:JSON.stringify({action:'delegate',task:'Crie orchestrator-team-test.txt com o conteúdo exato da solicitação original.',acceptanceCriteria:[criterion],fileChecks:[{path:'orchestrator-team-test.txt',expectText:exactContent,criteria:[criterion]}],mission:{expectedResult:'Arquivo orchestrator-team-test.txt criado e validado.',acceptanceCriteria:[criterion],evidence:['Leitura independente dos bytes do arquivo'],relevantFiles:['orchestrator-team-test.txt'],constraints:['Somente a pasta isolada de teste'],outOfScope:['Outros arquivos e serviços externos']},summary:'Criar o arquivo e validar seu conteúdo.'})});}};
 const worker={kind:'mock-claude',label:'Programador de teste',cancel:()=>childRunner.cancelAll(),healthCheck:async()=>({available:true}),run:async input=>{
   workerCalls++;
   const startedAt=new Date().toISOString();
-  const result=await childRunner.run({command:process.execPath,args:['-e',"require('fs').writeFileSync('hello.txt','pronto');console.log('Arquivo criado. Conteúdo: pronto.');"],cwd:input.workingDirectory,timeoutMs:10000});
+  const result=await childRunner.run({command:process.execPath,args:['-e',`require('fs').writeFileSync(${JSON.stringify(exactFile)},${JSON.stringify(exactContent)});console.log('Arquivo criado.');`],cwd:input.workingDirectory,timeoutMs:10000});
   return makeAgentResult({startedAt,...result});
 }};
 const services = new AppServices({paths:appPaths({...process.env, AI_ORCHESTRATOR_HOME:home}),...(controlled?{createRunners:async()=>({orchestrator,worker,workerAccountId:null}),orchestration:{maxIterations:3}}:{})});
-const scratch=join(home,'scratch');if(controlled)mkdirSync(scratch,{recursive:true});
+const scratch=controlled && option('--workspace') ? resolve(option('--workspace')) : join(home,'scratch');if(controlled)mkdirSync(scratch,{recursive:true});
 const workspace = controlled ? services.workspaces.create({name:'Missão controlada · arquivo e validação',localPath:scratch}) : services.workspaces.createConversation({name:'Guilda de demonstração'});
 const projects = [];
 for (let i = 0; i < 4; i++) projects.push(services.projects.create({name:['Portal da guilda','Biblioteca de agentes','Mapa de execução','Oficina de interfaces'][i],workspaceId:workspace.id}));
@@ -61,13 +64,17 @@ services.database.workspaces.setTeam(workspace.id, {agentId:guildAgents[0].id}, 
 if(controlled) {
   services.agents.sync();
   const defaults=services.database.agents.list().filter(a=>!JSON.parse(a.runtime_options ?? '{}').managed);
-  services.database.workspaces.setTeam(workspace.id,{agentId:defaults.find(a=>a.role==='ORCHESTRATOR'&&a.account_id===null).id},[{agentId:defaults.find(a=>a.role==='CODING_WORKER').id}]);
-  const run=services.orchestration.start({sessionId:session.id,objective:'Crie hello.txt com pronto e valide seu conteúdo.'});runId=run.id;
+  const programmer=defaults.find(a=>a.role==='CODING_WORKER'&&a.account_id===account.id);
+  services.database.driver.run("UPDATE agents SET display_name='Programador' WHERE id=?",[programmer.id]);
+  services.database.workspaces.setTeam(workspace.id,{agentId:defaults.find(a=>a.role==='ORCHESTRATOR'&&a.account_id===null).id},[{agentId:programmer.id}]);
+  const run=services.orchestration.start({sessionId:session.id,objective:exactObjective});runId=run.id;
   const ended=await services.orchestration.waitFor(run.id);
-  assert.equal(ended.status,'DONE',ended.summary);assert.equal(workerCalls,1);assert.equal(readFileSync(join(scratch,'hello.txt'),'utf8'),'pronto');
+  assert.equal(ended.status,'DONE',ended.summary);assert.equal(workerCalls,1);assert.equal(readFileSync(join(scratch,exactFile),'utf8'),exactContent);
   const detail=services.orchestration.detail(run.id);
+  assert.equal(orchestratorCalls,1);assert.equal(detail.orchestrationMetrics.complexityClass,'TRIVIAL');assert.equal(detail.orchestrationMetrics.actualWorkerInvocations,1);assert.equal(readFileSync(join(scratch,exactFile)).length,36);
+  assert.equal(detail.executionEvents.filter(e=>e.type==='NEEDS_HUMAN').length,0);
   assert.equal(detail.executionEvents.filter(e=>e.type==='FINAL_RESPONSE').length,1);
-  writeFileSync(join(output,'controlled-run.json'),JSON.stringify({provider:'deterministic test adapters; real worker subprocess and file verification',workerCalls,detail},null,2));
+  writeFileSync(join(output,'controlled-run.json'),JSON.stringify({provider:'deterministic test adapters; real worker subprocess and file verification',workerCalls,orchestratorCalls,expectedBytes:36,detail},null,2));
 }
 await services.shutdown();
 
@@ -116,6 +123,7 @@ try {
   await send('Emulation.setDeviceMetricsOverride',{width:1440,height:960,deviceScaleFactor:1,mobile:false});
   await delay(400);await click('button[aria-label="Ajustar à tela"]');
   await delay(400);await saveScreenshot('worktree');
+  if(controlled)assert.equal(await evaluate('document.querySelectorAll(".execution-node").length'),5,'trivial mission has five map nodes');
   const treeSources=await evaluate('[...document.querySelectorAll(".execution-node[data-source-ids]")].flatMap(e=>e.dataset.sourceIds.split(","))');
   if(!controlled&&!process.argv.includes('--baseline')) {
     const positions = await evaluate('[...document.querySelectorAll(".execution-node")].map(e=>({id:e.dataset.nodeId,x:parseFloat(e.style.left),y:parseFloat(e.style.top)}))');
@@ -149,6 +157,7 @@ try {
   await saveScreenshot('activity');
   if(controlled) {
     await evaluate("[...document.querySelectorAll('.execution-journal [data-trace-id]')].find(e=>e.dataset.traceId.endsWith(':plan')).scrollIntoView({block:'start'});true");await delay(200);await saveScreenshot('linear-plan');
+    assert.equal(await evaluate('document.querySelectorAll(".execution-journal [data-trace-id]").length'),6,'trivial mission has six journal entries');
     const visibleSources=await evaluate('[...document.querySelectorAll(".execution-journal [data-source-ids]")].flatMap(e=>e.dataset.sourceIds.split(","))');
     const saved=JSON.parse(readFileSync(join(output,'controlled-run.json'),'utf8')).detail.executionEvents;
     assert.ok(visibleSources.every(id=>saved.some(e=>e.id===id)),'journal uses only persisted event IDs');

@@ -41,6 +41,6 @@ for(const mismatch of [false,true])test(mismatch?'gate mismatch stops after two 
     assert.ok(messages.every(m=>!m.body.includes('--allow-no-changes')));
     assert.equal(github.calls.filter(c=>c.method!=='GET'&&!c.path.includes('/login/')).length,0);
     assert.ok(fixture.services.database.runs.steps(run.id).some(s=>s.phase==='query-proof'&&s.status==='passed'));
-    if(mismatch)assert.match(run.summary??'',/GATE_MISMATCH/);
+    if(mismatch)assert.match(run.summary??'',/VERIFICATION_STALLED/);
   } finally {await fixture.cleanup();}
 });

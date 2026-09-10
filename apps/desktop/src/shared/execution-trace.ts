@@ -5,7 +5,7 @@ import { isRunOver } from './activity.js';
 import { HEROES, heroKey } from './hero-identity.js';
 
 /** The single projection consumed by tree, chronological journal and Activity. */
-export function executionTrace(detail: RunDetailView): ExecutionGraph {
+export function executionTrace(detail: RunDetailView, journal = false): ExecutionGraph {
   const events=detail.executionEvents ?? [], nodes:ExecutionNode[]=[], edges:ExecutionGraph['edges']=[];
   const bySource=new Map<string,ExecutionNode>(), byInvocation=new Map<string,ExecutionNode>();
   const terminal=isRunOver(detail.run.status);
@@ -70,12 +70,54 @@ export function executionTrace(detail: RunDetailView): ExecutionGraph {
   // Parallel columns come only from common dependency parents, never from role.
   const occupied=new Map<number,number>();
   for(const node of nodes){const count=occupied.get(node.row)??0;occupied.set(node.row,count+1);node.lane=count+1;}
+  const plan = events.find(e => e.type === 'PLAN_CREATED');
+  const compact = plan?.data.complexityClass === 'TRIVIAL' && nodes.filter(n => n.kind === 'worker').length <= 1 &&
+    !events.some(e => ['BLOCKED','NEEDS_HUMAN'].includes(e.type) || e.type === 'REVIEW_RESULT' && e.status === 'rejected');
+  return compact ? compactMission({nodes,edges}, journal) : {nodes,edges};
+}
+
+/** Fold mechanical transitions into their result while retaining every source
+ * event and full diagnostic payload. A short map is a small execution, not a
+ * truncation of a large execution. No CSS/assets or RPG layout is changed. */
+function compactMission(graph: ExecutionGraph, journal: boolean): ExecutionGraph {
+  const user = graph.nodes.find(n => n.kind === 'user');
+  const final = graph.nodes.find(n => n.kind === 'done');
+  const worker = graph.nodes.find(n => n.kind === 'worker');
+  const plan = graph.nodes.find(n => n.id.endsWith(':plan'));
+  if (!user || !plan) return graph;
+  const delegation = graph.nodes.find(n => n.label.startsWith('Orquestrador →'));
+  if (delegation) {delegation.label='Orquestrador → Programador';delegation.summary='Crie o arquivo conforme a especificação.';}
+  const proofs = graph.nodes.filter(n => n.kind === 'evidence' || n.kind === 'verification');
+  const validation = proofs.at(-1);
+  const merge = (target: ExecutionNode, sources: ExecutionNode[]) => {
+    const all = [target, ...sources.filter(n => n !== target)];
+    target.sourceIds = [...new Set(all.flatMap(n => n.sourceIds))];
+    target.fullText = all.map(n => n.fullText).join('\n\n');
+    target.metadata = {facts:all.map(n => n.metadata)};
+  };
+  const plannerCalls = graph.nodes.filter(n => n.kind === 'orchestrator' && n !== plan && n !== delegation);
+  plan.invocation = plannerCalls.find(n => n.invocation)?.invocation;
+  merge(plan, plannerCalls); plan.label = 'Orquestrador';
+  if (worker) {
+    worker.label = 'Programador';
+    if (!journal && delegation) merge(worker,[delegation]);
+  }
+  if (validation) {
+    const meta = validation.metadata as {fileChecks?: {passed:boolean;sizeBytes:number;request:{path:string};measurement?:{comparedExactBytes:boolean}}[]};
+    const checks = meta?.fileChecks ?? [];
+    validation.kind = 'verification'; validation.label = 'Validação';
+    if (checks.length && checks.every(c => c.passed)) validation.summary = checks.map(c => `${c.measurement?.comparedExactBytes ? '✓ Conteúdo correto' : '✓ Arquivo verificado'} · ${c.request.path}\n✓ ${c.sizeBytes} bytes`).join('\n');
+    merge(validation,proofs);
+  }
+  const nodes = [user,plan,...(journal && delegation ? [delegation] : []),...(worker ? [worker] : []),...(validation ? [validation] : []),...(final ? [final] : [])];
+  const edges: ExecutionGraph['edges'] = [];
+  nodes.forEach((n,i) => {n.row=i;n.lane=1;if(i)edges.push({id:nodes[i-1]!.id+'>'+n.id,from:nodes[i-1]!.id,to:n.id,kind:'sequence'});});
   return {nodes,edges};
 }
 
 export function chronologicalTrace(detail: RunDetailView): ExecutionNode[] {
   // SQLite sequence is authoritative; timestamps can tie or move backwards.
-  return executionTrace(detail).nodes;
+  return executionTrace(detail, true).nodes;
 }
 
 export function activityTrace(detail: RunDetailView): ExecutionNode[] {

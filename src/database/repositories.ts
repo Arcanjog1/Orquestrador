@@ -1659,10 +1659,11 @@ export class RunRepository extends Repository {
     const gate=reviews.filter(e=>Array.isArray(e.data.criteria)).at(-1);
     const criteria=(gate?.data.criteria ?? ((events.find(e=>e.type==='PLAN_CREATED')?.data.criteria ?? []) as string[]).map(text=>({text,status:'unknown'}))) as {text:string;status:string}[];
     const checks=(gate?.data.verification ?? []) as {exitCode:number|null;refused?:string}[];
-    const files=(gate?.data.fileChecks ?? []) as {passed:boolean}[];
+    const files=(gate?.data.fileChecks ?? []) as {passed:boolean;sizeBytes?:number;request?:{path:string}}[];
     const passed=checks.filter(c=>c.exitCode===0&&!c.refused).length+files.filter(c=>c.passed).length;
     const pending=criteria.filter(c=>c.status!=='satisfied').map(c=>c.text);
-    const summary=status==='CANCELLED' ? titles.CANCELLED! : titles[status]+'\n'+traceSummary(answer,300)+(passed?'\nValidação: '+passed+' verificações aprovadas.':'')+(pending.length?'\nPendente: '+traceSummary(pending.join('; '),100):'');
+    const trivial = events.find(e=>e.type==='PLAN_CREATED')?.data.complexityClass === 'TRIVIAL';
+    const summary=status==='CANCELLED' ? titles.CANCELLED! : trivial && status==='DONE' && files.length ? titles.DONE+'\n'+files.map(f=>`${f.request?.path ?? 'Arquivo'} · ${f.sizeBytes ?? '?'} bytes · validado`).join('\n')+'\nPendências: nenhuma.' : titles[status]+'\n'+traceSummary(answer,300)+(passed?'\nValidação: '+passed+' verificações aprovadas.':'')+(pending.length?'\nPendente: '+traceSummary(pending.join('; '),100):'');
     const fullOutput=[titles[status],answer,'','Objetivo: '+run.objective,'',...reports.map(e=>e.summary),...evidence.map(e=>e.summary),...reviews.map(e=>e.summary),'','Critérios:',...criteria.map(c=>c.status+': '+c.text),'','Resultados completos:',...reports.filter(e=>e.role!=='ORCHESTRATOR').map(e=>String(e.data.fullOutput ?? e.summary))].join('\n');
     // Cancellation may win a race against a just-published terminal result.
     this.db.run("DELETE FROM execution_events WHERE run_id=? AND type='FINAL_RESPONSE'",[runId]);

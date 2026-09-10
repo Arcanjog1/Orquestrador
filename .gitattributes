@@ -1,0 +1,2 @@
+# This regression artifact is an exact byte contract, including its LF separator.
+orchestrator-team-test.txt -text

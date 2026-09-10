@@ -970,6 +970,7 @@ export interface RunVerificationView {
 
 /** Everything recorded about one run. What "Detalhes" and Evidence show. */
 export interface RunDetailView {
+  orchestrationMetrics?: import('../../../../src/orchestrator/complexity-types.js').OrchestrationMetrics;
   executionEvents?: import('../../../../src/execution/events.js').ExecutionEvent[];
   readonly run: RunView;
   readonly baseline: { readonly branch: string | null; readonly commit: string | null; readonly dirty: boolean };

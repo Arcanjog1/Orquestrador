@@ -3,6 +3,7 @@
 export type ObjectiveKind = 'READ_ONLY_QUERY' | 'CHANGE_REQUEST' | 'EXECUTION_REQUEST' | 'MIXED_REQUEST' | 'UNKNOWN_REQUEST';
 export type ReadProofKind = 'REPOSITORY_ACCESS' | 'REPOSITORY_METADATA' | 'REPOSITORY_TREE' | 'FILE_EXISTENCE' | 'FILE_CONTENT' | 'COMMIT' | 'DIFF' | 'PR' | 'TEST_RESULT';
 export interface ObjectiveIntent {
+  requiresSemanticRead?: boolean;
   kind: ObjectiveKind;
   operations: readonly ('read' | 'change' | 'execute')[];
   readProofs: readonly ReadProofKind[];
@@ -75,5 +76,5 @@ export function classifyObjective(objective: string): ObjectiveIntent {
   if(!operations.has('read'))proofs.clear();
   const kind:ObjectiveKind=operations.size>1?'MIXED_REQUEST':operations.has('change')?'CHANGE_REQUEST':operations.has('execute')?'EXECUTION_REQUEST':operations.has('read')?'READ_ONLY_QUERY':'UNKNOWN_REQUEST';
   const targets=[...new Set(objective.match(/(?:[\w.-]+\/)*[\w.-]+\.(?:md|txt|tsx?|jsx?|json|py|ya?ml|html|css|sh|sql)\b|\bREADME\b/gi)??[])];
-  return {kind,operations:[...operations],readProofs:[...proofs],targets,requiresChanges:operations.has('change')||kind==='UNKNOWN_REQUEST',requiresExecution:operations.has('execute'),reasons:reasons.length?reasons:[kind==='UNKNOWN_REQUEST'?'unrecognised: retain change gate':'query structure and subject']};
+  return {kind,operations:[...operations],readProofs:[...proofs],targets,requiresSemanticRead:has(/\b(explique|explicar|explain|analise|analisar|analyze|review|revise|audit|audite)\b/),requiresChanges:operations.has('change')||kind==='UNKNOWN_REQUEST',requiresExecution:operations.has('execute'),reasons:reasons.length?reasons:[kind==='UNKNOWN_REQUEST'?'unrecognised: retain change gate':'query structure and subject']};
 }

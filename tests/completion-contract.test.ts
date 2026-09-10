@@ -16,6 +16,9 @@ import { AcceptanceCriteriaLedger } from '../src/orchestrator/acceptance-criteri
 import { verifierWithoutExecutor } from '../src/orchestrator/verifier.js';
 import { RejectedProgressGuard } from '../src/orchestrator/rejected-progress.js';
 import type { AgentInput, Baseline, GitEvidence } from '../src/core/types.js';
+import { classifyComplexity } from '../src/orchestrator/complexity.js';
+import { executionGraph } from '../apps/desktop/src/shared/execution-graph.js';
+import { chronologicalTrace } from '../apps/desktop/src/shared/execution-trace.js';
 
 export const EXACT = 'AI Orchestrator Team Test\nStatus: OK';
 export const FILE = 'orchestrator-team-test.txt';
@@ -50,7 +53,28 @@ test('36 bytes: one worker, real filesystem comparison, DoneGate PASS, one final
     assert.ok(gate); assert.equal(f.detail.executionEvents!.filter(e => e.type === 'FINAL_RESPONSE').length,1);
     assert.equal(f.detail.executionEvents!.at(-1)!.type,'FINAL_RESPONSE');
     assert.equal(f.detail.executionEvents!.filter(e => e.type === 'NEEDS_HUMAN').length,0);
+    assert.equal(f.detail.orchestrationMetrics!.complexityClass,'TRIVIAL');
+    assert.equal(f.detail.orchestrationMetrics!.actualWorkerInvocations,1);
+    assert.equal(f.detail.orchestrationMetrics!.actualModelInvocations,2);
+    assert.equal(executionGraph(f.detail).nodes.length,5);
+    assert.equal(chronologicalTrace(f.detail).length,6);
+    assert.deepEqual(executionGraph(f.detail).nodes.flatMap(n=>n.sourceIds).sort(),chronologicalTrace(f.detail).flatMap(n=>n.sourceIds).sort());
   } finally {await f.cleanup();}
+});
+
+test('original incident format: unfenced literal and an initial plan with no fileChecks still finish immediately',async()=>{
+  const objective=`Crie um arquivo chamado \`${FILE}\` na raiz do projeto com o conteúdo exato:\n\n${EXACT}\n\nDepois valide que o arquivo existe e que o conteúdo está exatamente correto.\n\nUse somente os agentes necessários. Não altere outros arquivos. Working Tree e Raciocínio em linha devem mostrar os resultados.`;
+  const f=await runContract({objective,plans:[JSON.stringify({action:'delegate',task:'Crie o arquivo.',acceptanceCriteria:[`\`${FILE}\` exists at the project root.`,`\`${FILE}\` content is exactly "AI Orchestrator Team Test\\nStatus: OK" with no extra bytes.`],fileChecks:[]})]});
+  try {assert.equal(f.ended.status,'DONE',f.ended.summary ?? '');assert.equal(f.worker.calls.length,1);assert.equal(f.lead.calls.length,1);assert.equal(readFileSync(join(f.repo.dir,FILE)).length,36);}finally{await f.cleanup();}
+});
+
+test('complexity selects only necessary roles; unknown bugs retain a full team', () => {
+  assert.deepEqual(classifyComplexity(createMissionContract(OBJECTIVE)).plannedAgents,['CODING_WORKER']);
+  assert.equal(classifyComplexity(createMissionContract('Altere uma pequena função em sum.ts e rode o teste existente.')).complexityClass,'SIMPLE');
+  const standard = classifyComplexity(createMissionContract('Investigue a causa desconhecida do bug e corrija o código.'));
+  assert.equal(standard.complexityClass,'STANDARD');
+  assert.deepEqual(standard.plannedAgents,['ANALYST','CODING_WORKER','TESTER']);
+  assert.equal(classifyComplexity(createMissionContract('Refatoração grande da arquitetura em múltiplos subsistemas.')).complexityClass,'COMPLEX');
 });
 
 test('byte comparison bridges content/existence; a single file does not manufacture a complete tree', async () => {
@@ -131,5 +155,8 @@ test('MISSING_PROOF is collected by the gate without a worker; stale PASS is nev
     const guard = new RejectedProgressGuard();
     const round = {answer:'Uma resposta',reads:[],criteria:ledger.all(),evidence,gate:missing};
     assert.equal(guard.observe(round),false); assert.equal(guard.observe({...round,answer:'Outra paráfrase'}),true);
+    repo.write(FILE,EXACT);
+    const conflicting = await runFileCheck(repo.dir,{path:FILE,expectText:EXACT,expectSizeBytes:35});
+    assert.equal(conflicting.passed,false);assert.equal(conflicting.outcome,'size-mismatch');
   } finally {repo.cleanup();}
 });

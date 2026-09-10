@@ -42,7 +42,7 @@ export function readProofProblems(intent: ObjectiveIntent, answer: string, proof
   const problems: string[] = [];
   // Exact comparisons certify an output, not a semantic explanation of code.
   // Query answers still require citations actually delivered to the supervisor.
-  const exact = (path: string) => intent.requiresChanges && checks.some(c => c.request.path === path && c.passed && c.measurement?.comparedExactBytes && c.measurement.sha256 === c.sha256);
+  const exact = (path: string) => intent.requiresChanges && !intent.requiresSemanticRead && checks.some(c => c.request.path === path && c.passed && c.measurement?.comparedExactBytes && c.measurement.sha256 === c.sha256);
   const exactOutput = intent.targets.length > 0 && intent.targets.every(exact);
   if (!answer.trim()) problems.push('A final answer is required.');
   for(const kind of intent.readProofs) {

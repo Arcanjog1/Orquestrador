@@ -1,7 +1,8 @@
 import { encodeEventData } from '../../../../../src/database/execution-events.js';
-import { createMissionContract, contractChecks, preserveDecision, type MissionContract } from '../../../../../src/orchestrator/mission-contract.js';
+import { createMissionContract, contractChecks, preserveDecision, bindContractCriteria, type MissionContract } from '../../../../../src/orchestrator/mission-contract.js';
 import { recoveryAction, type CompletionState } from '../../../../../src/orchestrator/completion-state.js';
 import { fileFactIdentity, localTreeProof, measurementProofs } from '../../../../../src/orchestrator/evidence-bridge.js';
+import { classifyComplexity, promoteComplexity, type OrchestrationPlan } from '../../../../../src/orchestrator/complexity.js';
 import { DelegationProgressGuard, progressFingerprint } from '../../../../../src/orchestrator/progress-guard.js';
 import { roleDefinition, type TaskKind } from '../../shared/agent-policy.js';
 import { agentConfig, AgentService } from './agent-service.js';
@@ -709,6 +710,18 @@ export class OrchestrationService {
         this.progress(runId, sessionId, 'failed', 'Falhou.', 'FAILED');
       })
       .finally(() => {
+        const steps = this.database.runs.steps(runId);
+        const planStep = steps.filter(s => s.phase === 'complexity').at(-1);
+        if (planStep?.detail) {
+          const plan = JSON.parse(planStep.detail) as OrchestrationPlan;
+          const calls = this.database.runs.invocations(runId);
+          const workers = calls.filter(c => c.role !== 'ORCHESTRATOR');
+          this.step(runId,this.database.runs.require(runId).iteration,'orchestration-metrics','measured','Custo de orquestração medido.',{
+            ...plan,actualModelInvocations:calls.length,actualWorkerInvocations:workers.length,
+            deterministicSteps:steps.filter(s => ['file-check','file-read','verification','done-gate','proof-recovery','repository-tree'].includes(s.phase)).length,
+            retries:Math.max(0,workers.length - new Set(workers.map(c => c.worker_id ?? c.agent_id)).size),
+            stagnationCount:steps.filter(s => s.phase === 'no-progress' || s.phase === 'progress' && s.status === 'stagnant').length});
+        }
         this.active.delete(runId);
         this.runners.delete(runId);
         this.phaseClock.delete(runId);
@@ -1034,9 +1047,13 @@ export class OrchestrationService {
     const savedContract = this.database.runs.steps(runId).find(s => s.phase === 'mission-contract');
     const contract: MissionContract = savedContract?.detail ? JSON.parse(savedContract.detail) : createMissionContract(objective);
     if (!savedContract) this.step(runId, 0, 'mission-contract', 'frozen', 'Especificação original preservada.', {...contract});
+    let orchestrationPlan = classifyComplexity(contract);
+    this.step(runId,0,'complexity','classified',orchestrationPlan.complexityClass,{...orchestrationPlan});
     ledger.add(contract.acceptanceCriteria, 0);
     const completion: CompletionState = {implementation:'PENDING', verification:'PENDING'};
     const pinnedChecks = new Map<string, FileCheckRequest>(contractChecks(contract).map(c => [c.path, c]));
+    const savedAcceptance = this.database.runs.steps(runId).find(s => s.phase === 'acceptance-contract');
+    let acceptanceContract: {criteria:string[];mission?:Decision['mission']} | null = savedAcceptance?.detail ? JSON.parse(savedAcceptance.detail) : null;
     const savedChecks = this.database.runs.steps(runId).filter(s => s.phase === 'pinned-checks').at(-1);
     if (savedChecks?.detail) for (const check of JSON.parse(savedChecks.detail).checks as FileCheckRequest[]) if (!pinnedChecks.has(check.path)) pinnedChecks.set(check.path, check);
     const seenFileFacts = new Set<string>();
@@ -1138,11 +1155,15 @@ export class OrchestrationService {
     /** The evidence as the previous iteration left it, and how long it has stood. */
     let previousFingerprint: string | null = null;
     let stagnantRounds = 0;
+    const diagnoses = new Set<string>();
     const batchSignatures = new Set<string>();
     let unresolvedDelegations = false;
     const rejectedProgress = new RejectedProgressGuard();
+    const observedGates = new WeakSet<import('../core.js').DoneGateResult>();
     const delegationGuard = new DelegationProgressGuard();
     const stopRepeatedRejection=(gate:import('../core.js').DoneGateResult, record:IterationRecord, fresh:GitEvidence):boolean=>{
+      if (observedGates.has(gate)) return completion.verification === 'STALLED';
+      observedGates.add(gate);
       if(mechanicalGateFailure(gate))for(const attempts of attemptsByWorker.values()) {
         const last=attempts.at(-1);if(last)last.mechanical=true;
       }
@@ -1203,7 +1224,10 @@ export class OrchestrationService {
         github,
         team,
         preflight,
-      }) + '\n\nOBJECTIVE INTENT: '+JSON.stringify(objectiveIntent)+
+      }) + '\n\nMINIMUM NECESSARY ORCHESTRATION: '+JSON.stringify(orchestrationPlan)+
+        '\nUse deterministic fileChecks and registered test commands for machine-verifiable facts. TRIVIAL and SIMPLE changes need one implementation worker; do not delegate analysis or testing of exact bytes. Return checks with the initial plan; the engine performs verification and DoneGate.'+
+        '\nCANONICAL SPECIFICATION: '+JSON.stringify(contract)+
+        '\n\nOBJECTIVE INTENT: '+JSON.stringify(objectiveIntent)+
         '\nMEASURED QUERY EVIDENCE (application-owned, not model claims): '+JSON.stringify(queryEvidence.filter(e=>objectiveIntent.readProofs.includes(e.kind)).map(e=>({...e,...(e.paths?{paths:e.paths.slice(0,200),totalPaths:e.paths.length,complete:e.complete&&e.paths.length<=200}:{})})))+
         '\nA simple query about access, metadata or the tree can be answered with done immediately using these facts. Do not delegate it, invent a change, or ask for a CLI flag. File-content questions still require fileReads and byte-grounded queryProof citations. Mixed requests must prove every requested operation.'+
         '\n\n' + supervisorFiles.text;
@@ -1239,7 +1263,27 @@ export class OrchestrationService {
       const decision = preserveDecision({ ...asked.decision,
         ...(asked.decision.reason ? {reason:publicGateAnswer(asked.decision.reason)} : {}),
       }, contract, pinnedChecks);
-      if (decision.action === 'delegate' && completion.implementation === 'COMPLETE' && objectiveIntent.requiresChanges && !decision.delegations?.length) {
+      if (contract.exactLiterals.length && ['TRIVIAL','SIMPLE'].includes(orchestrationPlan.complexityClass)) {
+        if (!acceptanceContract) {
+          acceptanceContract = {criteria:[...new Set([...decision.acceptanceCriteria,...(decision.mission?.acceptanceCriteria ?? [])])],mission:decision.mission};
+          this.step(runId,iteration,'acceptance-contract','frozen','Critérios originais fixados.',{...acceptanceContract});
+        }
+        decision.acceptanceCriteria = [...acceptanceContract.criteria];
+        decision.mission = acceptanceContract.mission;
+        decision.fileChecks = bindContractCriteria(contract,decision.fileChecks.map(c=>({...c,criteria:(c.criteria ?? []).filter(text=>acceptanceContract!.criteria.includes(text))})),decision.acceptanceCriteria);
+        for (const check of decision.fileChecks) pinnedChecks.set(check.path,check);
+      }
+      if (decision.action === 'delegate' && ['TRIVIAL','SIMPLE'].includes(orchestrationPlan.complexityClass) && objectiveIntent.requiresChanges) {
+        const worker = this.chooseWorker(team,{...decision,workerId:undefined,taskKind:'IMPLEMENTATION'},conversation);
+        if (worker.ok) {
+          const selected = team.find(s => s.id === decision.workerId);
+          const role = selected?.agentId ? this.database.agents.find(selected.agentId)?.role : undefined;
+          if (decision.delegations?.length || role && !['CODING_WORKER','PROGRAMMER'].includes(role)) decision.workerId = worker.slot.id;
+          delete decision.delegations;
+          decision.taskKind = 'IMPLEMENTATION';
+        }
+      }
+      if (decision.action === 'delegate' && completion.implementation === 'COMPLETE' && objectiveIntent.requiresChanges && (!decision.taskKind || decision.taskKind === 'IMPLEMENTATION') && !decision.delegations?.length) {
         const measurements = github ? await this.githubChecks(github, [...pinnedChecks.values()], signal)
           : environment?.kind === 'local' ? await runFileChecks(cwd, [...pinnedChecks.values()]) : [];
         const tests = await (verifier ?? verifierWithoutExecutor(NO_EXECUTOR)).runAll([...resolvedCommands]);
@@ -1250,6 +1294,15 @@ export class OrchestrationService {
           decision.fileChecks = [...pinnedChecks.values()];
           decision.summary = 'Implementação concluída. Validar a prova pendente.';
           this.step(runId,iteration,'proof-recovery','redirected','Prova incompleta não autoriza outra implementação.');
+        }
+      }
+      if (!conversation && decision.action === 'delegate' && orchestrationPlan.complexityClass === 'TRIVIAL' && iterations.some(r => r.worker)) {
+        if (completion.implementation !== 'INCOMPLETE') {
+          decision.action = 'done'; decision.fileChecks = [...pinnedChecks.values()];
+          this.step(runId,iteration,'proof-recovery','redirected','Nova invocação exige falha de implementação medida.');
+        } else {
+          orchestrationPlan = promoteComplexity(orchestrationPlan,'Falha de conteúdo ou teste medida na tentativa anterior.');
+          this.step(runId,iteration,'complexity','promoted',orchestrationPlan.complexityClass,{...orchestrationPlan});
         }
       }
       this.step(runId, iteration, 'pinned-checks', 'frozen', 'Expectativas preservadas para as próximas tentativas.', {checks:[...pinnedChecks.values()]});
@@ -1280,7 +1333,7 @@ export class OrchestrationService {
       const missionTasks=decision.delegations?.length ? decision.delegations : decision.action==='delegate' ? [{taskId:'work',workerId:decision.workerId ?? team[0]?.id,task:decision.task,dependsOn:[]}] : [];
       if(!knownPlan) {
         const steps=missionTasks.length ? [...missionTasks.map(t=>t.task), 'Validar evidências e critérios de conclusão.'] : [decision.action==='done'?'Validar a resposta com as evidências disponíveis.':'Investigar o objetivo e verificar as evidências.'];
-        this.database.runs.event({runId,key:'plan',type:'PLAN_CREATED',iteration,status:'completed',parentId:this.database.runs.events(runId).filter(e=>e.type==='AGENT_RESULT').at(-1)?.id ?? runId+':objective',summary:'Plano da missão\n'+steps.map((t,i)=>(i+1)+'. '+t).join('\n'),data:{objective,steps,tasks:missionTasks,criteria:decision.acceptanceCriteria,team:missionTasks.map(t=>t.workerId)}});
+        this.database.runs.event({runId,key:'plan',type:'PLAN_CREATED',iteration,status:'completed',parentId:this.database.runs.events(runId).filter(e=>e.type==='AGENT_RESULT').at(-1)?.id ?? runId+':objective',summary:orchestrationPlan.complexityClass==='TRIVIAL'?'Vou criar o arquivo e validar o conteúdo.':'Plano da missão\n'+steps.map((t,i)=>(i+1)+'. '+t).join('\n'),data:{objective,steps,tasks:missionTasks,criteria:decision.acceptanceCriteria,team:missionTasks.map(t=>t.workerId),...orchestrationPlan}});
       }
       // A public decision explains the next action; the proposed answer is only
       // promoted to FINAL_RESPONSE after DoneGate accepts it.
@@ -1988,7 +2041,7 @@ export class OrchestrationService {
         unknownIds.length === 0;
 
       if (fileChecks.some(c => !c.passed && ['missing','content-mismatch','size-mismatch','trailing-newline','bom-present','unexpectedly-present'].includes(c.outcome)) || verification.some(v => !v.refused && v.exitCode !== 0)) completion.implementation = 'INCOMPLETE';
-      else if ((allPassed || evidence.changedSinceBaseline) && record.worker?.outcome === 'completed' && record.worker.exitCode === 0 && !record.worker.failure) completion.implementation = 'COMPLETE';
+      else if (allPassed && record.worker?.outcome === 'completed' && record.worker.exitCode === 0 && !record.worker.failure) completion.implementation = 'COMPLETE';
       completion.verification = allPassed && !ledger.pending().length ? 'PASSED' : 'INCOMPLETE';
       this.step(runId, iteration, 'completion-state', 'measured', 'Estado da implementação e da verificação.', {...completion});
 
@@ -2050,10 +2103,9 @@ export class OrchestrationService {
       const fastPathEligible =
         this.options.fastPath !== false &&
         !fastPathTried &&
-        decision.action === 'delegate' &&
-        record.worker !== undefined &&
-        !record.worker.failure &&
-        evidence.changedSinceBaseline &&
+        (decision.action === 'delegate' || decision.action === 'verify' && completion.implementation === 'COMPLETE') &&
+        (record.worker !== undefined && !record.worker.failure && record.worker.outcome === 'completed' && record.worker.exitCode === 0 || decision.action === 'verify') &&
+        (evidence.changedSinceBaseline || fileChecks.some(c => c.passed && c.measurement?.comparedExactBytes)) &&
         allPassed &&
         decision.acceptanceCriteria.length > 0 &&
         ledger.allSatisfied(decision.acceptanceCriteria);
@@ -2184,8 +2236,9 @@ export class OrchestrationService {
       // Measured on *evidence*, not on the decision: two different-sounding
       // instructions that leave the workspace, the verifications and the
       // ledger exactly as they were are the same round twice.
+      if (record.worker?.outcome === 'completed' && decision.taskKind && ['CODE_REVIEW','TESTING','RESEARCH','UI_UX'].includes(decision.taskKind)) diagnoses.add(progressFingerprint([decision.taskKind,iterationAnswer]));
       const fingerprint = evidenceFingerprint({
-        tree: tree + progressFingerprint(carriedReads.map(r => [r.request.path, r.sha256, r.request.offsetBytes ?? 0])),
+        tree: tree + progressFingerprint(carriedReads.map(r => [r.request.path, r.sha256, r.request.offsetBytes ?? 0])) + progressFingerprint([...diagnoses].sort()),
         verification,
         fileChecks,
         pending: ledger.pending().map((criterion) => `${criterion.status}:${criterion.text}`),
@@ -3608,6 +3661,7 @@ export class OrchestrationService {
           this.refusalsFor(workspace.id),
           workspace.repository_url,
         ),
+        'ESPECIFICAÇÃO ORIGINAL E EXPECTATIVAS IMUTÁVEIS:\n' + JSON.stringify(this.database.runs.steps(runId).filter(s=>s.phase==='mission-contract'||s.phase==='pinned-checks').map(s=>s.detail ? JSON.parse(s.detail) : null)),
         // Without a checkout the worker cannot write a file, and must not say
         // that it did. The contract for proposing a change lives beside the
         // parser that reads it, so the instruction and the code enforcing it

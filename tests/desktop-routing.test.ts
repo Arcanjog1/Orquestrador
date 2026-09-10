@@ -391,7 +391,7 @@ test('repeated no-progress stops before a third call or escalation to a stronger
   const prepared=await prepare({orchestratorScript:Array(4).fill(delegate('Corrija o conteúdo de hello.txt',{capability:'balanced',reasoning:'medium'})),worker});
   try {
     const run=await prepared.run('faça');
-    assert.equal(run.status,'NEEDS_HUMAN');
+    assert.equal(run.status,'FAILED');
     assert.equal(worker.calls.length,2);
     assert.ok(worker.calls.every(c=>c.routing?.model==='sonnet'));
     assert.match(prepared.orchestrator.calls[1]!.prompt,/progressed: no/);

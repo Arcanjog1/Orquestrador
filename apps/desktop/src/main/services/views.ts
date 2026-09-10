@@ -123,7 +123,7 @@ export function toRunView(record: RunRecord, steps: readonly RunStepRecord[]): R
 
 /** Reads why a run failed from the last step the loop recorded. */
 function failureKindOf(steps: readonly RunStepRecord[]): RunFailureKind {
-  const last = steps[steps.length - 1];
+  const last = steps.filter(s=>!['orchestration-metrics','completion-state'].includes(s.phase)).at(-1);
   switch (last?.phase) {
     case 'no-progress':
       return 'no-progress';
@@ -165,6 +165,7 @@ export function toRunDetailView(
   const flag = (v: unknown): boolean | null =>
     v === 1 || v === true ? true : v === 0 || v === false ? false : null;
   return {
+    ...(steps.filter(s => s.phase === 'orchestration-metrics').at(-1)?.detail ? {orchestrationMetrics:JSON.parse(steps.filter(s => s.phase === 'orchestration-metrics').at(-1)!.detail!)} : {}),
     providerSessions: providerSessions.map((session) => ({
       connectionId: session.connection_id,
       connectionName: session.connectionName,
