@@ -23,7 +23,7 @@ real. O que não existe é a prova contra um host de verdade.
 
 | # | Bloco | Onde |
 |---|---|---|
-| 0 | Causa-raiz e correção do `CodexCapabilityError` | `docs/CODEX_CAPABILITY_INCIDENT.md` |
+| 0 | Causa-raiz e correção do `CodexCapabilityError` | `docs/history/CODEX_CAPABILITY_INCIDENT.md` |
 | 1 | Fronteira de execução (`ProcessRunner`, `ExecutionEnvironment`) | `src/execution/` |
 | 2 | Modelo de dados de nuvem (migrações 6 e 7) | `src/database/schema.ts` |
 | 3 | Porta do provisionador + contêiner + imagem | `src/cloud/`, `cloud/image/` |
@@ -87,7 +87,7 @@ dizendo isso em vez de fingir estar logada.
 ### 5. `LOCAL_REAL_AUTH_TEST_PENDING` — reteste do Windows
 O bloco 0 está provado por testes e contra o binário real, mas o reteste com as
 suas contas conectadas só você pode fazer. Roteiro em
-`docs/CODEX_CAPABILITY_INCIDENT.md`, seção final.
+`docs/history/CODEX_CAPABILITY_INCIDENT.md`, seção final.
 
 ## Subir o coordenador (quando os gates acima estiverem resolvidos)
 

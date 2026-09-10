@@ -411,7 +411,7 @@ quinze minutos.
    detecção de capabilities é testada contra `--help` simulado; a primeira
    execução no Windows é o que valida.
 9. **`.claude.json` continua no histórico do Git.** Removido do HEAD; a
-   reescrita depende de autorização — ver `docs/SECURITY_HISTORY_CLEANUP.md`.
+   reescrita depende de autorização — ver `docs/history/SECURITY_HISTORY_CLEANUP.md`.
 10. **`npm audit`**: 11 high + 1 critical, todas em dependências transitivas de
     build do `electron-builder` (`tar`, `node-gyp`). Nenhuma vai para o
     aplicativo empacotado.

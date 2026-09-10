@@ -566,7 +566,7 @@ contrário seria a mesma desonestia pelo outro lado.
 ## Segurança do repositório
 
 Público. Nada de credencial, chave de exemplo ou dado pessoal foi adicionado.
-A pendência de `docs/SECURITY_HISTORY_CLEANUP.md` **não foi tocada**.
+A pendência de `docs/history/SECURITY_HISTORY_CLEANUP.md` **não foi tocada**.
 
 ## Próximo passo menor e concreto
 

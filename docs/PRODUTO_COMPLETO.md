@@ -24,8 +24,8 @@ mudou, o que continua fora, e o roteiro humano que fecha a prova.
 | Projetos | Só adicionar | Renomear, abrir pasta, remover da lista (pasta intacta); branches reais; `git switch` com pergunta se a árvore estiver suja |
 | GitHub | "Sem login próprio" | Login por device flow com GitHub App próprio; token cifrado por `safeStorage` (DPAPI); nunca no renderer, em URL, em `.git/config` ou em log; lista de repositórios (privados inclusive) no seletor de projeto; clone/fetch/branch/commit/push com o login; abrir PR e ler checks |
 | Worker: modelo | Modelo e raciocínio do Claude fixos por projeto | **Automático por tarefa**: o Codex pede camadas (`workerRequirements`), o roteador central resolve modelo e raciocínio por invocação, com piso de sanidade, escalada por falta de progresso, fallback de modelo recusado e registro completo (`docs/ROTEAMENTO_WORKER.md`); *Configuração avançada* mantém a escolha manual |
-| Projetos | Conversas numa lista de recentes por pasta | Entidade real `projects` (migração 5): sidebar por projeto com Sem projeto e Recentes, nova conversa dentro do projeto, mover, renomear, excluir sem perder nada, busca entre projetos; onboarding cria o primeiro (`docs/CORRECOES_WINDOWS.md`) |
-| Runtime Codex antigo no PATH | "Não foi possível preparar" sem motivo | Gerenciado instalado ao lado, PATH intocado; download em streaming, esperas para o antivírus, trilha por fase atrás de Detalhes (`docs/CORRECOES_WINDOWS.md`) |
+| Projetos | Conversas numa lista de recentes por pasta | Entidade real `projects` (migração 5): sidebar por projeto com Sem projeto e Recentes, nova conversa dentro do projeto, mover, renomear, excluir sem perder nada, busca entre projetos; onboarding cria o primeiro (`docs/history/CORRECOES_WINDOWS.md`) |
+| Runtime Codex antigo no PATH | "Não foi possível preparar" sem motivo | Gerenciado instalado ao lado, PATH intocado; download em streaming, esperas para o antivírus, trilha por fase atrás de Detalhes (`docs/history/CORRECOES_WINDOWS.md`) |
 | GitHub Device Flow | "resposta inesperada" | Cada resposta do GitHub com a sua frase (Client ID desconhecido, Device Flow desligado, limite, proxy) e registro seguro atrás de Detalhes |
 | Settings | Idioma, auto-run, auto-retry, motivos de revisão, densidade, handoff — sem efeito; tema não aplicado | Só controles reais: iterações e tempos lidos pelo loop, tema aplicado e lembrado, iniciar com o sistema via item de login do SO, confirmar antes de push |
 | Onboarding GitHub | Texto estático | O mesmo card de login do GitHub; pular é explícito |
@@ -88,7 +88,7 @@ vê todos os repositórios do usuário sem instalação por organização.
 
 - **Runtime Codex**: a versão testada é 0.153.4; um Codex antigo no `PATH`
   é recusado e o gerenciado é instalado/atualizado sozinho. Registro do
-  incidente em `docs/INCIDENTE_CODEX_MAX.md`.
+  incidente em `docs/history/INCIDENTE_CODEX_MAX.md`.
 - **Modelos do worker**: a política central (`src/routing/provider-policy.ts`)
   usa os aliases do Claude Code (`haiku`, `sonnet`, `opus`, `fable`); um alias
   que a conta não tenha é recusado pelo CLI e substituído pelo próximo

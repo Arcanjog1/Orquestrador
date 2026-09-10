@@ -6,7 +6,7 @@ testes que os provam; blocos restantes trazem o menor passo concreto.
 ## Feito
 
 ### Bloco 0 — `CodexCapabilityError` (blocker do Windows)
-Causa-raiz, correção e regressões em `docs/CODEX_CAPABILITY_INCIDENT.md`.
+Causa-raiz, correção e regressões em `docs/history/CODEX_CAPABILITY_INCIDENT.md`.
 Provado também contra o binário oficial 0.153.4
 (`scripts/probe-codex-capability.mjs`). **Falta:** reteste humano no Windows
 com contas conectadas — `LOCAL_REAL_AUTH_TEST_PENDING`.
