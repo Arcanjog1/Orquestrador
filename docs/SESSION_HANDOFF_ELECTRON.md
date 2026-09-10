@@ -18,7 +18,7 @@ Escrito em 2026-09-03.
 | Mensagem do HEAD | *Database layer: swappable driver, schema and runtime_installations* |
 | Working tree | **Limpo.** Nenhum arquivo não commitado |
 | Sincronia | `HEAD == origin/claude/new-session-3am7mo` (tudo enviado) |
-| Testes | **156 passando, 0 falhando, 0 pulados** |
+| Testes | **175 passando, 0 falhando, 0 pulados** |
 | Typecheck | `tsc -p tsconfig.test.json --noEmit` → limpo |
 | Build | `tsc -p tsconfig.json` → limpo |
 | Node usado no desenvolvimento | v22.22.2 / npm 10.9.7 |
@@ -117,6 +117,18 @@ Estratégias: `NPM_INTEGRITY`, `SHA256`, `SIGNED_MANIFEST`, `AUTHENTICODE`,
 **observado e registrado**, nunca um nome inventado — só há recusa se uma
 expectativa tiver sido explicitamente configurada.
 
+### Disponibilidade de modelo (`src/models/`)
+Três estados distintos, e nunca um alerta para o do meio:
+`CONFIRMED_FOR_ACCOUNT`, `KNOWN_BUT_UNVERIFIED` (“Disponível no catálogo — ainda
+não verificado nesta conta”, tom neutro, modelo continua usável) e `UNAVAILABLE`
+— este último **só** a partir de evidência. Verificação é por `accountId`, com o
+`CLAUDE_CONFIG_DIR` daquela conta; o que vale para a conta A não vale para a B.
+Se o CLI não expõe modelos/entitlement, isso é dito com todas as letras e nada é
+marcado como indisponível. A chamada mínima de verificação consome uso e só roda
+com autorização explícita. Modelo FIXED, tetos e a proibição de fallback
+silencioso continuam valendo (`model-policy.ts`). Detalhes em
+`docs/MODEL_AVAILABILITY.md`.
+
 ### Rollback current/previous
 Falha no capability check → o install em uso não é tocado. Falha no health check
 depois de promovido → reverte sozinho. `rollBack()` restaura sob demanda.
@@ -136,6 +148,7 @@ runtime-install.test.ts   instalação atômica, download corrompido, fallback e
 runtime-policy.test.ts    versões, compatibilidade, integridade, ordenação, rollback, licenças
 runtime-manager.test.ts   diagnose, prepareAll, MinGit, mensagens sem "PATH"
 claude-accounts.test.ts   isolamento, env limpo, credencial ambiente, traversal
+model-availability.test.ts  três estados, verificação por conta, teto, fallback explícito
 database.test.ts          migrations, FKs, transações, provenance, rollback registrado
 process-manager.test.ts   argv Windows, .cmd, timeout, cancelamento, órfãos
 done-gate.test.ts         DONE nunca aceito sem evidência
@@ -196,6 +209,8 @@ src/
     archive.ts          extração (tar do SO), busca de executável
     sources/            codex-sources, claude-sources, git-sources, npm-registry
   accounts/           account-types, claude-account-manager
+  models/             model-types, model-catalog, model-availability,
+                      account-model-verifier, verification-store, model-policy
   database/           driver, node-sqlite-driver, schema, database
   process/            process-manager      (crítico para Windows)
   git/                git-safety, git-evidence-collector
@@ -203,7 +218,7 @@ src/
   sessions/           session-manager, state-manager, final-report
   security/           secret-redactor
   logger/  core/  preflight/  agents/  config/
-tests/                14 arquivos, 156 testes
+tests/                15 arquivos, 175 testes
   helpers/            git-fixture, fake-runtime-source
 spike/                windows-spike.mjs   (ferramenta INTERNA de desenvolvimento)
 docs/                 este arquivo
@@ -477,7 +492,7 @@ AI-Orchestrator.exe
 Reprova se em qualquer ponto do fluxo normal o usuário precisar abrir um
 terminal, instalar Node/npm, editar JSON ou definir variável de ambiente.
 
-Além disso: **os 156 testes existentes devem continuar verdes.**
+Além disso: **os 175 testes existentes devem continuar verdes.**
 
 ---
 
@@ -527,7 +542,7 @@ via `electron-updater`. Sem assinatura por ora.
    específicos do produto. Consumir, não recriar.
 4. Respeitar as decisões da seção 3 sem exceção.
 5. Implementar **apenas** a seção 7.
-6. Manter os 156 testes verdes; adicionar testes para o que for novo.
+6. Manter os 175 testes verdes; adicionar testes para o que for novo.
 7. Commitar por etapa na branch `claude/new-session-3am7mo` e fazer push.
 8. Ao terminar, reportar: FILES CREATED, FILES MODIFIED, TESTS, KNOWN
    LIMITATIONS, NEXT PHASE.
