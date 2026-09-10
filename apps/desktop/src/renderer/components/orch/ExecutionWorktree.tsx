@@ -212,8 +212,9 @@ export function ExecutionWorktree({
           {participants.size} agentes · {detail.invocations.length} invocações
         </span>
         <span>
-          {detail.verifications.filter((v) => v.passed).length}/
-          {detail.verifications.length} verificações
+          {detail.orchestrationMetrics
+            ? `${detail.orchestrationMetrics.deterministicSteps} etapas automáticas`
+            : `${detail.verifications.filter((v) => v.passed).length}/${detail.verifications.length} verificações`}
         </span>
         <span>{detail.baseline.branch ?? "Sem branch local"}</span>
       </div>

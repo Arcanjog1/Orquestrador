@@ -123,7 +123,10 @@ try {
   await send('Emulation.setDeviceMetricsOverride',{width:1440,height:960,deviceScaleFactor:1,mobile:false});
   await delay(400);await click('button[aria-label="Ajustar à tela"]');
   await delay(400);await saveScreenshot('worktree');
-  if(controlled)assert.equal(await evaluate('document.querySelectorAll(".execution-node").length'),5,'trivial mission has five map nodes');
+  if(controlled) {
+    assert.equal(await evaluate('document.querySelectorAll(".execution-node").length'),5,'trivial mission has five map nodes');
+    assert.match(await evaluate('document.querySelector(".worktree-summary").textContent'),/2 etapas automáticas/,'system steps are distinct from agent invocations');
+  }
   const treeSources=await evaluate('[...document.querySelectorAll(".execution-node[data-source-ids]")].flatMap(e=>e.dataset.sourceIds.split(","))');
   if(!controlled&&!process.argv.includes('--baseline')) {
     const positions = await evaluate('[...document.querySelectorAll(".execution-node")].map(e=>({id:e.dataset.nodeId,x:parseFloat(e.style.left),y:parseFloat(e.style.top)}))');
