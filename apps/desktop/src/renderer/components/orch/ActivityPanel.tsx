@@ -1,3 +1,6 @@
+import type { RunInvocationView } from '@shared/ipc-contract';
+import { HeroPortrait } from './HeroPortrait';
+import { HEROES, heroKey, heroState, questStatus } from '@shared/hero-identity';
 import { Check, ChevronRight, Loader2, MinusCircle, PanelRightClose, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { runStateMeta, type Agent, type RunState } from "@/lib/orchestrator-data";
@@ -90,6 +93,7 @@ function duration(ms: number): string {
  * measurement, which there is not yet - so it is absent, not approximated.
  */
 export function ActivityPanel({
+  records = [],
   state,
   iteration,
   elapsed,
@@ -106,6 +110,7 @@ export function ActivityPanel({
   agents,
   onCancel,
 }: {
+  records?: readonly RunInvocationView[];
   state: RunState;
   iteration: number;
   elapsed: number;
@@ -132,9 +137,9 @@ export function ActivityPanel({
   );
 
   return (
-    <aside className="flex h-full w-[286px] shrink-0 flex-col border-l border-border bg-chrome">
+    <aside data-testid="mission-log" className="mission-log flex h-full w-[286px] shrink-0 flex-col border-l border-border bg-chrome">
       <div className="flex h-14 items-center gap-2 border-b border-border px-4">
-        <span className="text-sm font-semibold">Activity</span>
+        <span className="text-sm font-semibold">Registro da missão</span>
         <button
           onClick={onClose}
           className="ml-auto grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -146,7 +151,7 @@ export function ActivityPanel({
 
       <div className="flex-1 space-y-5 overflow-y-auto p-4">
         <div>
-          <SectionLabel>Run</SectionLabel>
+          <SectionLabel>Missão · Activity</SectionLabel>
           <div className="mt-2 flex items-center gap-2">
             <span
               className={cn(
@@ -241,12 +246,30 @@ export function ActivityPanel({
           </div>
         )}
 
+        {records.length > 0 && <section className="mission-records border-t border-border pt-4">
+          <SectionLabel>Participações registradas</SectionLabel>
+          {records.map((record, index) => {
+            const role = HEROES[heroKey(record.role) ?? 'programmer'];
+            const status = !running && ['running','started'].includes(record.outcome) ? 'stopped' : record.outcome;
+            return <button className="mission-record" key={record.id} onClick={() => onOpenStep(index)}
+              aria-label={role.role + ' · ' + questStatus(status) + '. Ver resultado'}>
+              <HeroPortrait role={record.role} state={heroState(status)} size={36}/>
+              <span className="min-w-0"><strong>{agents.find(a=>a.agentId===record.agentId)?.name ?? role.role}</strong>
+                <span>{record.task ?? 'Coordenação e revisão da missão'}</span>
+                <small>{questStatus(status)} · {record.durationMs === null ? 'Duração não informada' : duration(record.durationMs)}</small>
+                <small className="mission-record-link">Ver resultado →</small>
+              </span>
+            </button>;
+          })}
+        </section>}
+
         {agents.length > 0 && (
           <div className="border-t border-border pt-4">
             <SectionLabel>Equipe</SectionLabel>
             <div className="mt-2 space-y-2">
               {agents.map((agent) => (
-                <div key={agent.agentId} className="flex items-start gap-2">
+                <div key={agent.agentId} className="mission-member flex items-start gap-2">
+                  <HeroPortrait role={agent.role} state={heroState(agent.status === "running" && !running ? state : agent.status)}/>
                   <span
                     className={cn(
                       "mt-1.5 size-2 shrink-0 rounded-full",
@@ -259,7 +282,7 @@ export function ActivityPanel({
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm">{agent.name}</p>
                     <p className="truncate text-xs text-muted-foreground">
-                      {agent.role === "ORCHESTRATOR" ? "Orquestrador" : "Worker"}
+                      {HEROES[heroKey(agent.role)??'programmer'].role}
                       {agent.connectionName ? ` · ${agent.connectionName}` : ""}
                       {/* Which side of the bill this member is on. A person
                           who set the product up to use their subscription
@@ -296,12 +319,12 @@ export function ActivityPanel({
             value={<span className="font-mono text-xs">{formatElapsed(elapsed)}</span>}
           />
           <StatBlock
-            label="Files"
-            value={filesChanged === null ? "—" : `${filesChanged} modified`}
+            label="Arquivos"
+            value={filesChanged === null ? "—" : `${filesChanged} alterados`}
           />
-          <StatBlock label="Tests" value={tests ? `${tests.passed} / ${tests.total}` : "—"} />
+          <StatBlock label="Testes" value={tests ? `${tests.passed} / ${tests.total}` : "—"} />
           <StatBlock
-            label="Context"
+            label="Contexto"
             value={contextPercent === null ? "—" : `${contextPercent}%`}
           />
         </div>
@@ -322,12 +345,14 @@ export function ActivityPanel({
         )}
 
         <div className="border-t border-border pt-4">
-          <SectionLabel>Steps</SectionLabel>
+          <SectionLabel>Etapas da jornada</SectionLabel>
           <div className="mt-2 space-y-0.5">
             {steps.map((s, i) => (
               <button
                 key={`${s.label}-${i}`}
                 onClick={() => onOpenStep(i)}
+                title={`${s.label} · ${questStatus(s.status)} · ${s.time}`}
+                aria-label={`${s.label} · ${questStatus(s.status)} · ${s.time}. Ver resultado`}
                 className="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-accent"
               >
                 {s.status === "done" && <Check className="size-3.5 text-success" />}

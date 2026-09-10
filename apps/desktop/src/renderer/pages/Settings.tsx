@@ -43,11 +43,11 @@ import type {
 } from "@shared/ipc-contract";
 
 const tabs = [
-  { id: "general", label: "General" },
-  { id: "appearance", label: "Appearance" },
-  { id: "accounts", label: "Accounts & Integrations" },
+  { id: "general", label: "Geral" },
+  { id: "appearance", label: "Aparência" },
+  { id: "accounts", label: "Contas e conexões" },
   { id: "agents", label: "Agentes e modelos" },
-  { id: "execution", label: "Execution" },
+  { id: "execution", label: "Execução" },
   { id: "verifications", label: "Verificações do projeto" },
   { id: "git", label: "Git" },
   { id: "developer", label: "Developer Mode" },
@@ -143,14 +143,14 @@ export function SettingsPage({
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
-      <aside className="w-[248px] shrink-0 border-r border-sidebar-border bg-sidebar p-3">
+      <aside className="guild-sidebar w-[248px] shrink-0 border-r border-sidebar-border bg-sidebar p-3">
         <Link
           to="/"
           className="mb-4 inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
         >
           <ArrowLeft className="size-4" /> Voltar ao workspace
         </Link>
-        <SectionLabel>Settings</SectionLabel>
+        <SectionLabel>Sala de estratégia</SectionLabel>
         <div className="mt-2 space-y-0.5">
           {tabs.map((t) => (
             <button
@@ -171,9 +171,9 @@ export function SettingsPage({
 
       <main className="flex-1 overflow-y-auto">
         <div className={active === "agents" ? "mx-auto max-w-6xl px-4 py-8 sm:px-8 sm:py-10" : "mx-auto max-w-3xl px-8 py-10"}>
-          <h1 className="text-xl font-semibold tracking-tight">
+          {active !== "agents" && <h1 className="text-xl font-semibold tracking-tight">
             {tabs.find((t) => t.id === active)?.label}
-          </h1>
+          </h1>}
 
           {active === "agents" && <AgentsCard accounts={accounts} onChanged={reload} />}
           {active === "accounts" && (

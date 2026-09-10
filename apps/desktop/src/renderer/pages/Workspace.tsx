@@ -1,3 +1,4 @@
+import { GuildBanner, HeroPortrait } from '@/components/orch/HeroPortrait';
 import {AgentCallDetails} from '@/components/orch/AgentCallDetails';
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelRightOpen, ShieldQuestion, Sparkles } from "lucide-react";
@@ -1016,6 +1017,7 @@ export function WorkspacePage({
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
+        <GuildBanner title="Taverna da IA" subtitle="Planeje. Delegue. Execute." />
         <TopContextBar
           state={runState}
           iteration={iteration}
@@ -1052,10 +1054,10 @@ export function WorkspacePage({
           <select aria-label="Execução no histórico" value={historyDetail?.run.id ?? ''} onChange={e=>void openHistoricalRun(e.target.value)}><option value="">Execução atual</option>{historyRuns.map(r=><option key={r.id} value={r.id}>{r.status} · {r.objective.slice(0,55)}</option>)}</select><span>{historyDetail?.run.objective ?? run?.objective}</span>
         </nav>
         {(historyDetail??runDetail)?.run.id&&<AgentCallDetails runId={(historyDetail??runDetail)!.run.id} updatedAt={JSON.stringify(historyDetail??runDetail)} onConfirmed={historyDetail?undefined:()=>void loadMessages()}/>}
+        <div className="mission-workspace relative flex min-h-0 flex-1">
         {view === 'worktree' && (historyDetail || (runDetail && runDetail.run.id === run?.id)) ? (
           <ExecutionWorktree detail={(historyDetail ?? runDetail)!} messages={historyDetail ? historyMessages : messages} onEvidence={()=>historyDetail ? setDetailRunId(historyDetail.run.id) : setEvidenceOpen(true)} onDiff={historyDetail ? undefined : ()=>setDiffOpen(true)} onReview={historyDetail ? undefined : ()=>void resolveHumanReview('Continuar')} onCancel={historyDetail ? undefined : ()=>setCancelOpen(true)} onCancelTask={historyDetail ? undefined : (taskId)=>{if(run) void api.run.cancelTask({runId:run.id,taskId}).catch(fail);}}/>
-        ) : <div className="relative flex min-h-0 flex-1">
-          <div className="min-w-0 flex-1 overflow-y-auto">
+        ) : <div className="min-w-0 flex-1 overflow-y-auto">
             {entries.length === 0 ? (
               <EmptyState onSubmit={(text) => void send(text)} />
             ) : (
@@ -1073,11 +1075,12 @@ export function WorkspacePage({
                 <div ref={bottom} className="h-2" />
               </>
             )}
-          </div>
+          </div>}
 
-          {activityOpen ? (
+          {!historyDetail && (activityOpen ? (
             <div className="hidden xl:block">
               <ActivityPanel
+                records={runDetail?.run.id === run?.id ? runDetail?.invocations : []}
                 state={runState}
                 iteration={iteration}
                 elapsed={elapsed}
@@ -1085,7 +1088,7 @@ export function WorkspacePage({
                 onOpenEvidence={() => setEvidenceOpen(true)}
                 currentAgent={currentAgent}
                 steps={steps}
-                filesChanged={changes?.isRepository ? changes.files.length : null}
+                filesChanged={workspace.localPath && changes?.isRepository ? changes.files.length : null}
                 tests={tests}
                 contextPercent={null}
                 onOpenStep={() => (run ? setDetailRunId(run.id) : setEvidenceOpen(true))}
@@ -1103,10 +1106,8 @@ export function WorkspacePage({
             >
               <PanelRightOpen className="size-4" />
             </button>
-          )}
+          ))}
         </div>
-
-        }
 
         {pendingPermissions.length > 0 && (
           <div
@@ -1378,11 +1379,12 @@ function NoWorkspace({
 
 function EmptyState({ onSubmit }: { onSubmit: (text: string) => void }) {
   return (
-    <div className="mx-auto flex h-full max-w-2xl flex-col justify-center px-6 py-10">
+    <div className="guild-empty mx-auto flex h-full max-w-2xl flex-col justify-center px-6 py-10">
       <div className="flex items-center gap-2">
         <Sparkles className="size-4 text-primary" />
         <span className="text-sm text-muted-foreground">AI Orchestrator</span>
       </div>
+      <div className="guild-welcome"><HeroPortrait role="ORCHESTRATOR" variant="sprite" size={100}/><span>Uma ideia. Uma equipe. Uma nova jornada.</span></div>
       <h1 className="mt-3 text-3xl font-semibold tracking-tight">
         O que vamos construir hoje?
       </h1>

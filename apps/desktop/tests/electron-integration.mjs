@@ -1767,9 +1767,8 @@ test('one repository is one project, whichever way its address is written', asyn
   // because a test that only passes with a network would be a test that
   // silently stops testing anything on a machine without one.
   //
-  // This repository's default branch is deliberately not called `main` - it
-  // is `claude/new-session-3am7mo` - so reading it back is the strongest
-  // available evidence that no default was invented.
+  // Repository metadata is mutable. Compare a successful read with GitHub
+  // instead of pinning this live integration test to an obsolete branch.
   for (const result of [connected, other]) {
     if (result.metadataError === null) {
       assert.ok(
@@ -1785,12 +1784,14 @@ test('one repository is one project, whichever way its address is written', asyn
     }
   }
   if (connected.metadataError === null) {
-    assert.equal(
-      connected.project.defaultBranch,
-      'claude/new-session-3am7mo',
-      'the real default branch of this repository, which is not "main"',
-    );
-    assert.equal(connected.project.repositoryPrivate, false, 'it is a public repository');
+    const response = await fetch('https://api.github.com/repos/Arcanjog1/Orquestrador', {
+      headers: { 'User-Agent': 'AI-Orchestrator-integration-test' },
+      signal: AbortSignal.timeout(15_000),
+    });
+    assert.ok(response.ok, 'independent GitHub metadata read succeeds');
+    const metadata = await response.json();
+    assert.equal(connected.project.defaultBranch, metadata.default_branch, 'the branch actually named by GitHub');
+    assert.equal(connected.project.repositoryPrivate, metadata.private, 'the visibility actually reported by GitHub');
   }
 
   // Each holds its own conversations.

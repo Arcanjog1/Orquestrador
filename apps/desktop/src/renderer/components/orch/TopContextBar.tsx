@@ -148,7 +148,7 @@ export function TopContextBar({
   );
 
   return (
-    <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border bg-chrome px-4">
+    <div className="guild-context flex h-14 shrink-0 items-center gap-2 border-b border-border bg-chrome px-4">
       {/* Where this project's work runs. Not decorative: a person about to send
           a task needs to know whether it will touch their own disk. */}
       <Chip

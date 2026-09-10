@@ -66,6 +66,8 @@ try {
   socket=new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((res,rej)=>{socket.onopen=res;socket.onerror=rej;});
   socket.onmessage=e=>{const m=JSON.parse(e.data);const p=pending.get(m.id);if(p){clearTimeout(p.timer);pending.delete(m.id);m.error?p.rej(new Error(JSON.stringify(m.error))):p.res(m.result);}};
+  // Keep CDP keyboard input on this page even when the user focuses another window.
+  await send('Emulation.setFocusEmulationEnabled', {enabled:true});
   await waitFor('!!window.api && !!document.querySelector("[data-testid=start]")');
   appInfo=await evaluate('window.api.app.info()');
   assert.equal(appInfo.packaged,!!option('--binary'),'the intended Electron binary is running');

@@ -1,3 +1,4 @@
+import { HeroPortrait } from './HeroPortrait';
 import {roleDefinition,type PolicyLayer} from '@shared/agent-policy';
 import {PolicyLayerFields} from './AgentPolicyFields';
 import { useEffect, useMemo, useState } from "react";
@@ -320,7 +321,7 @@ export function TeamForm({
             data-testid={`team-${prefix}`}
           >
             <div className="flex items-center gap-2">
-              <ProviderIcon provider={provider==='openai'?'openai':'anthropic'} />
+              <HeroPortrait role={agents.find(a=>a.id===draft.agentId)?.role??spec.role} /><ProviderIcon provider={provider==='openai'?'openai':'anthropic'} />
               <SectionLabel>
                 {isWorker && workers.length > 1 ? `${spec.title} ${index + 1}` : spec.title}
               </SectionLabel>
@@ -383,7 +384,7 @@ export function TeamForm({
                 <select aria-label={`Agente ${prefix}`} data-testid={`team-${prefix}-agent`} className="w-full rounded border border-border bg-surface p-2 text-xs"
                   value={draft.agentId ?? ''} onChange={e=>updateRow({agentId:e.target.value || undefined})}>
                   <option value="">Agente padrão da conta</option>
-                  {agents.filter(a=>a.enabled && a.accountId===draft.accountId && roleDefinition(a.role)?.lane===(spec.role==='ORCHESTRATOR'?'supervisor':'delegate')).map(a=><option key={a.id} value={a.id}>{a.name} · {roleDefinition(a.role)?.label} · {a.id.slice(-6)}</option>)}
+                  {agents.filter(a=>a.enabled && a.accountId===draft.accountId && roleDefinition(a.role)?.lane===(spec.role==='ORCHESTRATOR'?'supervisor':'delegate')).map(a=><option key={a.id} value={a.id}>{a.name} · {roleDefinition(a.role)?.label}</option>)}
                 </select>
               </Labeled>
               {/* Orchestrator, CLI default: two read-only cells that say so. */}

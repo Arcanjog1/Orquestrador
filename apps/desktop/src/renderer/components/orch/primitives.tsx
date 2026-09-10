@@ -1,3 +1,4 @@
+import { HeroPortrait } from './HeroPortrait';
 import {
   Check,
   CircleDashed,
@@ -123,7 +124,7 @@ export function AgentIdentity({
 }) {
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <ProviderIcon provider={agent.provider} />
+      <HeroPortrait role={agent.role} /><ProviderIcon provider={agent.provider} />
       <span className="text-sm font-semibold text-foreground">{agent.agent}</span>
       <RoleLabel role={agent.role} />
       {!compact && (

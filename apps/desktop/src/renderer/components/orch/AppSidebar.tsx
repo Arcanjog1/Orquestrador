@@ -21,6 +21,7 @@ import {
   Settings,
   Sparkles,
   Trash2,
+  Users,
   FolderGit2,
 } from "lucide-react";
 import {
@@ -469,7 +470,7 @@ export function AppSidebar({
       ref={asideRef}
       style={collapsed ? undefined : { width }}
       className={cn(
-        "relative flex h-full shrink-0 flex-col border-r border-sidebar-border bg-sidebar",
+        "guild-sidebar relative flex h-full shrink-0 flex-col border-r border-sidebar-border bg-sidebar",
         collapsed && "w-[62px]",
         // The transition is on width, and it has to be off while dragging or
         // the handle lags a frame behind the pointer and feels broken.
@@ -478,7 +479,7 @@ export function AppSidebar({
       data-testid="app-sidebar"
       data-collapsed={collapsed ? "true" : "false"}
     >
-      <div className="flex h-14 items-center gap-2 px-3">
+      <div className="guild-brand flex h-14 items-center gap-2 px-3">
         <div className="grid size-7 shrink-0 place-items-center rounded-md bg-primary/15">
           <Sparkles className="size-4 text-primary" />
         </div>
@@ -539,7 +540,7 @@ export function AppSidebar({
         {!collapsed && !searching && (
           <>
             <div className="mt-4 flex items-center justify-between">
-              <SectionLabel>Projetos</SectionLabel>
+              <SectionLabel>Guilda · Projetos</SectionLabel>
               <div className="flex items-center gap-2">
                 {onShowArchived && (
                   <button
@@ -625,6 +626,10 @@ export function AppSidebar({
       </nav>
 
       <div className="space-y-0.5 border-t border-sidebar-border p-3">
+        <Link to="/configuracoes" search={{tab:'agents'}} aria-label="Guilda · Agentes e modelos"
+          className={cn('flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-sidebar-foreground/85 transition-colors hover:bg-sidebar-accent hover:text-foreground',collapsed && 'justify-center px-0')}>
+          <Users className="size-4 text-muted-foreground"/>{!collapsed && 'Guilda · Agentes e modelos'}
+        </Link>
         <Link
           to="/historico"
           className={cn(

@@ -85,6 +85,19 @@ jobs:
           path: out/overflow-*
           if-no-files-found: ignore
 
+      - name: RPG layout, horizontal worktree and reduced motion in packaged Windows app
+        timeout-minutes: 5
+        run: node apps/desktop/scripts/rpg-visual.mjs "--binary=apps/desktop/release/win-unpacked/AI Orchestrator.exe" --output=out/rpg-windows
+
+      - name: Upload RPG visual evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpg-visual-windows
+          path: out/rpg-windows
+          if-no-files-found: ignore
+
       - name: Packaged smoke test
         timeout-minutes: 15
         run: npm run -w apps/desktop test:packaged
@@ -313,3 +326,7 @@ jobs:
         run: |
           npm run -w apps/desktop package:linux
           npm run -w apps/desktop test:packaged
+
+      - name: RPG layout in packaged Linux app
+        timeout-minutes: 5
+        run: xvfb-run -a node apps/desktop/scripts/rpg-visual.mjs --binary=apps/desktop/release/linux-unpacked/ai-orchestrator --output=out/rpg-linux

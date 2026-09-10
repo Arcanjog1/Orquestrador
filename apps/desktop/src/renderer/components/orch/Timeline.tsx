@@ -1,3 +1,4 @@
+import { briefText } from '@shared/hero-identity';
 import { useState } from "react";
 import {
   ChevronDown,
@@ -114,6 +115,7 @@ function TimelineItem({
   onOpenRunDetail: (runId: string) => void;
   onRetry: (runId: string) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   switch (entry.kind) {
     case "user":
       return (
@@ -163,16 +165,19 @@ function TimelineItem({
               </span>
             </div>
             <div className="mt-2.5 text-sm font-medium text-foreground/95">
-              {entry.headline}
+              {expanded ? entry.headline : briefText(entry.headline, 120)}
             </div>
             <div className="mt-1 space-y-1">
-              {entry.lines.map((l) => (
+              {(expanded ? entry.lines : entry.lines.slice(0, 1)).map((l) => (
                 <p key={l} className="text-sm leading-relaxed text-muted-foreground">
-                  {l}
+                  {expanded ? l : briefText(l, 160)}
                 </p>
               ))}
             </div>
-            {entry.stats && (
+            {(entry.lines.length > 1 || entry.lines.some(l=>l.length>160) || entry.headline.length>120 || !!entry.stats?.length) && <button
+              className="mt-2 text-xs font-medium text-primary hover:underline" aria-expanded={expanded}
+              onClick={()=>setExpanded(v=>!v)}>{expanded ? 'Recolher resposta' : 'Ver resposta completa'}</button>}
+            {expanded && entry.stats && (
               <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 border-t border-border pt-3">
                 {entry.stats.map((s) => (
                   <StatBlock key={s.label} label={s.label} value={s.value} />
@@ -416,7 +421,8 @@ function TimelineItem({
             <div className="mt-3">
               <SectionLabel>Objetivo</SectionLabel>
               <p className="mt-1 text-sm text-foreground/90">{entry.objective}</p>
-              <p className="mt-2 text-sm text-muted-foreground">{entry.result}</p>
+              <p className="mt-2 text-sm text-muted-foreground">{expanded ? entry.result : briefText(entry.result, 180)}</p>
+              {entry.result.length > 180 && <button className="mt-2 text-xs text-primary" aria-expanded={expanded} onClick={()=>setExpanded(v=>!v)}>{expanded?'Recolher resposta':'Ver resposta completa'}</button>}
             </div>
             <div className="mt-4 grid grid-cols-2 gap-4 border-t border-success/20 pt-3 sm:grid-cols-4">
               <StatBlock label="Iterações" value={entry.iterations} />

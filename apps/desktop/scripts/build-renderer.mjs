@@ -7,7 +7,7 @@
  * node_modules to resolve from.
  */
 import { build } from 'esbuild';
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, mkdirSync, cpSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -94,3 +94,6 @@ for (const [pkg, file] of FONT_FILES) {
 
 copyFileSync(join(root, 'src/renderer/index.html'), join(out, 'index.html'));
 console.log('renderer bundle written to', out);
+
+// Local guild artwork ships inside asar and never requests remote images.
+cpSync(join(root, 'src/renderer/assets'), join(out, 'assets'), {recursive:true});

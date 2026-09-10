@@ -2,6 +2,7 @@
 @source "./";
 @import "tw-animate-css";
 
+
 @custom-variant dark (&:is(.dark *));
 
 /* The design's typefaces, served from disk. The prototype linked them from
@@ -328,3 +329,5 @@
 /* Keep window chrome outside body: modal scroll locks rewrite body padding. */
 @supports (top: env(titlebar-area-height)) { #root { padding-top: env(titlebar-area-height, 0px); } body::before { content:"AI Orchestrator"; position:fixed; top:0; left:0; width:env(titlebar-area-width,0px); height:env(titlebar-area-height,0px); overflow:hidden; padding-left:14px; font-size:11px; line-height:36px; background:#12141a; color:#dce0ea; -webkit-app-region:drag; z-index:99; } .h-screen {height:calc(100vh - env(titlebar-area-height,0px));} }
 .run-view-tabs{overflow-x:auto;flex-shrink:0}.run-view-tabs button{white-space:nowrap;flex-shrink:0}.run-view-tabs select{min-width:130px;max-width:220px}.worktree-summary{flex-wrap:wrap;gap:8px 20px}.worktree-summary>span{white-space:nowrap}
+
+@import "./guild-theme.css";
