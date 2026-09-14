@@ -1,7 +1,7 @@
 /** Presentation only: aliases never change the agent's persisted execution role. */
 export const HEROES = {
   orchestrator: { asset: 'orchestrator-white-mage', title: 'Arquimago', role: 'Orquestrador', rune: '✦' },
-  programmer: { asset: 'programmer-arcane-smith', title: 'Ferreiro Arcano', role: 'Programador', rune: '⚒' },
+  programmer: { asset: 'programmer-arcane-smith-v2', title: 'Ferreiro Arcano', role: 'Programador', rune: '⚒' },
   analyst: { asset: 'analyst-scholar', title: 'Erudito', role: 'Analista', rune: '◇' },
   designer: { asset: 'designer-bard', title: 'Bardo Artista', role: 'Designer', rune: '✧' },
   tester: { asset: 'tester-guardian', title: 'Cavaleiro Guardião', role: 'Testador', rune: '✓' },

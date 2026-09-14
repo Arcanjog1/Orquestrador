@@ -723,13 +723,13 @@ test('the team dialog offers the real accounts by name, and what it saves is wha
     await window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
     await nativeClick(window, 'team-save');
     const closed = Date.now() + 10_000;
-    let text = '';
+    let dialogOpen = true;
     while (Date.now() < closed) {
-      text = await window.webContents.executeJavaScript('document.body.innerText');
-      if (!/Equipe deste projeto/.test(text)) break;
+      dialogOpen = await window.webContents.executeJavaScript("!!document.querySelector('[role=dialog] [data-testid=team-save]')");
+      if (!dialogOpen) break;
       await new Promise((r) => setTimeout(r, 100));
     }
-    assert.doesNotMatch(text, /Equipe deste projeto/, 'the dialog closed after saving; rendered state: '+text);
+    assert.equal(dialogOpen, false, 'the actual team editor closed after saving');
 
     // What was saved is the workspace's team, by account, as the run reads it.
     const saved = (await window.webContents.executeJavaScript('window.api.workspace.list()')).find(

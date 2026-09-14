@@ -53,7 +53,7 @@ test('permission continuation retains the human pause and publishes one new fina
 test('progress facts deduplicate reads, timestamps and call counters; changed bytes remain progress',()=>{
   assert.equal(progressFingerprint({reads:[['a','hash']],iteration:1}),progressFingerprint({iteration:9,reads:[['a','hash'],['a','hash']]}));
   const g=new DelegationProgressGuard();assert.equal(g.admit({task:'Verificar!'}, {hash:'abc'}),true);
-  assert.equal(g.admit({task:'verificar'}, {hash:'abc'}),false);
+  assert.equal(g.admit({task:'Verificar!'}, {hash:'abc'}),false);
   assert.equal(g.admit({task:'verificar'}, {hash:'xyz'}),true);
   assert.notEqual(progressFingerprint({path:'A.ts'}),progressFingerprint({path:'a.ts'}));
 });
@@ -88,7 +88,7 @@ async function runSmall(stagnant:boolean) {
       const next=events.find(e=>e.type==='REVIEW_REQUESTED')!;
       assert.equal(next.parentId,plan.id,'the first action follows its plan');
       assert.deepEqual(graph.nodes.flatMap(n=>n.sourceIds).sort(),linear.flatMap(n=>n.sourceIds).sort());
-      assert.equal(graph.nodes.length,5);assert.equal(linear.length,6);
+      assert.equal(graph.nodes.length,5);assert.equal(linear.length,5);assert.deepEqual(linear,graph.nodes);
       assert.deepEqual(activityTrace(detail).filter(n=>n.invocation).map(n=>n.invocation!.id),linear.filter(n=>n.invocation).map(n=>n.invocation!.id));
       // Changing old chat messages cannot change either modern projection.
       assert.deepEqual(executionGraph(detail,[{text:'unrelated'} as never]),graph);

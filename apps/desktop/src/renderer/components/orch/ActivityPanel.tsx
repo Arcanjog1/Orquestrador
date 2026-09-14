@@ -139,7 +139,7 @@ export function ActivityPanel({
   return (
     <aside data-testid="mission-log" className="mission-log flex h-full w-[286px] shrink-0 flex-col border-l border-border bg-chrome">
       <div className="flex h-14 items-center gap-2 border-b border-border px-4">
-        <span className="text-sm font-semibold">Respostas da equipe</span>
+        <span className="text-sm font-semibold">Respostas da equipe</span><span className="response-mode">Resumos</span>
         <button
           onClick={onClose}
           className="ml-auto grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -150,7 +150,9 @@ export function ActivityPanel({
       </div>
 
       <div className="mission-log-content flex-1 overflow-y-auto p-4">
-        {visibleRecords.length > 0 && <section className="mission-records border-t border-border pt-4">
+        {final && <TraceCard node={final} compact/>}
+        {trace && <section className="team-responses">{trace.filter(n=>n.kind!=='done').map(node=><TraceCard key={node.id} node={node} compact/>)}</section>}
+        {!trace && visibleRecords.length > 0 && <section className="mission-records border-t border-border pt-4">
           <SectionLabel>Participações registradas</SectionLabel>
           {visibleRecords.map((record, index) => {
             const role = HEROES[heroKey(record.role) ?? 'programmer'];
@@ -167,8 +169,7 @@ export function ActivityPanel({
           })}
         </section>}
         {visibleRecords.length === 0 && <p className="text-xs text-muted-foreground">As respostas aparecem aqui.</p>}
-        {final && <TraceCard node={final} compact/>}
-        <details className="guild-run-diagnostics" open={running || undefined}><summary>Registro da missão · detalhes</summary><div className="space-y-5">
+        <details className="guild-run-diagnostics"><summary>Registro da missão · detalhes</summary><div className="space-y-5">
         <div>
           <SectionLabel>Missão · Activity</SectionLabel>
           <div className="mt-2 flex items-center gap-2">

@@ -57,7 +57,7 @@ test('36 bytes: one worker, real filesystem comparison, DoneGate PASS, one final
     assert.equal(f.detail.orchestrationMetrics!.actualWorkerInvocations,1);
     assert.equal(f.detail.orchestrationMetrics!.actualModelInvocations,2);
     assert.equal(executionGraph(f.detail).nodes.length,5);
-    assert.equal(chronologicalTrace(f.detail).length,6);
+    assert.equal(chronologicalTrace(f.detail).length,5);
     assert.deepEqual(executionGraph(f.detail).nodes.flatMap(n=>n.sourceIds).sort(),chronologicalTrace(f.detail).flatMap(n=>n.sourceIds).sort());
   } finally {await f.cleanup();}
 });

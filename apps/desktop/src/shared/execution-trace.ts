@@ -5,7 +5,7 @@ import { isRunOver } from './activity.js';
 import { HEROES, heroKey } from './hero-identity.js';
 
 /** The single projection consumed by tree, chronological journal and Activity. */
-export function executionTrace(detail: RunDetailView, journal = false): ExecutionGraph {
+export function executionTrace(detail: RunDetailView): ExecutionGraph {
   const events=detail.executionEvents ?? [], nodes:ExecutionNode[]=[], edges:ExecutionGraph['edges']=[];
   const bySource=new Map<string,ExecutionNode>(), byInvocation=new Map<string,ExecutionNode>();
   const terminal=isRunOver(detail.run.status);
@@ -62,62 +62,93 @@ export function executionTrace(detail: RunDetailView, journal = false): Executio
       else edges.push({id:`${worker.id}>${node.id}`,from:worker.id,to:node.id,kind:'join'});
     }
   }
-  for(const node of nodes) {
-    if(terminal&&['running','started','pending'].includes(node.status)){node.status='stopped';node.finishedAt=detail.run.finishedAt;}
-    const parents=edges.filter(e=>e.to===node.id).map(e=>nodes.find(n=>n.id===e.from)).filter((n):n is ExecutionNode=>!!n&&nodes.indexOf(n)<nodes.indexOf(node));
-    node.row=parents.length?Math.max(...parents.map(n=>n.row))+1:node.kind==='user'?0:1;
+  for (const node of nodes) {
+    if (terminal && ['running','started','pending'].includes(node.status)) {
+      node.status = 'stopped'; node.finishedAt = detail.run.finishedAt;
+    }
   }
-  // Parallel columns come only from common dependency parents, never from role.
-  const occupied=new Map<number,number>();
-  for(const node of nodes){const count=occupied.get(node.row)??0;occupied.set(node.row,count+1);node.lane=count+1;}
-  const plan = events.find(e => e.type === 'PLAN_CREATED');
-  const compact = plan?.data.complexityClass === 'TRIVIAL' && nodes.filter(n => n.kind === 'worker').length <= 1 &&
-    !events.some(e => ['BLOCKED','NEEDS_HUMAN'].includes(e.type) || e.type === 'REVIEW_RESULT' && e.status === 'rejected');
-  return compact ? compactMission({nodes,edges}, journal) : {nodes,edges};
+  return foldMission({nodes, edges}, events);
 }
 
-/** Fold mechanical transitions into their result while retaining every source
- * event and full diagnostic payload. A short map is a small execution, not a
- * truncation of a large execution. No CSS/assets or RPG layout is changed. */
-function compactMission(graph: ExecutionGraph, journal: boolean): ExecutionGraph {
-  const user = graph.nodes.find(n => n.kind === 'user');
-  const final = graph.nodes.find(n => n.kind === 'done');
-  const worker = graph.nodes.find(n => n.kind === 'worker');
-  const plan = graph.nodes.find(n => n.id.endsWith(':plan'));
-  if (!user || !plan) return graph;
-  const delegation = graph.nodes.find(n => n.label.startsWith('Orquestrador →'));
-  if (delegation) {delegation.label='Orquestrador → Programador';delegation.summary='Crie o arquivo conforme a especificação.';}
-  const proofs = graph.nodes.filter(n => n.kind === 'evidence' || n.kind === 'verification');
-  const validation = proofs.at(-1);
-  const merge = (target: ExecutionNode, sources: ExecutionNode[]) => {
-    const all = [target, ...sources.filter(n => n !== target)];
-    target.sourceIds = [...new Set(all.flatMap(n => n.sourceIds))];
-    target.fullText = all.map(n => n.fullText).join('\n\n');
-    target.metadata = {facts:all.map(n => n.metadata)};
+/** Fold coordination into its milestone without losing source records.
+ * All views use identical nodes, summaries, full text and source IDs. */
+function foldMission(graph: ExecutionGraph, events: readonly ExecutionEvent[]): ExecutionGraph {
+  const owner = new Map(graph.nodes.map(n => [n.id, n]));
+  const eventById = new Map(events.map(event => [event.id, event]));
+  const merged = new Set<string>();
+  function merge(target: ExecutionNode, source: ExecutionNode) {
+    if (target === source || merged.has(source.id)) return;
+    target.sourceIds = [...new Set([...target.sourceIds, ...source.sourceIds])];
+    target.fullText += '\n\n' + source.label + ':\n' + source.fullText;
+    const previous = target.metadata as Record<string, unknown> | undefined;
+    target.metadata = {...previous, records: [...(Array.isArray(previous?.records) ? previous.records : []),
+      {id: source.id, label: source.label, summary: source.summary, invocation: source.invocation, data: source.metadata}]};
+    if (!target.invocation && source.invocation) target.invocation = source.invocation;
+    owner.set(source.id, target); merged.add(source.id);
+  }
+  for (const event of events.filter(e => e.type === 'DELEGATION_STARTED')) {
+    const source = graph.nodes.find(n => n.sourceIds.includes(event.id));
+    const worker = graph.nodes.find(n => n.id === `inv:${event.invocationId}`);
+    if (source && worker) merge(worker, source);
+  }
+  const plan = graph.nodes.find(n => n.sourceIds.some(id => eventById.get(id)?.type === 'PLAN_CREATED'));
+  if (plan) {
+    for (const call of graph.nodes.filter(n => n.invocation?.role === 'ORCHESTRATOR' && graph.nodes.indexOf(n) < graph.nodes.indexOf(plan))) merge(plan, call);
+  }
+  for (const event of events.filter(e => e.type === 'REVIEW_REQUESTED')) {
+    const source = graph.nodes.find(n => n.sourceIds.includes(event.id));
+    // Contract toward the decision's direct parent, never past its workers:
+    // contracting across intervening work would introduce a graph cycle.
+    const parent = graph.nodes.find(n => n.sourceIds.includes(event.parentId ?? ''));
+    if (source && parent) merge(owner.get(parent.id) ?? parent, source);
+  }
+  const trivial = events.find(e => e.type === 'PLAN_CREATED')?.data.complexityClass === 'TRIVIAL' &&
+    graph.nodes.filter(n => n.kind === 'worker').length <= 1 &&
+    !events.some(e => ['BLOCKED','NEEDS_HUMAN'].includes(e.type) || e.type === 'REVIEW_RESULT' && e.status === 'rejected');
+  if (trivial) {
+    const proofs = graph.nodes.filter(n => ['evidence','verification'].includes(n.kind));
+    const validation = proofs.at(-1);
+    if (validation) {
+      validation.kind = 'verification'; validation.label = 'Validação';
+      for (const proof of proofs) merge(validation, proof);
+    }
+  }
+  const resolve = (id: string): ExecutionNode => {
+    let node = owner.get(id)!;
+    const seen = new Set<string>();
+    while (owner.get(node.id) !== node && !seen.has(node.id)) { seen.add(node.id); node = owner.get(node.id)!; }
+    return node;
   };
-  const plannerCalls = graph.nodes.filter(n => n.kind === 'orchestrator' && n !== plan && n !== delegation);
-  plan.invocation = plannerCalls.find(n => n.invocation)?.invocation;
-  merge(plan, plannerCalls); plan.label = 'Orquestrador';
-  if (worker) {
-    worker.label = 'Programador';
-    if (!journal && delegation) merge(worker,[delegation]);
-  }
-  if (validation) {
-    const meta = validation.metadata as {fileChecks?: {passed:boolean;sizeBytes:number;request:{path:string};measurement?:{comparedExactBytes:boolean}}[]};
-    const checks = meta?.fileChecks ?? [];
-    validation.kind = 'verification'; validation.label = 'Validação';
-    if (checks.length && checks.every(c => c.passed)) validation.summary = checks.map(c => `${c.measurement?.comparedExactBytes ? '✓ Conteúdo correto' : '✓ Arquivo verificado'} · ${c.request.path}\n✓ ${c.sizeBytes} bytes`).join('\n');
-    merge(validation,proofs);
-  }
-  const nodes = [user,plan,...(journal && delegation ? [delegation] : []),...(worker ? [worker] : []),...(validation ? [validation] : []),...(final ? [final] : [])];
+  const nodes = graph.nodes.filter(n => !merged.has(n.id));
   const edges: ExecutionGraph['edges'] = [];
-  nodes.forEach((n,i) => {n.row=i;n.lane=1;if(i)edges.push({id:nodes[i-1]!.id+'>'+n.id,from:nodes[i-1]!.id,to:n.id,kind:'sequence'});});
-  return {nodes,edges};
+  for (const edge of graph.edges) {
+    const from = resolve(edge.from), to = resolve(edge.to);
+    if (from !== to && !edges.some(e => e.from === from.id && e.to === to.id)) edges.push({...edge, id: from.id+'>'+to.id, from: from.id, to: to.id});
+  }
+  // Dependency order, independent of the order parallel calls return.
+  const pending = new Set(nodes.map(n => n.id)), placed = new Map<string, ExecutionNode>();
+  while (pending.size) {
+    const ready = nodes.filter(n => pending.has(n.id) && edges.filter(e => e.to === n.id).every(e => !pending.has(e.from)));
+    if (!ready.length) {
+      // Corrupt historical relations must never hang the interface.
+      for (const n of nodes.filter(n => pending.has(n.id))) { n.row = placed.size; placed.set(n.id,n); pending.delete(n.id); }
+      break;
+    }
+    for (const n of ready) {
+      const parents = edges.filter(e => e.to === n.id).map(e => placed.get(e.from)).filter((p): p is ExecutionNode => !!p);
+      n.row = parents.length ? Math.max(...parents.map(p => p.row)) + 1 : 0;
+      placed.set(n.id,n); pending.delete(n.id);
+    }
+  }
+  const rows = new Map<number, ExecutionNode[]>();
+  for (const n of nodes) rows.set(n.row,[...(rows.get(n.row) ?? []),n]);
+  for (const row of rows.values()) row.forEach((n,i) => { n.lane = row.length === 1 ? 0 : i+1; });
+  return {nodes, edges};
 }
 
 export function chronologicalTrace(detail: RunDetailView): ExecutionNode[] {
   // SQLite sequence is authoritative; timestamps can tie or move backwards.
-  return executionTrace(detail, true).nodes;
+  return executionTrace(detail).nodes;
 }
 
 export function activityTrace(detail: RunDetailView): ExecutionNode[] {

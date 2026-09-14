@@ -1,3 +1,4 @@
+import { questStatus, briefText } from '@shared/hero-identity';
 import { ExecutionJournal } from '@/components/orch/ExecutionJournal';
 import { GuildTeam } from '@/components/orch/GuildTeam';
 import { GuildBanner, HeroPortrait } from '@/components/orch/HeroPortrait';
@@ -1015,7 +1016,8 @@ export function WorkspacePage({
 
       <main className="guild-workspace-main">
         <section className="guild-mission-board guild-paper">
-        <div className="guild-project-title"><h2>{workspace.name}</h2><p>Sua ideia. Uma equipe. Um caminho.</p></div>
+        <div className="guild-project-title"><div><small>{workspace.name}</small><h2 title={historyDetail?.run.objective ?? run?.objective}>{briefText(historyDetail?.run.objective ?? run?.objective ?? 'Qual será a próxima missão?', 115)}</h2></div><span className="guild-mission-status">{questStatus(historyDetail?.run.status ?? run?.status ?? 'idle')}</span></div>
+        <details className="guild-project-tools"><summary>Projeto e Git</summary>
         <TopContextBar
           state={runState}
           iteration={iteration}
@@ -1044,11 +1046,11 @@ export function WorkspacePage({
           onPullRequest={() => setGitDialog("pr")}
         />
 
+        </details>
         <nav className="run-view-tabs" aria-label="Visualização da execução">
-          <button aria-pressed={view === 'worktree'} onClick={()=>setView('worktree')}>Worktree</button>
+          <button aria-pressed={view === 'worktree'} onClick={()=>setView('worktree')}>Working Tree</button>
           <button aria-pressed={view === 'timeline'} onClick={()=>setView('timeline')}>Raciocínio em linha</button>
-          <button onClick={()=>setEvidenceOpen(true)}>Arquivos</button>
-          <button onClick={()=>setDiffOpen(true)}>Diff</button>
+          <button onClick={()=>setEvidenceOpen(true)}>Arquivos e evidências</button>
           <select aria-label="Execução no histórico" value={historyDetail?.run.id ?? ''} onChange={e=>void openHistoricalRun(e.target.value)}><option value="">Execução atual</option>{historyRuns.map(r=><option key={r.id} value={r.id}>{r.status} · {r.objective.slice(0,55)}</option>)}</select><span>{historyDetail?.run.objective ?? run?.objective}</span>
         </nav>
         {(historyDetail??runDetail)?.run.id&&<AgentCallDetails runId={(historyDetail??runDetail)!.run.id} updatedAt={JSON.stringify(historyDetail??runDetail)} onConfirmed={historyDetail?undefined:()=>void loadMessages()}/>}

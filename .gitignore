@@ -47,3 +47,6 @@ out/
 # Local noise that is never part of the product
 *.log
 coverage/
+
+# Local visual QA evidence and controlled execution fixtures
+/artifacts/

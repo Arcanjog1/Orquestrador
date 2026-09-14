@@ -1153,8 +1153,7 @@ export class OrchestrationService {
     /** Consecutive iterations that asked for unknown ids and proved nothing. */
     let barrenVerifyRounds = 0;
     /** The evidence as the previous iteration left it, and how long it has stood. */
-    let previousFingerprint: string | null = null;
-    let stagnantRounds = 0;
+    const seenEvidence = new Set<string>();
     const diagnoses = new Set<string>();
     const batchSignatures = new Set<string>();
     let unresolvedDelegations = false;
@@ -1368,11 +1367,11 @@ export class OrchestrationService {
       if(decision.action==='delegate') {
         const measured=collector ? await collector.collectEvidence(baseline) : github ? await this.collectGitHubEvidence(github,signal) : null;
         const context={tree:measured ? [measured.commit,measured.statusShort,createHash('sha256').update(measured.diff).digest('hex')] : null,
-          reads:carriedReads.map(r=>[r.request.path,r.sha256,r.ok]),
+          reads:carriedReads.map(r=>[r.request.path,r.request.offsetBytes ?? 0,r.sha256,r.ok]),
           criteria:ledger.pending().map(c=>[c.text,c.status]),
           results:this.database.runs.events(runId).filter(e=>e.type==='AGENT_RESULT'&&e.role!=='ORCHESTRATOR').map(e=>[e.role,e.data.workerId,e.status,equivalentAnswer(String(e.data.fullOutput ?? e.summary))]),
           verifications:this.database.runs.verifications(runId).map(v=>[v.command,v.exit_code,v.passed,v.refused])};
-        const mission=decision.delegations?.map(t=>[t.workerId,t.task,t.requiresTools,t.dependsOn.length,t.mission]) ?? [decision.workerId ?? team[0]?.id,decision.task,decision.requiresTools,decision.mission];
+        const mission=decision.delegations?.map(t=>[t.workerId,t.task,t.requiresTools,t.dependsOn,t.mission]) ?? [decision.workerId ?? team[0]?.id,decision.task,decision.requiresTools,decision.mission];
         if(!delegationGuard.admit(mission,context)) {
           const reason='STAGNATION DETECTED: missão, contexto e resultados equivalentes. A delegação redundante foi impedida. É necessário mudar a estratégia ou fornecer uma evidência nova.';
           this.step(runId,iteration,'no-progress','stopped',reason);
@@ -1413,9 +1412,16 @@ export class OrchestrationService {
       if (decision.action === 'delegate' && decision.delegations?.length) {
         const tasks = decision.delegations;
         const batchEvidence=collector ? await collector.collectEvidence(baseline) : null;
-        const signature=progressFingerprint({tasks:tasks.map(t=>[t.workerId,t.task,t.requiresTools,t.mission]),head:github?.headCommit,tree:batchEvidence ? [batchEvidence.commit,batchEvidence.diff,batchEvidence.statusShort] : null,reads:carriedReads.map(r=>[r.request.path,r.sha256,r.request.offsetBytes])});
+        // A batch's own first report is not permission to rerun the same work.
+        // Preserve exact task literals and dependency topology, and admit new
+        // measured verification or acceptance progress even on an unchanged tree.
+        const signature=progressFingerprint({tasks:tasks.map(t=>[t.workerId,t.task,t.requiresTools,t.dependsOn,t.mission]),head:github?.headCommit,
+          tree:batchEvidence ? [batchEvidence.commit,batchEvidence.diff,batchEvidence.statusShort] : null,
+          reads:carriedReads.map(r=>[r.request.path,r.sha256,r.request.offsetBytes]),
+          criteria:ledger.pending().map(c=>[c.text,c.status]),
+          verification:this.database.runs.verifications(runId).map(v=>[v.command,v.exit_code,v.passed,v.refused])});
         if(batchSignatures.has(signature)) {
-          const reason='Sem progresso: o mesmo DAG foi solicitado novamente com os mesmos arquivos e commit. Revise a estratégia antes de repetir.';
+          const reason='Sem progresso: a mesma equipe recebeu as mesmas tarefas e dependências, sem mudança nos arquivos, verificações ou critérios. Revise a estratégia ou forneça a evidência que falta.';
           this.step(runId,iteration,'progress','stagnant',reason);
           this.database.runs.setStatus(runId,'NEEDS_HUMAN',reason);this.progress(runId,sessionId,'needs-human',reason,'NEEDS_HUMAN');return;
         }
@@ -2243,12 +2249,12 @@ export class OrchestrationService {
         fileChecks,
         pending: ledger.pending().map((criterion) => `${criterion.status}:${criterion.text}`),
       });
-      stagnantRounds = fingerprint === previousFingerprint ? stagnantRounds + 1 : 0;
-      previousFingerprint = fingerprint;
-      if (stagnantRounds >= 1) {
+      const repeatedEvidence = seenEvidence.has(fingerprint);
+      seenEvidence.add(fingerprint);
+      if (repeatedEvidence) {
         const pending = ledger.pending().map((criterion) => criterion.text);
         const reason =
-          'Duas iterações seguidas não produziram nenhuma evidência nova: o workspace, as ' +
+          'As tentativas não produziram nenhuma evidência nova e voltaram a um estado já avaliado: o workspace, as ' +
           'verificações e os critérios estão exatamente como estavam. Repetir a mesma ' +
           'estratégia não muda isso, e um modelo mais forte também não. ' +
           (pending.length > 0
@@ -4429,8 +4435,8 @@ export class OrchestrationService {
     const prior=this.database.chat.listMessages(sessionId).filter(m=>m.run_id===runId);
     const final=prior.find(m=>{try{return JSON.parse(m.payload ?? '{}').kind==='final';}catch{return false;}});
     if(final && author==='orchestrator') return toMessageView(final);
-    const duplicate=prior.filter(m=>m.author===author).at(-1);
-    if(duplicate && equivalentAnswer(duplicate.body)===equivalentAnswer(body))return toMessageView(duplicate);
+    const duplicate=prior.findLast(m=>m.author===author && m.body.trim()===body.trim());
+    if(duplicate)return toMessageView(duplicate);
     const record = this.database.chat.addMessage({
       sessionId,
       runId,

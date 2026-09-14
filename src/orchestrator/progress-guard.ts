@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { equivalentAnswer } from './rejected-progress.js';
 
 /** Sets of facts: repeating a read, test, invocation or timestamp is not progress. */
 export function progressFingerprint(value: unknown): string {
@@ -22,8 +21,9 @@ export function progressFingerprint(value: unknown): string {
 export class DelegationProgressGuard {
   private readonly seen = new Set<string>();
   admit(mission: unknown, context: unknown): boolean {
-    const publicMission=JSON.parse(JSON.stringify(mission,(_k,v)=>typeof v==='string'?equivalentAnswer(v):v));
-    const key=progressFingerprint({mission:publicMission,context});
+    // Instructions can contain case-sensitive paths, operators and exact bytes.
+    // Presentation-level answer equivalence is unsafe for executable missions.
+    const key=progressFingerprint({mission,context});
     if(this.seen.has(key)) return false;
     this.seen.add(key);
     return true;

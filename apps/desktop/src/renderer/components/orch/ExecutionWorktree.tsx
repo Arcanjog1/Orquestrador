@@ -1,3 +1,4 @@
+import { missionLayout, MISSION_NODE_WIDTH, MISSION_NODE_HEIGHT } from '@shared/mission-layout';
 import { briefText } from '@shared/hero-identity';
 import { HeroPortrait } from './HeroPortrait';
 import { heroState, questStatus } from '@shared/hero-identity';
@@ -20,10 +21,7 @@ import { executionGraph, type ExecutionNode } from "@shared/execution-graph";
 import type { ChatMessageView, RunDetailView } from "@shared/ipc-contract";
 import { isRunOver } from "@shared/activity";
 
-const WIDTH = 170,
-  HEIGHT = 108,
-  GAP = 212,
-  ROW = 160;
+const WIDTH = MISSION_NODE_WIDTH, HEIGHT = MISSION_NODE_HEIGHT;
 export function ExecutionWorktree({
   detail,
   messages,
@@ -76,30 +74,11 @@ export function ExecutionWorktree({
     setOffset({ x: 40, y: 90 });
   }, [detail.run.id]);
   const layout = useMemo(() => {
-    const hiddenRows = new Set(
-      graph.nodes
-        .filter(
-          (n) =>
-            collapsed.has(n.iteration) &&
-            n.kind !== "orchestrator" &&
-            n.kind !== "done" &&
-            n.kind !== "human" &&
-            n.kind !== "user",
-        )
-        .map((n) => n.row),
-    );
-    const rows = [...new Set(graph.nodes.map((n) => n.row))]
-      .filter((r) => !hiddenRows.has(r))
-      .sort((a, b) => a - b);
-    const rowMap = new Map(rows.map((r, i) => [r, i]));
-    const laneCount = Math.max(1, ...graph.nodes.map(n => n.lane));
-    return graph.nodes
-      .filter((n) => !hiddenRows.has(n.row))
-      .map((n) => ({ ...n, row: rowMap.get(n.row) ?? n.row,
-        x: (rowMap.get(n.row) ?? n.row) * GAP,
-        y: (n.lane === 0 ? (laneCount - 1) / 2 : n.lane - 1) * ROW,
-      }));
-  }, [graph, collapsed]);
+    const nodes = graph.nodes.filter(n => !collapsed.has(n.iteration) ||
+      ['orchestrator','done','human','user'].includes(n.kind));
+    const ranks = new Set(nodes.map(n=>n.row)).size;
+    return missionLayout(nodes, ranks <= 4 ? Math.max(1,ranks) : viewport.width >= 850 ? 4 : 3);
+  }, [graph, collapsed, viewport.width]);
   const byId = useMemo(() => new Map(layout.map((n) => [n.id, n])), [layout]);
   const displayedEdges = useMemo(() => {
     const edges: typeof graph.edges = [];
@@ -147,18 +126,18 @@ export function ExecutionWorktree({
         0.15,
         Math.min(
           (viewport.width - 60) / width,
-          (viewport.height - 130) / height,
+          (viewport.height - 84) / height,
         ),
       ),
     );
     setZoom(next);
-    setOffset({ x: (viewport.width - width * next) / 2, y: 80 + (viewport.height - 130 - height * next) / 2 });
+    setOffset({ x: (viewport.width - width * next) / 2, y: 52 + (viewport.height - 84 - height * next) / 2 });
   }
   useEffect(() => {
     if (viewport.width > 0 && viewport.height > 0 && !viewTouched.current) {
       fit();
     }
-  }, [detail.run.id, viewport.width, viewport.height]);
+  }, [detail.run.id, viewport.width, viewport.height, layout]);
   function scale(factor: number) {
     viewTouched.current = true;
     const next = Math.min(2, Math.max(0.15, zoom * factor));
@@ -203,20 +182,17 @@ export function ExecutionWorktree({
       )
       .filter(Boolean);
   return (
-    <div className="execution-worktree" data-testid="execution-worktree" data-orientation="horizontal" data-compact={zoom < 0.8}>
+    <div className="execution-worktree" data-testid="execution-worktree" data-orientation="trail" data-compact={zoom < 0.8}>
       <div className="worktree-summary">
         <span>
           <GitBranch size={14} /> Mapa da missão · {questStatus(detail.run.status)}
         </span>
-        <span>
-          {participants.size} agentes · {detail.invocations.length} invocações
-        </span>
-        <span>
-          {detail.orchestrationMetrics
-            ? `${detail.orchestrationMetrics.deterministicSteps} etapas automáticas`
-            : `${detail.verifications.filter((v) => v.passed).length}/${detail.verifications.length} verificações`}
-        </span>
-        <span>{detail.baseline.branch ?? "Sem branch local"}</span>
+        <span>{participants.size} agentes na missão</span>
+        <details className="worktree-metrics"><summary>Detalhes da execução</summary>
+          <p>{detail.invocations.length} invocações · {detail.orchestrationMetrics?.deterministicSteps ?? 0} etapas automáticas</p>
+          <p>{detail.baseline.branch ?? 'Sem branch local'}</p>
+          <p>{detail.verifications.filter(v => v.passed).length}/{detail.verifications.length} verificações aprovadas</p>
+        </details>
       </div>
       {['FAILED', 'BLOCKED', 'NEEDS_HUMAN', 'PAUSED'].includes(detail.run.status) && detail.run.summary && <div className="worktree-attention" role="status">
         <span>{detail.run.summary}</span><button onClick={() => select(`end:${detail.run.id}`)}>Ver detalhes</button>
@@ -226,7 +202,7 @@ export function ExecutionWorktree({
           ref={surface}
           className="worktree-canvas"
           tabIndex={0}
-          aria-label="Mapa da execução, da esquerda para a direita. Arraste para navegar; use mais e menos para zoom."
+          aria-label="Mapa da execução em trilhas. Siga as setas; arraste para navegar e use mais e menos para zoom."
           data-testid="worktree-canvas"
           onPointerDown={(e) => {
             if ((e.target as HTMLElement).closest("button")) return;
@@ -346,18 +322,28 @@ export function ExecutionWorktree({
               )}
               aria-hidden="true"
             >
+              <defs><marker id="mission-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" className="mission-arrow"/></marker></defs>
               {displayedEdges.map((edge) => {
                 const from = byId.get(edge.from),
                   to = byId.get(edge.to);
                 if (!from || !to) return null;
-                const x1 = from.x + WIDTH,
-                  y1 = from.y + HEIGHT / 2,
-                  x2 = to.x,
-                  y2 = to.y + HEIGHT / 2;
+                const down = from.x === to.x && to.y > from.y;
+                const forward = to.x > from.x;
+                const x1 = down ? from.x+WIDTH/2 : from.x+(forward ? WIDTH : 0);
+                const x2 = down ? to.x+WIDTH/2 : to.x+(forward ? 0 : WIDTH);
+                const y1 = from.y+(down ? HEIGHT : HEIGHT/2);
+                const y2 = to.y+(down ? 0 : HEIGHT/2);
+                const bend = forward ? 30 : -30;
+                const path = down ? `M${x1},${y1} C${x1},${y1+35} ${x2},${y2-35} ${x2},${y2}` :
+                  `M${x1},${y1} C${x1+bend},${y1} ${x2-bend},${y2} ${x2},${y2}`;
+                const edgeState = ['failed','blocked','rejected','cancelled','stopped'].includes(to.status.toLowerCase()) ? 'blocked' :
+                  ['running','started'].includes(to.status.toLowerCase()) ? 'active' : 'complete';
                 return (
                   <path
                     key={edge.id}
-                    d={`M${x1},${y1} C${x1 + 24},${y1} ${x2 - 24},${y2} ${x2},${y2}`}
+                    d={path}
+                    data-state={edgeState}
+                    markerEnd="url(#mission-arrow)"
                     className={`edge-${edge.kind}`}
                   />
                 );
@@ -383,7 +369,7 @@ export function ExecutionWorktree({
                   aria-label={`${node.label}: ${node.status}. Ver resposta completa`}
                 >
                   <span className="node-heading">
-                    {(node.invocation || node.kind === "orchestrator") && <HeroPortrait size={32} role={node.invocation?.role ?? "ORCHESTRATOR"} state={heroState(node.status)} />}
+                    {(node.invocation || node.kind === "orchestrator") && <HeroPortrait variant="sprite" size={42} role={node.invocation?.role ?? "ORCHESTRATOR"} state={heroState(node.status)} />}
                     <span
                       className={
                         !terminal &&
@@ -435,8 +421,7 @@ export function ExecutionWorktree({
             ))}
           </div>
           <div className="worktree-legend">
-            ● Orquestrador <span>● Equipe</span>
-            <span>● Evidência</span> · Esquerda → direita · Arraste para navegar
+            Siga a trilha <span>→ Dependência</span><span>⑂ Delegação</span> · Arraste para explorar
           </div>
         </div>
         {selectedNode && (
@@ -454,7 +439,7 @@ export function ExecutionWorktree({
             </div>
             <p className="detail-status">
               {selectedNode.status === "done" && <Check size={15} />}{" "}
-              {selectedNode.status}
+              {questStatus(selectedNode.status)}
             </p>
             {selectedNode.invocation && (
               <dl>

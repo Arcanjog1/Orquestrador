@@ -15,7 +15,7 @@ export interface RejectedRound {
  * before the ordinary delegation progress detector. Timestamps/call counts
  * and duplicate reads are not new information. */
 export class RejectedProgressGuard {
-  private previous: string | null = null;
+  private readonly seen = new Set<string>();
   observe(round:RejectedRound):boolean {
     const e=round.evidence;
     const fingerprint=createHash('sha256').update(JSON.stringify({
@@ -26,8 +26,9 @@ export class RejectedProgressGuard {
       commands:unique(round.gate.verification.map(v=>[v.command,v.exitCode,v.stdout,v.stderr,v.refused??null,v.timedOut])),
       files:unique((round.gate.fileChecks??[]).map(c=>[c.request,c.passed,c.outcome,c.sha256,c.sizeBytes])),
     })).digest('hex');
-    const repeated=fingerprint===this.previous;
-    this.previous=fingerprint;
+    // A → B → A is a cycle too. A new measured state still gets an attempt.
+    const repeated=this.seen.has(fingerprint);
+    this.seen.add(fingerprint);
     return repeated;
   }
 }

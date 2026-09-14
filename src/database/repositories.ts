@@ -1663,7 +1663,15 @@ export class RunRepository extends Repository {
     const passed=checks.filter(c=>c.exitCode===0&&!c.refused).length+files.filter(c=>c.passed).length;
     const pending=criteria.filter(c=>c.status!=='satisfied').map(c=>c.text);
     const trivial = events.find(e=>e.type==='PLAN_CREATED')?.data.complexityClass === 'TRIVIAL';
-    const summary=status==='CANCELLED' ? titles.CANCELLED! : trivial && status==='DONE' && files.length ? titles.DONE+'\n'+files.map(f=>`${f.request?.path ?? 'Arquivo'} · ${f.sizeBytes ?? '?'} bytes · validado`).join('\n')+'\nPendências: nenhuma.' : titles[status]+'\n'+traceSummary(answer,300)+(passed?'\nValidação: '+passed+' verificações aprovadas.':'')+(pending.length?'\nPendente: '+traceSummary(pending.join('; '),100):'');
+    const validationLine = passed ? `Validação: ${passed} verificações aprovadas.` : '';
+    const pendingLine = pending.length ? 'Pendente: '+traceSummary(pending.join('; '),75) : status==='DONE' ? 'Pendências: nenhuma.' : '';
+    const publicAnswer = trivial && status==='DONE' && files.length
+      ? files.map(f=>`${f.request?.path ?? 'Arquivo'} · ${f.sizeBytes ?? '?'} bytes · validado`).join('; ')
+      : answer;
+    // Reserve space for validation and blockers before shortening the answer.
+    const title = titles[status] ?? status;
+    const answerBudget = Math.max(40, 276-title.length-validationLine.length-pendingLine.length);
+    const summary = [title,traceSummary(publicAnswer.replace(/\s+/g,' '),answerBudget),validationLine,pendingLine].filter(Boolean).join('\n');
     const fullOutput=[titles[status],answer,'','Objetivo: '+run.objective,'',...reports.map(e=>e.summary),...evidence.map(e=>e.summary),...reviews.map(e=>e.summary),'','Critérios:',...criteria.map(c=>c.status+': '+c.text),'','Resultados completos:',...reports.filter(e=>e.role!=='ORCHESTRATOR').map(e=>String(e.data.fullOutput ?? e.summary))].join('\n');
     // Cancellation may win a race against a just-published terminal result.
     this.db.run("DELETE FROM execution_events WHERE run_id=? AND type='FINAL_RESPONSE'",[runId]);

@@ -48,7 +48,7 @@ services.database.runs.setStatus(runId,'RUNNING');
 services.database.chat.addMessage({sessionId:session.id,runId,author:'user',body:'Revisar o mapa de execução · demonstração'});
 for(let i=0;i<3;i++) services.database.runs.recordInvocation({runId,iteration:1,agentId:null,accountId:null,role:i?'CODING_WORKER':'ORCHESTRATOR',workerId:i?`worker-${i}`:null,task:i?'Revisar interface e registrar evidências':null,outcome:'completed',exitCode:0,durationMs:1000,startedAt:new Date(Date.now()-5000+i*1000).toISOString()});
 services.database.runs.addStep({runId,iteration:1,phase:'evidence',status:'read',summary:'Evidência de demonstração — sem chamada a provedores'});
-services.database.chat.addMessage({sessionId:session.id,runId,author:'orchestrator',body:'Análise de demonstração concluída.\n'+ 'Os agentes verificaram a organização visual e as conexões entre as etapas. '.repeat(5)+'\nEVIDENCIA_COMPLETA_PRESERVADA'});
+services.database.chat.addMessage({sessionId:session.id,runId,author:'orchestrator',body:'Análise de demonstração concluída.\n'+ ['A organização visual e as conexões entre as etapas foram examinadas na demonstração.', 'O mapa mantém caminhos separados para as duas chamadas independentes registradas.', 'Os detalhes de cada participação continuam acessíveis no painel de respostas da equipe.', 'A leitura do diário apresenta os mesmos registros em ordem cronológica.', 'As verificações visuais também cobrem os sete personagens, os temas e o movimento reduzido.'].join(' ')+'\nEVIDENCIA_COMPLETA_PRESERVADA'});
 services.database.runs.setStatus(runId,'DONE','Jornada de demonstração concluída. Nenhum provedor foi chamado.');
 }
 const account = services.accounts.create('Overflow CLI','anthropic');
@@ -139,11 +139,11 @@ try {
     assert.equal(await evaluate('[...document.querySelectorAll(".node-summary")].every(e=>e.textContent.length<=100)'),true,'concise graph summaries');
     checks.push('horizontal topology and separate parallel tracks with brief summaries');
     assert.equal(await evaluate('document.querySelectorAll(".guild-team-card").length'),4,'four configured project members');
-    assert.equal(await evaluate('document.querySelectorAll(".mission-record").length'),3,'configured members do not imply run participation');
+    assert.equal(await evaluate('document.querySelectorAll(".team-responses .team-response").length'),3,'configured members do not imply run participation');
     const composition=await evaluate('(()=>{const r=s=>document.querySelector(s).getBoundingClientRect();return {map:r(".guild-mission-board").toJSON(),team:r(".guild-team").toJSON(),chat:r(".guild-conversation").toJSON(),responses:r(".guild-activity-dock").toJSON()}})()');
     assert.ok(composition.team.x>composition.map.x && composition.chat.y>=composition.map.bottom && composition.responses.y>=composition.team.bottom,'map and team above conversation and responses');
     checks.push('reference composition separates configured team from recorded participants');
-    assert.equal(await evaluate('document.querySelectorAll(".mission-record").length'),3,'exactly the three recorded invocations');
+    assert.equal(await evaluate('document.querySelectorAll(".team-responses .team-response").length'),3,'exactly the three recorded invocations');
     const before=await evaluate('document.querySelector(".worktree-world").style.transform');
     await click('[aria-label="Recolher painel de atividade"]');
     await waitFor('!document.querySelector("[data-testid=mission-log]")');
@@ -151,16 +151,20 @@ try {
     await click('[aria-label="Abrir painel de atividade"]');
     await waitFor('!!document.querySelector("[data-testid=mission-log]")');
     checks.push('mission log shows only actual invocations; toggling it preserves graph viewport');
-    await click('.mission-record');await waitFor('!!document.querySelector("[role=dialog]")');
-    await saveScreenshot('mission-result');await click('[role="dialog"] > button:last-child');await waitFor('!document.querySelector("[role=dialog]")');
-    checks.push('mission result opens persisted run details');
+    await reveal('.team-responses .team-response button');await click('.team-responses .team-response button');
+    assert.equal(await evaluate('document.querySelector(".team-responses .team-response button").getAttribute("aria-expanded")'), 'true');
+    await saveScreenshot('mission-result');await click('.team-responses .team-response button');
+    checks.push('team response expands its own persisted result inline');
   }
   await click('.run-view-tabs button:nth-child(2)');
   await waitFor('document.body.innerText.includes("Activity") || document.body.innerText.includes("Registro da missão")');
   await saveScreenshot('activity');
+  const journalSources=await evaluate('[...document.querySelectorAll(".execution-journal [data-source-ids]")].flatMap(e=>e.dataset.sourceIds.split(","))');
+  assert.deepEqual(journalSources.sort(),treeSources.sort(),'map and journal contain the same complete source set');
+  checks.push('identical persisted source IDs in map and journal');
   if(controlled) {
     await evaluate("[...document.querySelectorAll('.execution-journal [data-trace-id]')].find(e=>e.dataset.traceId.endsWith(':plan')).scrollIntoView({block:'start'});true");await delay(200);await saveScreenshot('linear-plan');
-    assert.equal(await evaluate('document.querySelectorAll(".execution-journal [data-trace-id]").length'),6,'trivial mission has six journal entries');
+    assert.equal(await evaluate('document.querySelectorAll(".execution-journal [data-trace-id]").length'),5,'trivial mission has five shared milestones');
     const visibleSources=await evaluate('[...document.querySelectorAll(".execution-journal [data-source-ids]")].flatMap(e=>e.dataset.sourceIds.split(","))');
     const saved=JSON.parse(readFileSync(join(output,'controlled-run.json'),'utf8')).detail.executionEvents;
     assert.ok(visibleSources.every(id=>saved.some(e=>e.id===id)),'journal uses only persisted event IDs');
@@ -213,6 +217,16 @@ try {
   await delay(200);await saveScreenshot('agents-1024');
   assert.equal(await evaluate('document.documentElement.scrollWidth > innerWidth'),false,'1024px layout');
   checks.push('light theme and 1024px layout');
+  await evaluate("location.hash='#/';true");
+  await waitFor('!!document.querySelector(".guild-workspace-main")');
+  await waitFor('!!document.querySelector(".guild-team")');
+  assert.notEqual(await evaluate('getComputedStyle(document.querySelector(".guild-team")).display'),'none','team remains reachable at 1024px');
+  assert.notEqual(await evaluate('getComputedStyle(document.querySelector(".guild-activity-dock")).display'),'none','responses remain reachable at 1024px');
+  assert.equal(await evaluate('document.documentElement.scrollWidth > innerWidth'),false,'workspace at 1024px has no page overflow');
+  await delay(400);await saveScreenshot('workspace-1024');
+  await reveal('.guild-team');await delay(200);await saveScreenshot('team-1024');
+  await reveal('.guild-activity-dock');await delay(200);await saveScreenshot('responses-1024');
+  checks.push('1024px workspace retains accessible team and responses');
   console.log('Visual evidence saved to '+output);
 } catch(error) {console.error(error);process.exitCode=1;if(socket?.readyState===1)try{await saveScreenshot('failure');}catch{}}
 finally {
