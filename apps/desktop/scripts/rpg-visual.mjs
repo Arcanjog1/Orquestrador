@@ -123,6 +123,10 @@ try {
   await send('Emulation.setDeviceMetricsOverride',{width:1440,height:960,deviceScaleFactor:1,mobile:false});
   await delay(400);await click('button[aria-label="Ajustar à tela"]');
   await delay(400);await saveScreenshot('worktree');
+  await send('Emulation.setDeviceMetricsOverride',{width:1672,height:941,deviceScaleFactor:1,mobile:false});
+  await delay(400);await click('button[aria-label="Ajustar à tela"]');await delay(400);await saveScreenshot('reference-size');
+  await send('Emulation.setDeviceMetricsOverride',{width:1440,height:960,deviceScaleFactor:1,mobile:false});
+  await delay(400);await click('button[aria-label="Ajustar à tela"]');
   if(controlled) {
     assert.equal(await evaluate('document.querySelectorAll(".execution-node").length'),5,'trivial mission has five map nodes');
     assert.match(await evaluate('document.querySelector(".worktree-summary").textContent'),/2 etapas automáticas/,'system steps are distinct from agent invocations');
