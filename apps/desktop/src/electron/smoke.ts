@@ -186,7 +186,7 @@ export async function runSmokeChecks(
     await waitForBody(window,/Analisar arquitetura/,20000);
     await window.webContents.executeJavaScript('document.querySelector('+JSON.stringify('[data-testid="open-session-'+session.id+'"]')+').click()');
     await waitForBody(window,/Worktree/,20000);
-    for(let i=0;i<100;i++) { if(await window.webContents.executeJavaScript('!!document.querySelector(\'[data-testid="execution-worktree"]\')'))break;await new Promise(r=>setTimeout(r,100)); }
+    for(let i=0;i<100;i++) { if(await window.webContents.executeJavaScript('!!document.querySelector(\'[data-node-id]\')'))break;await new Promise(r=>setTimeout(r,100)); }
     const before=await window.webContents.executeJavaScript('JSON.stringify([...document.querySelectorAll("[data-node-id]")].map(n=>n.dataset.nodeId))');
     if(before==='[]') { if(screenshot) await save(window,screenshot.replace(/\.png$/,'-graph-failure.png')); throw new Error('Execution graph did not render: '+String(await window.webContents.executeJavaScript('document.body.innerText')).slice(0,1200)); }
     await window.webContents.executeJavaScript('document.querySelector(\'[aria-label="Ajustar à tela"]\').click()');

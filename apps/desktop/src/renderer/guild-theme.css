@@ -285,3 +285,7 @@ button:not(:disabled):active { filter: brightness(.95); }
 
 /* Keep the full-response action visible in the compact response dock. */
 .guild-activity-dock .trace-final>p { display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden; }
+
+.guild-activity-dock .trace-card { position:relative; }
+.guild-activity-dock .trace-card>header { padding-right:78px; }
+.guild-activity-dock .trace-card>button { position:absolute;top:10px;right:10px;margin:0;padding:3px 0; }
