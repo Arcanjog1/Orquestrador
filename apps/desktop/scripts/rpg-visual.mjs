@@ -99,7 +99,7 @@ const box=sel=>evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(s
 const mouse=async (type,p,clickCount=1)=>send('Input.dispatchMouseEvent',{type,...p,button:'left',clickCount});
 const click=async sel=>{const p=await box(sel);await mouse('mouseMoved',p);await mouse('mousePressed',p);await mouse('mouseReleased',p);await delay(200);};
 const key=async name=>{const codes={Escape:27,Enter:13,' ':32};await send('Input.dispatchKeyEvent',{type:'keyDown',key:name,windowsVirtualKeyCode:codes[name],code:name===' '?'Space':name});await send('Input.dispatchKeyEvent',{type:'keyUp',key:name,windowsVirtualKeyCode:codes[name],code:name===' '?'Space':name});await delay(200);};
-const reveal=sel=>evaluate(`document.querySelector(${JSON.stringify(sel)}).scrollIntoView({block:'center'});true`);
+const reveal=sel=>evaluate(`document.querySelector(${JSON.stringify(sel)}).scrollIntoView({block:'center',behavior:'instant'});true`);
 const saveScreenshot=async name=>writeFileSync(join(output,name+'.png'),Buffer.from((await send('Page.captureScreenshot')).data,'base64'));
 try {
   let page;

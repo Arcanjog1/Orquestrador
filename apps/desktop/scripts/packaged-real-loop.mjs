@@ -25,12 +25,14 @@ mkdirSync(join(home,'chromium'));
 copyFileSync(join(resolve(option('--source-chromium')),'Local State'),join(home,'chromium','Local State'));
 const original=new DatabaseSync(join(source,'data','orchestrator.db'),{readOnly:true});
 await backup(original,join(home,'data','orchestrator.db'));original.close();
+const credentialCopies=[];
+const digest=file=>createHash('sha256').update(readFileSync(file)).digest('hex');
 const db=new DatabaseSync(join(home,'data','orchestrator.db'));
 for(const account of db.prepare('SELECT id, profile_directory FROM accounts').all()) {
   const profile=join(home,'profiles',account.id);mkdirSync(profile,{recursive:true});
   for(const name of ['auth.json','.credentials.json','.claude.json']) {
     const file=join(account.profile_directory,name);
-    if(existsSync(file))copyFileSync(file,join(profile,name));
+    if(existsSync(file)){copyFileSync(file,join(profile,name));if(['auth.json','.credentials.json'].includes(name))credentialCopies.push({source:file,copy:join(profile,name),original:digest(file)});}
   }
   db.prepare('UPDATE accounts SET profile_directory=? WHERE id=?').run(profile,account.id);
 }
@@ -46,7 +48,7 @@ const {appPaths}=await import('../dist/src/runtime/paths.js');
 const services=new AppServices({paths:appPaths({...process.env,AI_ORCHESTRATOR_HOME:home})});
 const accounts=services.accounts.list();
 const codex=accounts.find(a=>a.provider==='openai'&&a.state==='connected');
-const claude=accounts.find(a=>a.provider==='anthropic'&&a.state==='connected');
+const claude=accounts.find(a=>a.provider==='anthropic'&&a.state==='connected'&&(!option('--worker-account')||a.id===option('--worker-account')));
 assert.ok(codex&&claude,'Both real provider accounts are connected');
 const workspace=services.workspaces.create({name:'Validação real · Codex e Claude',localPath:scratch});
 const programmer=services.agents.create({name:'Programador · validação',role:'CODING_WORKER',provider:'anthropic',accountId:claude.id,model:null,reasoning:null,maxCapability:null,maxReasoning:null,enabled:true});
@@ -64,7 +66,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));let socket,serial=0;const pendi
 const send=(method,params={})=>new Promise((res,rej)=>{const id=++serial;const timer=setTimeout(()=>{pending.delete(id);rej(Error('CDP timeout: '+method));},30000);pending.set(id,{res,rej,timer});socket.send(JSON.stringify({id,method,params}));});
 const evaluate=async expression=>{const r=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value;};
 const waitFor=async expression=>{for(let i=0;i<150;i++){if(await evaluate(expression))return;await delay(100);}throw Error('Not found: '+expression+' '+await evaluate('document.body.innerText.slice(0,1000)'));};
-const click=async selector=>{const p=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('Missing element');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);for(const type of ['mousePressed','mouseReleased'])await send('Input.dispatchMouseEvent',{type,...p,button:'left',clickCount:1});await delay(200);};
+const click=async selector=>{const p=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('Missing element');e.scrollIntoView({block:'center',behavior:'instant'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);for(const type of ['mousePressed','mouseReleased'])await send('Input.dispatchMouseEvent',{type,...p,button:'left',clickCount:1});await delay(200);};
 const unwrap=value=>{if(value&&value.ok===false)throw Error(JSON.stringify(value));return value?.value??value;};
 let result={packaged:false,artifact:{binary,asarSha256:createHash('sha256').update(readFileSync(join(dirname(binary),'resources','app.asar'))).digest('hex'),commit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim()},scratch,objective:'Crie hello.txt com o conteúdo exato entre estes delimitadores, sem incluir os delimitadores: <conteudo>Olá AI Orchestrator</conteudo>. A verificação registrada neste workspace é o critério de aceitação completo: peça-a por id em toda iteração e, se ela falhar, delegue exatamente a correção que ela reportar. Só responda done quando ela passar.',checks:[]};
 const check=(name,fn)=>{fn();result.checks.push(name);console.log('PASS '+name);};
@@ -128,6 +130,9 @@ finally {
   writeFileSync(join(output,'real-loop.json'),JSON.stringify(result,null,2));
   if(socket?.readyState===1){try{await send('Browser.close');}catch{}}socket?.close();
   if(child.exitCode===null)child.kill();await delay(1500);
+  // OAuth refresh can rotate a token. Preserve a refreshed credential only
+  // when its source still matches the original copy (never overwrite a new login).
+  for(const c of credentialCopies)if(existsSync(c.copy)&&existsSync(c.source)&&digest(c.source)===c.original&&digest(c.copy)!==c.original)copyFileSync(c.copy,c.source);
   // The exact generated directory is checked before recursive deletion.
   const rel=relative(resolve(tmpdir()),resolve(home));
   assert.ok(!isAbsolute(rel)&&!rel.startsWith('..')&&rel.startsWith('orchestrator-final-live-'));
